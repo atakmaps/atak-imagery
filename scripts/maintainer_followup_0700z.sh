@@ -94,9 +94,10 @@ echo "=== Unpack and install from Downloads ==="
 cd "${HOME}/Downloads"
 unzip -o -q "${ZIP_BASENAME}"
 cd atak-imagery
-chmod +x install_linux.sh
+chmod +x install_linux.sh scripts/install_linux.sh
 export ATAK_INSTALL_KEEP_SOURCE=1
-./install_linux.sh
+# Root install_linux.sh relaunches a GUI terminal when TERM=dumb (breaks automation).
+bash scripts/install_linux.sh
 
 echo ""
 echo "======== DONE $(date -u -Iseconds) ========"
