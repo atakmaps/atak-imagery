@@ -30,11 +30,18 @@ mkdir -p scripts/data/tile_plans/v1
 echo "=== Remote: list Arkansas caches ==="
 ssh -o BatchMode=yes -o ConnectTimeout=30 "$SSH_DST" "ls -la ${REMOTE_V1}/Arkansas_z*.tiles.gz 2>/dev/null || true"
 
-echo "=== Rsync Arkansas caches from server ==="
-rsync -avz -e "ssh -o BatchMode=yes -o ConnectTimeout=120" \
-  --include='Arkansas_z*.tiles.gz' --exclude='*' \
-  "${SSH_DST}:${REMOTE_V1}/" \
-  scripts/data/tile_plans/v1/
+echo "=== Copy Arkansas caches from server ==="
+if command -v rsync >/dev/null 2>&1; then
+  rsync -avz -e "ssh -o BatchMode=yes -o ConnectTimeout=120" \
+    --include='Arkansas_z*.tiles.gz' --exclude='*' \
+    "${SSH_DST}:${REMOTE_V1}/" \
+    scripts/data/tile_plans/v1/
+else
+  echo "rsync not found; using scp (OpenSSH remote glob)."
+  scp -o BatchMode=yes -o ConnectTimeout=120 \
+    "${SSH_DST}:${REMOTE_V1}"/Arkansas_z*.tiles.gz \
+    scripts/data/tile_plans/v1/
+fi
 
 echo "=== Verify caches (GeoJSON CRC must match) ==="
 set +e
