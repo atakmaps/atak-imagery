@@ -96,6 +96,7 @@ from imagery_tile_selection import (  # noqa: E402
     build_tiles_for_state_result,
     compute_tiles_for_radius,
     lonlat_to_tile,
+    state_names_intersecting_geodesic_circle,
 )
 
 
@@ -1736,6 +1737,18 @@ def run_download(
                         out_path = output_root / state_name / str(z) / str(x) / f"{y}.jpg"
                         plan.append((state_name, z, x, y, out_path))
 
+        if radius_mode:
+            progress.set_status("Resolving states for DTED…")
+            dted_state_list = state_names_intersecting_geodesic_circle(
+                lat, lon, miles, load_states(bundled_state_geojson_path())
+            )
+            log(
+                "DTED: full state package(s) for states overlapping the radius "
+                f"(bounding-box match): {', '.join(dted_state_list) if dted_state_list else '(none)'}"
+            )
+        else:
+            dted_state_list = list(state_names)
+
         total = len(plan)
         log(f"Total tile candidates: {total}")
         progress.set_progress(0, total)
@@ -1904,12 +1917,14 @@ def run_download(
             log(f"WARNING: could not write session state list: {exc}")
 
         dted_note = ""
-        if not radius_mode:
-            try:
-                from atak_dted_downloader import mark_standalone_dted_skip, run_dted_inline_for_states
+        try:
+            from atak_dted_downloader import mark_standalone_dted_skip, run_dted_inline_for_states
 
+            if not dted_state_list:
+                log("DTED: no state packages match this download region; skipping.")
+            else:
                 dted_zip = run_dted_inline_for_states(
-                    state_names,
+                    dted_state_list,
                     upload_dir,
                     log_sink=log,
                     progress=progress,
@@ -1917,14 +1932,12 @@ def run_download(
                 if dted_zip is not None:
                     mark_standalone_dted_skip()
                     dted_note = f"\n\nDTED archive ready:\n{dted_zip.name}"
-            except ImportError as exc:
-                log(f"DTED: skipped (module not loadable: {exc}).")
-            except DownloadCancelled:
-                raise
-            except Exception as exc:
-                log(f"DTED: failed — {exc}")
-        else:
-            log("DTED: skipped for fixed-radius imagery download.")
+        except ImportError as exc:
+            log(f"DTED: skipped (module not loadable: {exc}).")
+        except DownloadCancelled:
+            raise
+        except Exception as exc:
+            log(f"DTED: failed — {exc}")
 
         progress.set_status("Complete")
         progress.completion_log_summary = "Download complete." + dted_note

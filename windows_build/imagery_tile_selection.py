@@ -18,7 +18,7 @@ import math
 import struct
 import zlib
 from pathlib import Path
-from typing import List, NamedTuple, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 # Miles beyond the GeoJSON boundary to keep imagery for (edge tiles + visibility).
 STATE_BOUNDARY_BUFFER_MILES = 3.0
@@ -282,6 +282,56 @@ def min_distance_point_to_rings_m(lon: float, lat: float, rings: List[List[Tuple
             lon2, lat2 = ring[(i + 1) % n]
             best = min(best, min_dist_point_to_segment_m(lon, lat, lon1, lat1, lon2, lat2))
     return best
+
+
+def _circle_lonlat_bbox(center_lat: float, center_lon: float, radius_m: float) -> Tuple[float, float, float, float]:
+    """West, south, east, north: axis-aligned box containing the circle (spherical approx)."""
+    dlat = radius_m / 111_320.0
+    cos_lat = max(0.2, math.cos(math.radians(center_lat)))
+    dlon = radius_m / (111_320.0 * cos_lat)
+    return (
+        center_lon - dlon,
+        center_lat - dlat,
+        center_lon + dlon,
+        center_lat + dlat,
+    )
+
+
+def _lonlat_boxes_overlap(
+    west1: float,
+    south1: float,
+    east1: float,
+    north1: float,
+    west2: float,
+    south2: float,
+    east2: float,
+    north2: float,
+) -> bool:
+    return not (east1 < west2 or east2 < west1 or north1 < south2 or north2 < south1)
+
+
+def state_names_intersecting_geodesic_circle(
+    center_lat: float,
+    center_lon: float,
+    radius_miles: float,
+    states: Dict[str, List[List[Tuple[float, float]]]],
+) -> List[str]:
+    """
+    States to pull **full** DTED packages for after a radius imagery download.
+
+    Uses a simple lat/lon bounding-box overlap between each state's footprint and the
+    circle's bounding box (slightly conservative — may include an extra neighbor).
+    """
+    r_m = max(0.0, float(radius_miles)) * METERS_PER_MILE
+    if r_m <= 0:
+        return []
+    cw, cs, ce, cn = _circle_lonlat_bbox(center_lat, center_lon, r_m)
+    names: List[str] = []
+    for name, rings in states.items():
+        sw, ss, se, sn = bbox_for_rings(rings)
+        if _lonlat_boxes_overlap(cw, cs, ce, cn, sw, ss, se, sn):
+            names.append(name)
+    return sorted(names)
 
 
 def expand_bbox_by_buffer_m(
