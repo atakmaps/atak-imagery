@@ -24,6 +24,7 @@ Output structure:
 
 import json
 import math
+import multiprocessing
 import os
 import queue
 import shutil
@@ -33,7 +34,7 @@ import threading
 import time
 import traceback
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+from concurrent.futures import FIRST_COMPLETED, CancelledError, ThreadPoolExecutor, wait
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Optional
@@ -47,7 +48,11 @@ from tk_window_scaling import (
     apply_fixed_size_window,
     apply_resizable_window,
     ensure_window_stacking,
+    pack_vertical_scroll_area,
+    pack_vertical_scroll_area_when_needed,
+    refit_toplevel_geometry,
     scale_factor,
+    scaled_gap_px,
     scaled_int,
 )
 
@@ -99,6 +104,7 @@ from imagery_tile_selection import (  # noqa: E402
     build_tiles_for_state_result,
     compute_tiles_for_radius,
     lonlat_to_tile,
+    square_lonlat_footprint_for_radius_miles,
     state_names_intersecting_geodesic_circle,
 )
 
@@ -357,13 +363,19 @@ def show_downloader_intro_and_verify_device() -> bool:
     root = tk.Tk()
     root.title(APP_TITLE)
     root.configure(cursor="arrow")
-    _intro_scale = apply_resizable_window(root, 640, 520, (560, 420))
+    root.update_idletasks()
+    s = scale_factor(root)
     proceed = {"ok": False}
 
     tk.Label(root, text="Before you begin", font=("TkDefaultFont", 12, "bold")).pack(anchor="w", padx=16, pady=(16, 6))
-    tk.Label(root, text=DOWNLOADER_INTRO_TEXT, justify="left", wraplength=scaled_int(600, _intro_scale)).pack(
-        anchor="w", padx=16, pady=(0, 8)
+
+    intro_lbl = tk.Label(
+        root,
+        text=DOWNLOADER_INTRO_TEXT,
+        justify="left",
+        wraplength=scaled_int(600, s),
     )
+    intro_lbl.pack(anchor="w", padx=16, pady=(0, 8))
 
     status_var = tk.StringVar(value="")
     tk.Label(root, textvariable=status_var, fg="#333").pack(anchor="w", padx=16, pady=(4, 8))
@@ -394,6 +406,22 @@ def show_downloader_intro_and_verify_device() -> bool:
     btn_cont.configure(command=on_continue)
     btn_cont.pack(side="left", padx=6)
     tk.Button(btn_row, text="Quit", width=12, command=on_quit).pack(side="left", padx=6)
+
+    apply_resizable_window(root, 640, 520, (480, 300))
+
+    def _sync_intro_wrap(_evt: Optional[object] = None) -> None:
+        root.update_idletasks()
+        try:
+            rw = int(root.winfo_width())
+        except tk.TclError:
+            return
+        if rw < 64:
+            return
+        intro_lbl.configure(wraplength=max(120, min(scaled_int(600, s), rw - 48)))
+
+    root.bind("<Configure>", lambda e: _sync_intro_wrap())
+    refit_toplevel_geometry(root, 640, 520)
+    _sync_intro_wrap()
 
     root.protocol("WM_DELETE_WINDOW", on_quit)
     root.mainloop()
@@ -527,67 +555,6 @@ def format_download_eta(seconds: float) -> str:
     return f"about {hours:.1f} hours"
 
 
-def measure_usgs_imagery_effective_bps() -> Optional[float]:
-    """Sample aggregate bytes/sec with warm DNS/TLS and timed parallel bursts (matches worker count)."""
-    z = 12
-    lon0, lat0 = -98.35, 39.12
-    x0, y0 = lonlat_to_tile(lon0, lat0, z)
-
-    def urls_for_grid(ox: int, oy: int) -> List[str]:
-        out: List[str] = []
-        for i in range(MAX_DOWNLOAD_WORKERS):
-            dx = i % 4
-            dy = i // 4
-            x, y = x0 + dx + ox, y0 + dy + oy
-            out.append(USGS_TILE_URL.format(z=z, y=y, x=x))
-        return out
-
-    warm = requests.Session()
-    warm.headers.update({"User-Agent": USER_AGENT})
-    try:
-        r0 = warm.get(USGS_TILE_URL.format(z=z, y=y0, x=x0), timeout=40)
-        r0.raise_for_status()
-        _ = r0.content
-    except Exception as e:
-        log(f"Imagery probe warm-up: {e}")
-        return None
-
-    def fetch_bytes(url: str) -> int:
-        s = requests.Session()
-        s.headers.update({"User-Agent": USER_AGENT})
-        try:
-            rr = s.get(url, timeout=45)
-            rr.raise_for_status()
-            return len(rr.content)
-        except Exception as e:
-            log(f"Imagery throughput probe: {e}")
-            return 0
-
-    def burst_bps(urls: List[str]) -> Optional[float]:
-        t0 = time.perf_counter()
-        try:
-            with ThreadPoolExecutor(max_workers=MAX_DOWNLOAD_WORKERS) as pool:
-                parts = list(pool.map(fetch_bytes, urls))
-        except Exception as e:
-            log(f"Imagery throughput probe pool: {e}")
-            return None
-        elapsed = time.perf_counter() - t0
-        total_b = sum(parts)
-        ok = sum(1 for p in parts if p >= 512)
-        if ok < max(4, MAX_DOWNLOAD_WORKERS // 2) or elapsed < 0.06 or total_b < 4096:
-            return None
-        return total_b / elapsed
-
-    b1 = burst_bps(urls_for_grid(0, 0))
-    b2 = burst_bps(urls_for_grid(5, 5))
-    candidates = [b for b in (b1, b2) if b is not None]
-    if not candidates:
-        return None
-    best = max(candidates)
-    log(f"Imagery throughput probe: sampled aggregate {human_throughput(best)}")
-    return best
-
-
 # -----------------------------
 # State boundaries
 # -----------------------------
@@ -655,7 +622,7 @@ class DownloadScopeDialog(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title(f"{APP_TITLE} - Download scope")
-        self.resizable(False, False)
+        self.resizable(True, True)
         self.configure(cursor="arrow")
 
         self.accepted = False
@@ -663,18 +630,36 @@ class DownloadScopeDialog(tk.Tk):
         self.raw_imagery_path = ""
         self.local_dted_path = ""
 
-        frame = tk.Frame(self, padx=14, pady=14)
-        frame.pack(fill="both", expand=True)
+        self.update_idletasks()
+        _scope_scale = scale_factor(self)
+        _scope_wrap = scaled_int(640, _scope_scale)
+        _fmt_indent = scaled_gap_px(16, _scope_scale, lo=8, hi=36)
+        _section_gap = scaled_gap_px(10, _scope_scale, lo=4, hi=20)
+        _g2 = scaled_gap_px(12, _scope_scale, lo=8, hi=28)  # ~double line between sections
+
+        outer = tk.Frame(self, padx=14, pady=14)
+        outer.pack(fill="both", expand=True)
+
+        btns = tk.Frame(outer)
+        btns.pack(side="bottom", fill="x", pady=(_section_gap, 0))
+        tk.Button(btns, text="Cancel", width=12, command=self.cancel).pack(side="right", padx=(6, 0))
+        tk.Button(btns, text="OK", width=12, command=self.submit).pack(side="right")
+
+        body = tk.Frame(outer)
+        body.pack(fill="both", expand=True)
+
+        form_top = tk.Frame(body)
+        form_top.pack(fill="x")
 
         tk.Label(
-            frame,
+            form_top,
             text="How should imagery be chosen?",
             font=("Arial", 11, "bold"),
         ).pack(anchor="w", pady=(0, 8))
 
         self.scope_var = tk.StringVar(value="state")
         tk.Radiobutton(
-            frame,
+            form_top,
             text="An entire state (or several states)",
             variable=self.scope_var,
             value="state",
@@ -682,76 +667,163 @@ class DownloadScopeDialog(tk.Tk):
             justify="left",
         ).pack(anchor="w")
         tk.Radiobutton(
-            frame,
+            form_top,
             text="Fixed radius from a point (not limited to one state; good near borders)",
             variable=self.scope_var,
             value="radius",
             anchor="w",
             justify="left",
-        ).pack(anchor="w", pady=(4, 14))
+        ).pack(anchor="w", pady=(4, _g2))
 
         tk.Label(
-            frame,
-            text="Optional — advanced: “raw imagery” root folder",
+            form_top,
+            text=(
+                "Advanced settings: Leave blank if you don't have locally installed imagery or elevation."
+            ),
             font=("Arial", 11, "bold"),
-        ).pack(anchor="w")
-        adv = (
-            "If you already have USGS-style tiles on disk, choose the folder that contains one "
-            "subfolder per region (same layout as this tool’s output:\n"
-            "  <root>/<Region name>/<zoom>/<x>/<y>.jpg\n"
-            "The downloader will copy from there before using the network. "
-            "Leave blank unless you maintain that tree locally; otherwise all tiles come from USGS."
-        )
-        tk.Label(frame, text=adv, justify="left", wraplength=560).pack(anchor="w", pady=(4, 6))
+            justify="left",
+            wraplength=_scope_wrap,
+            anchor="w",
+        ).pack(anchor="w", pady=(0, _g2))
 
-        raw_row = tk.Frame(frame)
-        raw_row.pack(fill="x", pady=(0, 12))
+        scroll_host = tk.Frame(body)
+        scroll_host.pack(fill="both", expand=True)
+        wrapped_scroll_labels: List[tk.Label] = []
+
+        def _add_wrapped(parent: tk.Misc, **kw: object) -> tk.Label:
+            lb = tk.Label(parent, **kw)
+            wrapped_scroll_labels.append(lb)
+            return lb
+
+        def _sync_scroll_wrap(_evt: Optional[object] = None) -> None:
+            scroll_inner.update_idletasks()
+            try:
+                iw = int(scroll_inner.winfo_width())
+            except tk.TclError:
+                return
+            if iw < 64:
+                return
+            wl = max(120, min(scaled_int(640, _scope_scale), iw - 16))
+            for lb in wrapped_scroll_labels:
+                try:
+                    lb.configure(wraplength=wl)
+                except tk.TclError:
+                    pass
+
+        scroll_inner = pack_vertical_scroll_area_when_needed(
+            scroll_host, on_inner_layout=_sync_scroll_wrap
+        )
+
+        tk.Label(
+            scroll_inner,
+            text="Local Imagery Location",
+            font=("Arial", 11, "bold"),
+        ).pack(anchor="w", pady=(0, 4))
+        _add_wrapped(
+            scroll_inner,
+            text="If you have USGS-style imagery on a local disk, choose the path below.",
+            justify="left",
+            wraplength=_scope_wrap,
+            anchor="w",
+        ).pack(anchor="w", pady=(0, 4))
+        _add_wrapped(
+            scroll_inner,
+            text="NOTE: This imagery must be stored in this format:",
+            justify="left",
+            wraplength=_scope_wrap,
+            anchor="w",
+        ).pack(anchor="w", pady=(0, 2))
+        tk.Label(
+            scroll_inner,
+            text="Region name/zoom/x/y.jpg",
+            justify="left",
+            anchor="w",
+            font=("Courier", 10),
+        ).pack(anchor="w", padx=(_fmt_indent, 0), pady=(0, 6))
+        _add_wrapped(
+            scroll_inner,
+            text=(
+                "Any required imagery not present on the local disk will be downloaded from USGS. "
+                "Leave blank if you do not have the imagery required to build your selection."
+            ),
+            justify="left",
+            wraplength=_scope_wrap,
+            anchor="w",
+        ).pack(anchor="w", pady=(0, 8))
+
+        raw_row = tk.Frame(scroll_inner)
+        raw_row.pack(fill="x", pady=(0, 0))
+        raw_row.grid_columnconfigure(0, weight=1)
         self.raw_var = tk.StringVar(value="")
-        raw_entry = tk.Entry(raw_row, textvariable=self.raw_var, width=52)
-        raw_entry.pack(side="left", fill="x", expand=True)
+        raw_entry = tk.Entry(raw_row, textvariable=self.raw_var)
+        raw_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
 
         def browse_raw() -> None:
-            initial = self.raw_var.get().strip() or str(Path.home())
-            folder = filedialog.askdirectory(title="Raw imagery root (optional)", initialdir=initial)
+            initial = Path(self.raw_var.get().strip() or str(Path.home()))
+            folder = pick_directory("Raw imagery root (optional)", initial, self)
             if folder:
                 self.raw_var.set(folder)
 
-        tk.Button(raw_row, text="Browse…", command=browse_raw).pack(side="left", padx=(8, 0))
+        tk.Button(raw_row, text="Browse…", command=browse_raw).grid(row=0, column=1, sticky="e")
 
         tk.Label(
-            frame,
-            text="Optional — local elevation (DTED) packages",
+            scroll_inner,
+            text="Local Elevation Location",
             font=("Arial", 11, "bold"),
-        ).pack(anchor="w", pady=(12, 0))
-        dted_help = (
-            "For an offline or air-gapped machine, point at a folder that mirrors the DTED server layout — "
-            "one folder per state, each containing that state’s zip (same names as download):\n"
-            "  <root>/<State name>/<State name>.zip\n"
-            "If a state zip exists here, it is copied first; missing states are still fetched over the network. "
-            "Leave blank to download all elevation data from the server."
-        )
-        tk.Label(frame, text=dted_help, justify="left", wraplength=560).pack(anchor="w", pady=(4, 6))
+        ).pack(anchor="w", pady=(_g2, 4))
+        _add_wrapped(
+            scroll_inner,
+            text="If you have elevation data (DTED) on a local disk, choose the path below.",
+            justify="left",
+            wraplength=_scope_wrap,
+            anchor="w",
+        ).pack(anchor="w", pady=(0, 4))
+        _add_wrapped(
+            scroll_inner,
+            text="Note: This data must be stored in this format:",
+            justify="left",
+            wraplength=_scope_wrap,
+            anchor="w",
+        ).pack(anchor="w", pady=(0, 2))
+        tk.Label(
+            scroll_inner,
+            text="State name/State name.zip",
+            justify="left",
+            anchor="w",
+            font=("Courier", 10),
+        ).pack(anchor="w", padx=(_fmt_indent, 0), pady=(0, 6))
+        _add_wrapped(
+            scroll_inner,
+            text=(
+                "Any required elevation not present on the local disk will be downloaded. "
+                "Leave blank if you do not have the elevation data required to build your selection."
+            ),
+            justify="left",
+            wraplength=_scope_wrap,
+            anchor="w",
+        ).pack(anchor="w", pady=(0, 12))
 
-        dted_row = tk.Frame(frame)
-        dted_row.pack(fill="x", pady=(0, 12))
+        dted_row = tk.Frame(scroll_inner)
+        dted_row.pack(fill="x", pady=(0, 0))
+        dted_row.grid_columnconfigure(0, weight=1)
         self.dted_var = tk.StringVar(value="")
-        tk.Entry(dted_row, textvariable=self.dted_var, width=52).pack(side="left", fill="x", expand=True)
+        tk.Entry(dted_row, textvariable=self.dted_var).grid(row=0, column=0, sticky="ew", padx=(0, 8))
 
         def browse_dted() -> None:
-            initial = self.dted_var.get().strip() or str(Path.home())
-            folder = filedialog.askdirectory(title="Local DTED state zips (optional)", initialdir=initial)
+            initial = Path(self.dted_var.get().strip() or str(Path.home()))
+            folder = pick_directory("Local DTED state zips (optional)", initial, self)
             if folder:
                 self.dted_var.set(folder)
 
-        tk.Button(dted_row, text="Browse…", command=browse_dted).pack(side="left", padx=(8, 0))
+        tk.Button(dted_row, text="Browse…", command=browse_dted).grid(row=0, column=1, sticky="e")
 
-        btns = tk.Frame(frame)
-        btns.pack(fill="x")
-        tk.Button(btns, text="Cancel", width=12, command=self.cancel).pack(side="right", padx=(6, 0))
-        tk.Button(btns, text="OK", width=12, command=self.submit).pack(side="right")
+        apply_resizable_window(self, 740, 780, (560, 300))
+
+        self.bind("<Configure>", lambda e: _sync_scroll_wrap())
+        refit_toplevel_geometry(self, 740, 780)
+        _sync_scroll_wrap()
 
         self.protocol("WM_DELETE_WINDOW", self.cancel)
-        apply_fixed_size_window(self, 620, 660)
 
     def submit(self) -> None:
         self.download_scope = self.scope_var.get()
@@ -779,6 +851,8 @@ class RadiusCenterDialog(tk.Tk):
 
         frame = tk.Frame(self, padx=14, pady=14)
         frame.pack(fill="both", expand=True)
+        _rc_scale = apply_fixed_size_window(self, 580, 560)
+        _rc_wrap = scaled_int(520, _rc_scale)
 
         instr = (
             "Center point — use MGRS from ATAK (default), or decimal latitude / longitude.\n\n"
@@ -786,7 +860,7 @@ class RadiusCenterDialog(tk.Tk):
             "Or enter decimal degrees (e.g. lat 39.8283, lon -98.5795). "
             "Radius is always in statute miles."
         )
-        tk.Label(frame, text=instr, justify="left", wraplength=540).pack(anchor="w", pady=(0, 10))
+        tk.Label(frame, text=instr, justify="left", wraplength=_rc_wrap).pack(anchor="w", pady=(0, 10))
 
         self.coord_var = tk.StringVar(value="mgrs")
 
@@ -835,7 +909,6 @@ class RadiusCenterDialog(tk.Tk):
         tk.Button(btns, text="OK", width=12, command=self.submit).pack(side="right")
 
         self.protocol("WM_DELETE_WINDOW", self.cancel)
-        apply_fixed_size_window(self, 580, 560)
 
     def submit(self) -> None:
         try:
@@ -891,8 +964,10 @@ class StateSelectionDialog(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title(f"{APP_TITLE} - Select States")
-        self.resizable(False, False)
+        self.resizable(True, True)
         self.configure(cursor="arrow")
+        self.update_idletasks()
+        _st_scale = scale_factor(self)
 
         self.result_mode = ""
         self.result_states: List[str] = []
@@ -910,22 +985,18 @@ class StateSelectionDialog(tk.Tk):
             "Choose one or more specific states, or use Select All.\n"
             "The downloader will fetch imagery for every selected state."
         )
-        tk.Label(frame, text=note, justify="left").pack(anchor="w", pady=(0, 10))
+        note_lbl = tk.Label(
+            frame,
+            text=note,
+            justify="left",
+            wraplength=scaled_int(560, _st_scale),
+        )
+        note_lbl.pack(anchor="w", pady=(0, 10))
 
         list_frame = tk.Frame(frame)
         list_frame.pack(fill="both", expand=True)
 
-        canvas = tk.Canvas(list_frame, highlightthickness=1, highlightbackground="gray70")
-        scrollbar = tk.Scrollbar(list_frame, orient="vertical", command=canvas.yview)
-        inner = tk.Frame(canvas)
-
-        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=inner, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-
-        canvas.pack(side="left", fill="both", expand=True)
-        canvas.configure(cursor="arrow")
-        scrollbar.pack(side="right", fill="y")
+        inner = pack_vertical_scroll_area(list_frame)
 
         self.vars: Dict[str, tk.BooleanVar] = {}
         for state_name in sorted(STATE_ABBR_TO_NAME.values()):
@@ -940,7 +1011,22 @@ class StateSelectionDialog(tk.Tk):
         tk.Button(btns, text="Cancel", width=12, command=self.cancel).pack(side="right", padx=(6, 0))
         tk.Button(btns, text="OK", width=12, command=self.submit).pack(side="right")
 
-        apply_fixed_size_window(self, 620, 700)
+        apply_resizable_window(self, 620, 700, (400, 280))
+
+        def _sync_note_wrap(_evt: Optional[object] = None) -> None:
+            self.update_idletasks()
+            try:
+                fw = int(frame.winfo_width())
+            except tk.TclError:
+                return
+            if fw < 64:
+                return
+            note_lbl.configure(wraplength=max(120, min(scaled_int(560, _st_scale), fw - 24)))
+
+        self.bind("<Configure>", lambda e: _sync_note_wrap())
+        refit_toplevel_geometry(self, 620, 700)
+        _sync_note_wrap()
+
         self.protocol("WM_DELETE_WINDOW", self.cancel)
 
     def select_all(self) -> None:
@@ -990,7 +1076,7 @@ class ZoomDialog(tk.Tk):
     ) -> None:
         super().__init__()
         self.title(f"{APP_TITLE} - Select Zoom Levels")
-        self.resizable(False, False)
+        self.resizable(True, True)
         self.configure(cursor="arrow")
         self.update_idletasks()
         _zs = scale_factor(self)
@@ -1008,6 +1094,17 @@ class ZoomDialog(tk.Tk):
         frame = tk.Frame(self, padx=28, pady=20)
         frame.pack(fill="both", expand=True)
 
+        btns = tk.Frame(frame)
+        btns.pack(side="bottom", fill="x", pady=(16, 4), padx=(4, 4))
+        tk.Button(btns, text="Back", width=12, command=self.back).pack(side="left", padx=(0, 6))
+        tk.Button(btns, text="Select All", width=12, command=self.select_all).pack(side="left", padx=(0, 6))
+        tk.Button(btns, text="Clear All", width=12, command=self.clear_all).pack(side="left", padx=(0, 6))
+        tk.Button(btns, text="Cancel", width=12, command=self.cancel).pack(side="right", padx=(6, 0))
+        tk.Button(btns, text="OK", width=12, command=self.submit).pack(side="right")
+
+        body = tk.Frame(frame)
+        body.pack(fill="both", expand=True)
+
         note_wrap = scaled_int(940, _zs)
 
         if download_scope == "radius" and radius_center is not None and radius_miles is not None:
@@ -1021,14 +1118,14 @@ class ZoomDialog(tk.Tk):
             sub = ", ".join(sorted(selected_states))
 
         tk.Label(
-            frame,
+            body,
             text=header,
             font=("Arial", 11, "bold"),
             anchor="w",
         ).pack(anchor="w", pady=(0, 4))
 
         tk.Label(
-            frame,
+            body,
             text=sub,
             justify="left",
             wraplength=note_wrap,
@@ -1037,10 +1134,11 @@ class ZoomDialog(tk.Tk):
             fg="gray30",
         ).pack(anchor="w", fill="x", pady=(0, 10))
 
-        bg = frame.cget("bg")
+        bg = body.cget("bg")
+        intro_lines = max(4, min(9, int(round(6 * _zs))))
         intro = tk.Text(
-            frame,
-            height=max(5, int(round(8 * _zs))),
+            body,
+            height=intro_lines,
             width=max(42, int(round(102 * _zs))),
             wrap="word",
             font=("Arial", 12),
@@ -1056,6 +1154,14 @@ class ZoomDialog(tk.Tk):
         intro.tag_configure("note_label", font=("Arial", 12, "bold"))
         intro.tag_configure("note_body", font=("Arial", 12))
         intro.insert("end", "Select the zoom levels (resolution) to download.\n\n", "title")
+        if download_scope == "radius":
+            intro.insert(
+                "end",
+                "Radius mode: each zoom is independent — checking a zoom does not add every coarser zoom. "
+                "Very low zoom tiles span huge areas, so a full pyramid often makes the ATAK offline outline "
+                "look far wider than your circle even when the high-zoom data is tight.\n\n",
+                "note_body",
+            )
         intro.insert("end", "NOTE:", "note_label")
         intro.insert(
             "end",
@@ -1071,7 +1177,7 @@ class ZoomDialog(tk.Tk):
             value="Estimated temporary space needed for selected zooms: select at least one zoom"
         )
         tk.Label(
-            frame,
+            body,
             textvariable=self.temp_space_var,
             font=("Arial", 11, "bold"),
             justify="left",
@@ -1083,7 +1189,7 @@ class ZoomDialog(tk.Tk):
             value="Estimated space to be installed on device: select at least one zoom"
         )
         tk.Label(
-            frame,
+            body,
             textvariable=self.device_var,
             font=("Arial", 11, "bold"),
             justify="left",
@@ -1095,7 +1201,7 @@ class ZoomDialog(tk.Tk):
             value="Estimated time for download with your internet connection: measuring…"
         )
         tk.Label(
-            frame,
+            body,
             textvariable=self.download_time_var,
             font=("Arial", 11, "bold"),
             justify="left",
@@ -1103,10 +1209,9 @@ class ZoomDialog(tk.Tk):
             anchor="w",
         ).pack(anchor="w", fill="x", pady=(0, 16))
 
-        mid = tk.Frame(frame)
+        mid = tk.Frame(body)
         mid.pack(fill="both", expand=True)
-        checks = tk.Frame(mid)
-        checks.place(relx=0.5, rely=0.5, anchor="center")
+        checks = pack_vertical_scroll_area(mid)
 
         default_avg: Dict[int, int] = {zz: 25000 for zz in range(10, 17)}
         avgs = avg_tile_bytes_by_zoom if avg_tile_bytes_by_zoom else default_avg
@@ -1148,31 +1253,96 @@ class ZoomDialog(tk.Tk):
             )
             cb.pack(anchor="w", fill="x")
 
-        btns = tk.Frame(frame)
-        btns.pack(fill="x", pady=(16, 4), padx=(4, 4))
-        tk.Button(btns, text="Back", width=12, command=self.back).pack(side="left", padx=(0, 6))
-        tk.Button(btns, text="Select All", width=12, command=self.select_all).pack(side="left", padx=(0, 6))
-        tk.Button(btns, text="Clear All", width=12, command=self.clear_all).pack(side="left", padx=(0, 6))
-        tk.Button(btns, text="Cancel", width=12, command=self.cancel).pack(side="right", padx=(6, 0))
-        tk.Button(btns, text="OK", width=12, command=self.submit).pack(side="right")
-
         self.protocol("WM_DELETE_WINDOW", self.cancel)
-        apply_fixed_size_window(self, 1040, 780)
+        apply_resizable_window(self, 1040, 820, (520, 440))
+        refit_toplevel_geometry(self, 1040, 820)
 
-        threading.Thread(target=self._throughput_probe_worker, daemon=True).start()
+        self._probe_poll_after_id: Optional[str] = None
+        self._probe_proc: Optional["multiprocessing.Process"] = None
+        self._probe_mp_q: Optional["multiprocessing.Queue"] = None
+        self._probe_poll_after_id = self.after(50, self._start_usgs_probe_process)
         self.update_size_label()
 
-    def _throughput_probe_worker(self) -> None:
+    def destroy(self) -> None:  # type: ignore[override]
+        aid = getattr(self, "_probe_poll_after_id", None)
+        if aid is not None:
+            try:
+                self.after_cancel(aid)
+            except tk.TclError:
+                pass
+            self._probe_poll_after_id = None
+        proc = getattr(self, "_probe_proc", None)
+        if proc is not None and proc.exitcode is None:
+            try:
+                proc.terminate()
+                proc.join(timeout=3)
+            except Exception:
+                pass
+            self._probe_proc = None
+        super().destroy()
+
+    def _start_usgs_probe_process(self) -> None:
+        self._probe_poll_after_id = None
         try:
-            bps = measure_usgs_imagery_effective_bps()
+            if not int(self.winfo_exists()):
+                return
+        except tk.TclError:
+            return
+        try:
+            from usgs_throughput_probe import run_probe_process_entry
+
+            ctx = multiprocessing.get_context("spawn")
+            self._probe_mp_q = ctx.Queue()
+            self._probe_proc = ctx.Process(
+                target=run_probe_process_entry,
+                args=(self._probe_mp_q,),
+            )
+            self._probe_proc.start()
+            self._probe_poll_after_id = self.after(100, self._poll_usgs_probe_process)
         except Exception as e:
-            log(f"Imagery throughput probe failed: {e}")
-            bps = None
-        self.after(0, lambda b=bps: self._apply_probe_result(b))
+            log(f"Imagery throughput probe failed to start: {e}")
+            self._probe_proc = None
+            self._probe_mp_q = None
+            self._apply_probe_result(None)
+
+    def _poll_usgs_probe_process(self) -> None:
+        self._probe_poll_after_id = None
+        try:
+            if not int(self.winfo_exists()):
+                proc = getattr(self, "_probe_proc", None)
+                if proc is not None and proc.exitcode is None:
+                    try:
+                        proc.terminate()
+                        proc.join(timeout=2)
+                    except Exception:
+                        pass
+                return
+        except tk.TclError:
+            return
+        proc = self._probe_proc
+        if proc is None:
+            self._apply_probe_result(None)
+            return
+        if proc.exitcode is None:
+            self._probe_poll_after_id = self.after(100, self._poll_usgs_probe_process)
+            return
+        bps: Optional[float] = None
+        q = self._probe_mp_q
+        if q is not None:
+            try:
+                bps = q.get_nowait()
+            except queue.Empty:
+                bps = None
+        try:
+            self._apply_probe_result(bps)
+        except tk.TclError:
+            pass
 
     def _apply_probe_result(self, bps: Optional[float]) -> None:
         self._probe_finished = True
         self._download_throughput_bps = bps
+        if bps is not None and bps > 0:
+            log(f"Imagery throughput probe: sampled aggregate {human_throughput(bps)}")
         try:
             self.update_size_label()
         except tk.TclError:
@@ -1189,8 +1359,8 @@ class ZoomDialog(tk.Tk):
         self.update_size_label()
 
     def _on_zoom_toggle(self, z: int) -> None:
-        """Checking a zoom level selects that level and every coarser level below it (10…z)."""
-        if self.vars[z].get():
+        """State mode: check z also checks every coarser zoom (10…z). Radius: no cascade."""
+        if self.download_scope != "radius" and self.vars[z].get():
             for zz in range(10, z + 1):
                 self.vars[zz].set(True)
         self.update_size_label()
@@ -1531,6 +1701,34 @@ def save_output_parent(parent: Path) -> None:
         pass
 
 
+def pick_directory(title: str, initial: Path, parent: tk.Misc) -> str:
+    """Linux: same Zenity folder picker as output selection; else Tk ``askdirectory`` parented to ``parent``."""
+    try:
+        if shutil.which("zenity"):
+            start_uri = str(initial.resolve()) + "/"
+            result = subprocess.run(
+                [
+                    "zenity",
+                    "--file-selection",
+                    "--directory",
+                    f"--title={title}",
+                    f"--filename={start_uri}",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0:
+                folder = result.stdout.strip()
+                if folder:
+                    return str(Path(folder))
+            return ""
+    except Exception:
+        pass
+    ensure_window_stacking(parent)
+    folder = filedialog.askdirectory(title=title, initialdir=str(initial), parent=parent)
+    return folder or ""
+
+
 def ask_output_parent() -> str:
     initial = default_output_parent()
     pick_title = "Select a temporary folder for install"
@@ -1757,6 +1955,31 @@ def run_download(
                 "include any tile the circle intersects"
             )
             state_names = [RADIUS_REGION_FOLDER]
+            try:
+                w, s, e, n = square_lonlat_footprint_for_radius_miles(lat, lon, miles)
+                fp_dir = output_root / RADIUS_REGION_FOLDER
+                fp_dir.mkdir(parents=True, exist_ok=True)
+                fp_path = fp_dir / ".radius_footprint.json"
+                fp_path.write_text(
+                    json.dumps(
+                        {
+                            "schema_version": 1,
+                            "center_lat": lat,
+                            "center_lon": lon,
+                            "radius_miles": miles,
+                            "west": w,
+                            "south": s,
+                            "east": e,
+                            "north": n,
+                            "note": "axis_aligned_box_side_eq_diameter_m_apx",
+                        },
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+                log(f"Wrote radius footprint for SQLite metadata: {fp_path}")
+            except (OSError, ValueError) as exc:
+                log(f"WARNING: could not write radius footprint file: {exc}")
             progress.set_status("Building radius tile download plan…")
             for z in selected_zooms:
                 progress.wait_if_paused()
@@ -1921,6 +2144,10 @@ def run_download(
 
                     try:
                         _, _, _, _, result, bytes_written = future.result()
+                    except CancelledError:
+                        raise DownloadCancelled()
+                    except DownloadCancelled:
+                        raise
                     except Exception as e:
                         log(f"ERROR downloading z{z}/{x}/{y}: {e}")
                         result, bytes_written = "failed", 0
@@ -2342,6 +2569,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     log("Starting ATAK Imagery Downloader")
     log(f"Python: {sys.version}")
     log(f"Working directory: {Path.cwd()}")

@@ -75,6 +75,30 @@ def bring_window_forward(win: tk.Misc, *, persistent_topmost: bool = False) -> N
     ensure_window_stacking(win, persistent_topmost=persistent_topmost)
 
 
+def _modal_grab(dlg: tk.Toplevel, parent: tk.Misc) -> None:
+    """``grab_set`` only works after the dialog is viewable; parent must not be withdrawn."""
+    try:
+        parent.winfo_toplevel().deiconify()
+    except tk.TclError:
+        pass
+    try:
+        dlg.deiconify()
+    except tk.TclError:
+        pass
+    try:
+        parent.winfo_toplevel().lift()
+    except tk.TclError:
+        pass
+    try:
+        dlg.update_idletasks()
+        dlg.lift()
+        dlg.focus_force()
+        dlg.update_idletasks()
+        dlg.grab_set()
+    except tk.TclError:
+        pass
+
+
 def _session_allowed_atak_sql_filenames() -> Optional[set[str]]:
     """Basenames ATAK_SQL_<State>.sqlite for states in the last imagery download, or None if no session file."""
     path = LAST_IMAGERY_SESSION_STATES_FILE
@@ -220,7 +244,6 @@ def ask_delete_raw_imagery(parent: tk.Tk, imagery_root: Path, *, dted_complete: 
     dlg.title(APP_TITLE)
     dlg.configure(cursor="arrow")
     dlg.transient(parent)
-    dlg.grab_set()
     dlg.resizable(False, False)
 
     if dted_complete:
@@ -260,11 +283,8 @@ def ask_delete_raw_imagery(parent: tk.Tk, imagery_root: Path, *, dted_complete: 
 
     dlg.update_idletasks()
     bring_window_forward(parent, persistent_topmost=False)
-    try:
-        dlg.lift()
-        dlg.focus_set()
-    except tk.TclError:
-        pass
+    bring_window_forward(dlg, persistent_topmost=True)
+    _modal_grab(dlg, parent)
     parent.wait_window(dlg)
     return result["delete"]
 
@@ -376,7 +396,6 @@ def show_imagery_loaded_exit_dialog(parent: tk.Tk) -> None:
     dlg.title(APP_TITLE)
     dlg.configure(cursor="arrow")
     dlg.transient(parent)
-    dlg.grab_set()
     dlg.resizable(False, False)
     tk.Label(
         dlg,
@@ -391,6 +410,7 @@ def show_imagery_loaded_exit_dialog(parent: tk.Tk) -> None:
     dlg.update_idletasks()
     bring_window_forward(parent, persistent_topmost=False)
     bring_window_forward(dlg, persistent_topmost=True)
+    _modal_grab(dlg, parent)
     parent.wait_window(dlg)
 
 
@@ -420,15 +440,11 @@ def _show_working_message_dialog(parent: tk.Misc, body: str, *, title: Optional[
     busy.transient(parent)
     busy.resizable(False, False)
     tk.Label(busy, text=body, justify="center", wraplength=440).pack(padx=28, pady=28)
-    busy.grab_set()
     busy.protocol("WM_DELETE_WINDOW", lambda: None)
     busy.update_idletasks()
+    bring_window_forward(parent, persistent_topmost=False)
     bring_window_forward(busy, persistent_topmost=False)
-    try:
-        busy.lift()
-        busy.focus_set()
-    except tk.TclError:
-        pass
+    _modal_grab(busy, parent)
 
     def close_working_message() -> None:
         try:
@@ -978,7 +994,7 @@ def run_dted_inline_for_states(
     Uses progress.wait_if_paused / set_status / set_progress_fraction / set_stat; optional set_speed_eta cleared when present.
     Returns path to dted2_*.zip or None if nothing could be produced.
 
-    When ``local_state_zip_root`` is set, looks for ``<root>/<State>/<State>.zip`` first and copies it
+    When ``local_state_zip_root`` is set, looks for ``chosen_folder/StateName/StateName.zip`` first and copies it
     before using HTTP (offline-friendly if you mirror the server tree).
     """
     import tempfile

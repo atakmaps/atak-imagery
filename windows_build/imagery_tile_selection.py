@@ -297,6 +297,20 @@ def _circle_lonlat_bbox(center_lat: float, center_lon: float, radius_m: float) -
     )
 
 
+def square_lonlat_footprint_for_radius_miles(
+    center_lat: float, center_lon: float, radius_miles: float
+) -> Tuple[float, float, float, float]:
+    """
+    West, south, east, north for an axis-aligned box matching the circle's diameter on the ground:
+    ~``radius_miles`` statute miles from the center along both north–south and east–west
+    (spherical approximation, same as ``_circle_lonlat_bbox``).
+    """
+    r_m = max(0.0, float(radius_miles)) * METERS_PER_MILE
+    if r_m <= 0:
+        raise ValueError("radius_miles must be positive")
+    return _circle_lonlat_bbox(center_lat, center_lon, r_m)
+
+
 def _lonlat_boxes_overlap(
     west1: float,
     south1: float,

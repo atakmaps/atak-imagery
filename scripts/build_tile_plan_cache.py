@@ -148,6 +148,11 @@ def main() -> int:
             "fast per tile; use 1.0 for raw linear extrapolation."
         ),
     )
+    ap.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Skip a job when its output .tiles.gz already exists (resume after moving output dir).",
+    )
     args = ap.parse_args()
 
     if not args.geojson.is_file():
@@ -203,6 +208,17 @@ def main() -> int:
     sum_out_tiles = 0
 
     for k, (state_name, z) in enumerate(jobs):
+        out = args.out_dir / f"{state_name.replace('/', '_')}_z{z}.tiles.gz"
+        if args.skip_existing and out.is_file():
+            job_done_idx = k + 1
+            pct = 100.0 * job_done_idx / total_jobs
+            print(
+                f"[{job_done_idx}/{total_jobs}] ({pct:.1f}%) {state_name} z{z} | "
+                f"skip existing → {out.name}",
+                flush=True,
+            )
+            continue
+
         rings = states[state_name]
         t0 = time.perf_counter()
         tiles = _compute_tiles_for_state(rings, z, buf)
@@ -211,7 +227,6 @@ def main() -> int:
         n_out = len(tiles)
         sum_out_tiles += n_out
 
-        out = args.out_dir / f"{state_name.replace('/', '_')}_z{z}.tiles.gz"
         save_tile_plan_cache(out, z, buf, crc, tiles)
 
         total_elapsed_s = time.perf_counter() - run_t0

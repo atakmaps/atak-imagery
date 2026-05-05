@@ -62,6 +62,30 @@ def bring_window_forward(win: tk.Misc, *, persistent_topmost: bool = False) -> N
     ensure_window_stacking(win, persistent_topmost=persistent_topmost)
 
 
+def _modal_grab(dlg: tk.Toplevel, parent: tk.Misc) -> None:
+    """``grab_set`` only works after the dialog is viewable; parent must not be withdrawn."""
+    try:
+        parent.winfo_toplevel().deiconify()
+    except tk.TclError:
+        pass
+    try:
+        dlg.deiconify()
+    except tk.TclError:
+        pass
+    try:
+        parent.winfo_toplevel().lift()
+    except tk.TclError:
+        pass
+    try:
+        dlg.update_idletasks()
+        dlg.lift()
+        dlg.focus_force()
+        dlg.update_idletasks()
+        dlg.grab_set()
+    except tk.TclError:
+        pass
+
+
 def peek_standalone_dted_skip_pending() -> bool:
     return SKIP_STANDALONE_DTED_AFTER_SQLITE.is_file()
 
@@ -174,7 +198,6 @@ def ask_delete_raw_imagery_win(parent: tk.Tk, imagery_root: Path, *, dted_comple
     dlg.title(APP_TITLE)
     dlg.configure(cursor="arrow")
     dlg.transient(parent)
-    dlg.grab_set()
     dlg.resizable(False, False)
 
     if dted_complete:
@@ -207,6 +230,7 @@ def ask_delete_raw_imagery_win(parent: tk.Tk, imagery_root: Path, *, dted_comple
     dlg.update_idletasks()
     bring_window_forward(parent, persistent_topmost=False)
     bring_window_forward(dlg, persistent_topmost=True)
+    _modal_grab(dlg, parent)
     parent.wait_window(dlg)
     return result["delete"]
 
@@ -216,7 +240,6 @@ def show_exit_ready_dialog_win(parent: tk.Tk) -> None:
     dlg.title(APP_TITLE)
     dlg.configure(cursor="arrow")
     dlg.transient(parent)
-    dlg.grab_set()
     dlg.resizable(False, False)
     tk.Label(
         dlg,
@@ -235,6 +258,7 @@ def show_exit_ready_dialog_win(parent: tk.Tk) -> None:
     dlg.update_idletasks()
     bring_window_forward(parent, persistent_topmost=False)
     bring_window_forward(dlg, persistent_topmost=True)
+    _modal_grab(dlg, parent)
     parent.wait_window(dlg)
 
 

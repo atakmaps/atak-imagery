@@ -7,7 +7,7 @@ scales proportionally to the available screen, clamps so the window fits within 
 from __future__ import annotations
 
 import tkinter as tk
-from typing import Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 # Layout baseline matching typical design assumptions in this repo.
 REF_SCREEN_W = 1920
@@ -85,8 +85,176 @@ def apply_resizable_window(win: tk.Wm, base_w: int, base_h: int, base_minsize: T
     return s
 
 
+def refit_toplevel_geometry(win: tk.Wm, base_w: int, base_h: int) -> float:
+    """
+    After children are packed: set size to max(design-at-scale, Tk's requested size),
+    capped to usable screen, then re-center. Use so text wraps and lists lay out before
+    the first paint at a resolution-aware size.
+    """
+    win.update_idletasks()
+    mx, my = usable_screen_bounds(win)
+    s = scale_factor(win)
+    w_ds = max(320, min(int(round(base_w * s)), mx))
+    h_ds = max(240, min(int(round(base_h * s)), my))
+    try:
+        reqw = int(win.winfo_reqwidth())
+        reqh = int(win.winfo_reqheight())
+    except tk.TclError:
+        reqw, reqh = w_ds, h_ds
+    w = min(max(reqw, w_ds), mx)
+    h = min(max(reqh, h_ds), my)
+    _place_center(win, w, h)
+    return s
+
+
 def scaled_int(base_px: int, scale: float) -> int:
     return max(80, int(round(base_px * scale)))
+
+
+def scaled_gap_px(base_px: int, scale: float, *, lo: int = 4, hi: int = 48) -> int:
+    """Scale margins and small vertical gaps. ``scaled_int`` floors at 80px for readability on
+    wrap widths; do not use that floor between UI sections or indents look absurd."""
+    return max(lo, min(hi, int(round(base_px * scale))))
+
+
+def pack_vertical_scroll_area(parent: tk.Misc) -> tk.Frame:
+    """
+    Pack a ``Canvas`` + vertical ``Scrollbar`` into ``parent`` (fills ``parent``),
+    and return an ``inner`` ``Frame`` to hold scrollable children. Width tracks the canvas.
+
+    Use on small displays (e.g. 1024×768) so long checkbox lists stay reachable.
+    """
+    holder = tk.Frame(parent)
+    holder.pack(fill=tk.BOTH, expand=True)
+    canvas = tk.Canvas(holder, highlightthickness=0)
+    vsb = tk.Scrollbar(holder, orient="vertical", command=canvas.yview)
+    inner = tk.Frame(canvas)
+    win_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+    def _on_inner_configure(_event: object) -> None:
+        canvas.configure(scrollregion=canvas.bbox("all"))
+
+    def _on_canvas_configure(event: tk.Event) -> None:
+        try:
+            canvas.itemconfigure(win_id, width=event.width)
+        except tk.TclError:
+            pass
+
+    inner.bind("<Configure>", _on_inner_configure)
+    canvas.bind("<Configure>", _on_canvas_configure)
+    canvas.configure(yscrollcommand=vsb.set)
+
+    def _wheel_mousewheel(event: tk.Event) -> Optional[str]:
+        if getattr(event, "num", None) == 5:
+            canvas.yview_scroll(1, "units")
+        elif getattr(event, "num", None) == 4:
+            canvas.yview_scroll(-1, "units")
+        elif getattr(event, "delta", 0):
+            canvas.yview_scroll(int(-1 * event.delta / 120), "units")
+        return "break"
+
+    for w in (canvas, inner):
+        w.bind("<MouseWheel>", _wheel_mousewheel)
+        w.bind("<Button-4>", _wheel_mousewheel)
+        w.bind("<Button-5>", _wheel_mousewheel)
+
+    vsb.pack(side=tk.RIGHT, fill=tk.Y)
+    canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    return inner
+
+
+def pack_vertical_scroll_area_when_needed(
+    parent: tk.Misc,
+    *,
+    on_inner_layout: Optional[Callable[[], None]] = None,
+) -> tk.Frame:
+    """
+    Like ``pack_vertical_scroll_area``, but the vertical scrollbar is only gridded when
+    the inner content is taller than the canvas. When everything fits, no scrollbar is shown.
+    """
+    holder = tk.Frame(parent)
+    holder.pack(fill=tk.BOTH, expand=True)
+    holder.grid_columnconfigure(0, weight=1)
+    holder.grid_rowconfigure(0, weight=1)
+
+    canvas = tk.Canvas(holder, highlightthickness=0)
+    vsb = tk.Scrollbar(holder, orient="vertical", command=canvas.yview)
+    inner = tk.Frame(canvas)
+    win_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+    scroll_active: List[bool] = [False]
+
+    def _sync_vsb() -> None:
+        canvas.update_idletasks()
+        inner.update_idletasks()
+        try:
+            ch = int(canvas.winfo_height())
+        except tk.TclError:
+            return
+        if ch <= 1:
+            canvas.after_idle(_sync_vsb)
+            return
+        try:
+            ih = int(inner.winfo_reqheight())
+        except tk.TclError:
+            ih = 0
+        bbox = canvas.bbox("all")
+        if bbox is not None:
+            y1, y2 = int(bbox[1]), int(bbox[3])
+            ih = max(ih, y2 - y1)
+        need = ih > ch + 2
+        scroll_active[0] = need
+        if need:
+            vsb.grid(row=0, column=1, sticky="ns")
+        else:
+            vsb.grid_remove()
+            canvas.yview_moveto(0)
+        canvas.configure(yscrollcommand=vsb.set)
+
+    def _on_inner_configure(_event: object) -> None:
+        if on_inner_layout is not None:
+            on_inner_layout()
+        canvas.update_idletasks()
+        br = canvas.bbox("all")
+        canvas.configure(scrollregion=br if br else (0, 0, 0, 0))
+        _sync_vsb()
+
+    def _on_canvas_configure(event: tk.Event) -> None:
+        try:
+            w = int(event.width)
+            if w > 8:
+                canvas.itemconfigure(win_id, width=w)
+        except tk.TclError:
+            pass
+        _sync_vsb()
+
+    inner.bind("<Configure>", _on_inner_configure)
+    canvas.bind("<Configure>", _on_canvas_configure)
+    canvas.configure(yscrollcommand=vsb.set)
+
+    def _wheel_mousewheel(event: tk.Event) -> Optional[str]:
+        if scroll_active[0]:
+            if getattr(event, "num", None) == 5:
+                canvas.yview_scroll(1, "units")
+            elif getattr(event, "num", None) == 4:
+                canvas.yview_scroll(-1, "units")
+            elif getattr(event, "delta", 0):
+                canvas.yview_scroll(int(-1 * event.delta / 120), "units")
+        return "break"
+
+    for wdg in (canvas, inner):
+        wdg.bind("<MouseWheel>", _wheel_mousewheel)
+        wdg.bind("<Button-4>", _wheel_mousewheel)
+        wdg.bind("<Button-5>", _wheel_mousewheel)
+
+    canvas.grid(row=0, column=0, sticky="nsew")
+    try:
+        vsb.grid_remove()
+    except tk.TclError:
+        pass
+
+    holder.after_idle(_sync_vsb)
+    holder.after(120, _sync_vsb)
+    return inner
 
 
 def raise_to_front(

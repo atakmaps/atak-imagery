@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import json
 import logging
 import os
 import queue
@@ -201,6 +202,45 @@ CREATE INDEX IF NOT EXISTS atak_catalog_exp_idx ON ATAK_catalog (expiration);
 """
 
 
+def apply_radius_footprint_metadata(
+    conn: sqlite3.Connection,
+    source_dir: Path,
+    logger: logging.Logger,
+    zooms: List[int],
+) -> None:
+    """If the downloader left ``.radius_footprint.json``, store MBTiles-style bounds in ATAK_metadata."""
+    path = source_dir / ".radius_footprint.json"
+    if not path.is_file():
+        return
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        w = float(data["west"])
+        s = float(data["south"])
+        e = float(data["east"])
+        n = float(data["north"])
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        logger.warning("Skipping radius footprint metadata (%s): %s", path, exc)
+        return
+    bounds = f"{w},{s},{e},{n}"
+    rows = [
+        ("bounds", bounds),
+        ("minzoom", str(min(zooms))),
+        ("maxzoom", str(max(zooms))),
+    ]
+    conn.executemany(
+        "INSERT OR REPLACE INTO ATAK_metadata(key, value) VALUES (?, ?)",
+        rows,
+    )
+    conn.commit()
+    logger.info(
+        "ATAK_metadata footprint from %s: bounds=%s minzoom=%s maxzoom=%s",
+        path.name,
+        bounds,
+        min(zooms),
+        max(zooms),
+    )
+
+
 def initialize_db(conn: sqlite3.Connection, logger: logging.Logger, provider: str, srid: str) -> None:
     logger.info("Initializing SQLite schema")
     conn.executescript(SCHEMA_SQL)
@@ -258,10 +298,19 @@ class Builder:
         try:
             initialize_db(conn, self.logger, self.config.provider, self.config.srid)
             self._import_tiles(conn, zooms)
+            apply_radius_footprint_metadata(conn, source_dir, self.logger, zooms)
             conn.commit()
             self._report_counts(conn)
         finally:
             conn.close()
+
+        try:
+            from atak_osmdroid_sqlite_footprint import report_lines
+
+            for line in report_lines(sqlite_path, include_union=False):
+                self.logger.info("%s", line)
+        except Exception as exc:
+            self.logger.warning("Mobile outline diagnostic skipped: %s", exc)
 
     def _import_tiles(self, conn: sqlite3.Connection, zooms: List[int]) -> None:
         start = time.time()
