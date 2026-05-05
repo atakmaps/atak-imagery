@@ -25,6 +25,9 @@ STATE_BOUNDARY_BUFFER_MILES = 3.0
 METERS_PER_MILE = 1609.344
 DEFAULT_BOUNDARY_BUFFER_M = STATE_BOUNDARY_BUFFER_MILES * METERS_PER_MILE
 
+# Subfolder under ``Imagery/`` for fixed-radius downloads (not a state name).
+RADIUS_REGION_FOLDER = "Radius"
+
 _SEGMENT_SAMPLES = 16
 
 # Gzip tile list cache: magic, format, zoom, geojson_crc32, boundary_m (double), n, then n*(x,y) uint32 pairs.
@@ -119,6 +122,96 @@ def tile_center_lonlat(x: int, y: int, z: int) -> Tuple[float, float]:
     lat_rad = math.atan(math.sinh(math.pi * (1 - 2 * ((y + 0.5) / n))))
     lat_deg = math.degrees(lat_rad)
     return lon_deg, lat_deg
+
+
+def tile_lonlat_bounds(x: int, y: int, z: int) -> Tuple[float, float, float, float]:
+    """West, east, south, north edges in degrees (EPSG:4326), matching ``lonlat_to_tile`` grid."""
+    n = 2.0 ** z
+    lon_w = (x / n) * 360.0 - 180.0
+    lon_e = ((x + 1) / n) * 360.0 - 180.0
+    lat_n = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * (y / n)))))
+    lat_s = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * ((y + 1) / n)))))
+    south = min(lat_s, lat_n)
+    north = max(lat_s, lat_n)
+    return lon_w, lon_e, south, north
+
+
+def _point_in_lonlat_rect(
+    lon: float, lat: float, lon_w: float, lon_e: float, south: float, north: float
+) -> bool:
+    if not (south <= lat <= north):
+        return False
+    if lon_w <= lon_e:
+        return lon_w <= lon <= lon_e
+    return lon >= lon_w or lon <= lon_e
+
+
+def geodesic_disk_intersects_tile(
+    center_lat: float, center_lon: float, radius_m: float, x: int, y: int, z: int
+) -> bool:
+    """
+    True if a great-circle disk around ``(center_lat, center_lon)`` with radius ``radius_m``
+    intersects the Web Mercator tile (any overlap). Uses tile corner/edge checks in WGS84.
+    """
+    if radius_m <= 0:
+        return False
+    lon_w, lon_e, south, north = tile_lonlat_bounds(x, y, z)
+    corners = (
+        (lon_w, north),
+        (lon_e, north),
+        (lon_e, south),
+        (lon_w, south),
+    )
+    for clon, clat in corners:
+        if haversine_m(center_lat, center_lon, clat, clon) <= radius_m:
+            return True
+    if _point_in_lonlat_rect(center_lon, center_lat, lon_w, lon_e, south, north):
+        return True
+    edges = (
+        (lon_w, north, lon_e, north),
+        (lon_e, north, lon_e, south),
+        (lon_e, south, lon_w, south),
+        (lon_w, south, lon_w, north),
+    )
+    for lon1, lat1, lon2, lat2 in edges:
+        if min_dist_point_to_segment_m(center_lon, center_lat, lon1, lat1, lon2, lat2) <= radius_m:
+            return True
+    return False
+
+
+def compute_tiles_for_radius(
+    center_lat: float, center_lon: float, radius_miles: float, zoom: int
+) -> List[Tuple[int, int]]:
+    """
+    Tiles at ``zoom`` whose Web Mercator footprint intersects a geodesic circle
+    of ``radius_miles`` around ``(center_lat, center_lon)``. The full tile is included
+    whenever the circle intersects it (not only the centroid).
+    """
+    radius_m = max(0.0, float(radius_miles)) * METERS_PER_MILE
+    if radius_m <= 0:
+        return []
+
+    margin_m = max(200.0, radius_m * 0.01)
+    r_search = radius_m + margin_m
+    dlat = r_search / 111_320.0
+    cos_lat = max(0.2, math.cos(math.radians(center_lat)))
+    dlon = r_search / (111_320.0 * cos_lat)
+    min_lat = max(-85.05112878, center_lat - dlat)
+    max_lat = min(85.05112878, center_lat + dlat)
+    min_lon = center_lon - dlon
+    maxlon = center_lon + dlon
+
+    min_x, max_y = lonlat_to_tile(min_lon, min_lat, zoom)
+    max_x, min_y = lonlat_to_tile(maxlon, max_lat, zoom)
+    x0, x1 = sorted((min_x, max_x))
+    y0, y1 = sorted((min_y, max_y))
+
+    tiles: List[Tuple[int, int]] = []
+    for xx in range(x0, x1 + 1):
+        for yy in range(y0, y1 + 1):
+            if geodesic_disk_intersects_tile(center_lat, center_lon, radius_m, xx, yy, zoom):
+                tiles.append((xx, yy))
+    return tiles
 
 
 def bbox_for_rings(rings: List[List[Tuple[float, float]]]) -> Tuple[float, float, float, float]:

@@ -3,3 +3,4 @@ shapely
 rasterio
 numpy
 requests
+mgrs

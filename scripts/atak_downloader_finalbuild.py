@@ -9,8 +9,9 @@ ATAK USGS Orthophoto Downloader (shared core)
 - **After Device Installer:** run ``atak_downloader_from_installer.py`` only (set by
   ``atak_adb_deploy``). Skips the standalone USB/adb intro; same download, SQLite handoff dialog, and builder chain.
 
-- State selection first
-- Zoom selection second
+- Download scope first (entire state(s) vs fixed radius) and optional raw tile tree
+- State selection or radius center second
+- Zoom selection third
 - Zoom screen: storage estimates, background USGS throughput probe, ETA vs selection
 - Summary confirmation before output folder picker
 - Zenity folder picker on Linux with Tk fallback
@@ -35,7 +36,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Tuple, Optional
 
 import requests
 import tkinter as tk
@@ -91,7 +92,9 @@ LAST_IMAGERY_SESSION_STATES_FILE = RUNTIME_STATE_DIR / ".last_imagery_session_st
 
 from imagery_tile_selection import (  # noqa: E402
     STATE_BOUNDARY_BUFFER_MILES,
+    RADIUS_REGION_FOLDER,
     build_tiles_for_state_result,
+    compute_tiles_for_radius,
     lonlat_to_tile,
 )
 
@@ -462,15 +465,39 @@ def estimate_device_sqlite_bytes(raw_tile_bytes_sum: int) -> int:
     return max(1, int(raw_tile_bytes_sum * DEVICE_INSTALL_BYTES_VS_RAW_ESTIMATE))
 
 
-def load_zoom_estimates() -> Dict[str, Dict[str, Dict[str, int]]]:
-    if not ZOOM_ESTIMATE_PATH.exists():
+def read_zoom_estimates_file(path: Path = ZOOM_ESTIMATE_PATH) -> Dict[str, Any]:
+    if not path.exists():
         raise FileNotFoundError(
-            f"Missing zoom estimate file:\n{ZOOM_ESTIMATE_PATH}\n\n"
+            f"Missing zoom estimate file:\n{path}\n\n"
             f"Copy scripts/data/ into this fresh repo or generate it first."
         )
-    with open(ZOOM_ESTIMATE_PATH, "r", encoding="utf-8") as f:
-        payload = json.load(f)
-    return payload["states"]
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def load_zoom_estimates() -> Dict[str, Dict[str, Dict[str, int]]]:
+    return read_zoom_estimates_file()["states"]
+
+
+def avg_tile_bytes_by_zoom(payload: Dict[str, Any]) -> Dict[int, int]:
+    raw = payload.get("avg_tile_size_bytes", {})
+    out: Dict[int, int] = {}
+    for k, v in raw.items():
+        try:
+            out[int(k)] = int(v)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def parse_mgrs_to_latlon(mgrs_str: str) -> Tuple[float, float]:
+    import mgrs as _mgrs
+
+    s = "".join(mgrs_str.strip().split())
+    if len(s) < 3:
+        raise ValueError("MGRS string is too short.")
+    lat, lon = _mgrs.MGRS().toLatLon(s)
+    return float(lat), float(lon)
 
 # -----------------------------
 # Tile math
@@ -619,6 +646,214 @@ def load_states(geojson_path: Path) -> Dict[str, List[List[Tuple[float, float]]]
 # UI
 # -----------------------------
 
+
+class DownloadScopeDialog(tk.Tk):
+    def __init__(self) -> None:
+        super().__init__()
+        self.title(f"{APP_TITLE} - Download scope")
+        self.resizable(False, False)
+        self.configure(cursor="arrow")
+
+        self.accepted = False
+        self.download_scope = "state"
+        self.raw_imagery_path = ""
+
+        frame = tk.Frame(self, padx=14, pady=14)
+        frame.pack(fill="both", expand=True)
+
+        tk.Label(
+            frame,
+            text="How should imagery be chosen?",
+            font=("Arial", 11, "bold"),
+        ).pack(anchor="w", pady=(0, 8))
+
+        self.scope_var = tk.StringVar(value="state")
+        tk.Radiobutton(
+            frame,
+            text="An entire state (or several states)",
+            variable=self.scope_var,
+            value="state",
+            anchor="w",
+            justify="left",
+        ).pack(anchor="w")
+        tk.Radiobutton(
+            frame,
+            text="Fixed radius from a point (not limited to one state; good near borders)",
+            variable=self.scope_var,
+            value="radius",
+            anchor="w",
+            justify="left",
+        ).pack(anchor="w", pady=(4, 14))
+
+        tk.Label(
+            frame,
+            text="Optional — advanced: “raw imagery” root folder",
+            font=("Arial", 11, "bold"),
+        ).pack(anchor="w")
+        adv = (
+            "If you already have USGS-style tiles on disk, choose the folder that contains one "
+            "subfolder per region (same layout as this tool’s output:\n"
+            "  <root>/<Region name>/<zoom>/<x>/<y>.jpg\n"
+            "The downloader will copy from there before using the network. "
+            "Leave blank unless you maintain that tree locally; otherwise all tiles come from USGS."
+        )
+        tk.Label(frame, text=adv, justify="left", wraplength=560).pack(anchor="w", pady=(4, 6))
+
+        raw_row = tk.Frame(frame)
+        raw_row.pack(fill="x", pady=(0, 12))
+        self.raw_var = tk.StringVar(value="")
+        raw_entry = tk.Entry(raw_row, textvariable=self.raw_var, width=52)
+        raw_entry.pack(side="left", fill="x", expand=True)
+
+        def browse_raw() -> None:
+            initial = self.raw_var.get().strip() or str(Path.home())
+            folder = filedialog.askdirectory(title="Raw imagery root (optional)", initialdir=initial)
+            if folder:
+                self.raw_var.set(folder)
+
+        tk.Button(raw_row, text="Browse…", command=browse_raw).pack(side="left", padx=(8, 0))
+
+        btns = tk.Frame(frame)
+        btns.pack(fill="x")
+        tk.Button(btns, text="Cancel", width=12, command=self.cancel).pack(side="right", padx=(6, 0))
+        tk.Button(btns, text="OK", width=12, command=self.submit).pack(side="right")
+
+        self.protocol("WM_DELETE_WINDOW", self.cancel)
+        apply_fixed_size_window(self, 620, 480)
+
+    def submit(self) -> None:
+        self.download_scope = self.scope_var.get()
+        self.raw_imagery_path = self.raw_var.get().strip()
+        self.accepted = True
+        self.destroy()
+
+    def cancel(self) -> None:
+        self.accepted = False
+        self.destroy()
+
+
+class RadiusCenterDialog(tk.Tk):
+    def __init__(self) -> None:
+        super().__init__()
+        self.title(f"{APP_TITLE} - Radius center")
+        self.resizable(False, False)
+        self.configure(cursor="arrow")
+
+        self.accepted = False
+        self.center_lat = 0.0
+        self.center_lon = 0.0
+        self.radius_miles = 0.0
+
+        frame = tk.Frame(self, padx=14, pady=14)
+        frame.pack(fill="both", expand=True)
+
+        instr = (
+            "Center point — use MGRS from ATAK (default), or decimal latitude / longitude.\n\n"
+            "In ATAK: open your waypoint, tap to select it, then read MGRS from the upper-right readout.\n"
+            "Or enter decimal degrees (e.g. lat 39.8283, lon -98.5795). "
+            "Radius is always in statute miles."
+        )
+        tk.Label(frame, text=instr, justify="left", wraplength=540).pack(anchor="w", pady=(0, 10))
+
+        self.coord_var = tk.StringVar(value="mgrs")
+
+        modes = tk.Frame(frame)
+        modes.pack(anchor="w")
+        tk.Radiobutton(modes, text="MGRS", variable=self.coord_var, value="mgrs").pack(side="left")
+        tk.Radiobutton(modes, text="Decimal lat / lon", variable=self.coord_var, value="latlon").pack(
+            side="left", padx=(12, 0)
+        )
+
+        self.mgrs_var = tk.StringVar(value="")
+        self.lat_var = tk.StringVar(value="")
+        self.lon_var = tk.StringVar(value="")
+
+        tk.Label(frame, text="MGRS").pack(anchor="w", pady=(10, 2))
+        self.e_mgrs = tk.Entry(frame, textvariable=self.mgrs_var, width=48)
+        self.e_mgrs.pack(anchor="w")
+
+        tk.Label(frame, text="Latitude (decimal degrees, north positive)").pack(anchor="w", pady=(8, 2))
+        self.e_lat = tk.Entry(frame, textvariable=self.lat_var, width=24)
+        self.e_lat.pack(anchor="w")
+
+        tk.Label(frame, text="Longitude (decimal degrees, east positive; use negative for west)").pack(
+            anchor="w", pady=(8, 2)
+        )
+        self.e_lon = tk.Entry(frame, textvariable=self.lon_var, width=24)
+        self.e_lon.pack(anchor="w")
+
+        tk.Label(frame, text="Radius (miles)").pack(anchor="w", pady=(10, 2))
+        self.radius_var = tk.StringVar(value="25")
+        tk.Entry(frame, textvariable=self.radius_var, width=12).pack(anchor="w")
+
+        def refresh_coord_state(*_a: object) -> None:
+            use_mgrs = self.coord_var.get() == "mgrs"
+            for w in (self.e_mgrs,):
+                w.configure(state="normal" if use_mgrs else "disabled")
+            for w in (self.e_lat, self.e_lon):
+                w.configure(state="disabled" if use_mgrs else "normal")
+
+        self.coord_var.trace_add("write", refresh_coord_state)
+        refresh_coord_state()
+
+        btns = tk.Frame(frame)
+        btns.pack(fill="x", pady=(16, 0))
+        tk.Button(btns, text="Cancel", width=12, command=self.cancel).pack(side="right", padx=(6, 0))
+        tk.Button(btns, text="OK", width=12, command=self.submit).pack(side="right")
+
+        self.protocol("WM_DELETE_WINDOW", self.cancel)
+        apply_fixed_size_window(self, 580, 560)
+
+    def submit(self) -> None:
+        try:
+            miles = float(self.radius_var.get().strip())
+        except ValueError:
+            ensure_window_stacking(self)
+            messagebox.showwarning(APP_TITLE, "Enter a numeric radius in miles.", parent=self)
+            return
+        if miles <= 0:
+            ensure_window_stacking(self)
+            messagebox.showwarning(APP_TITLE, "Radius must be greater than zero.", parent=self)
+            return
+
+        if self.coord_var.get() == "mgrs":
+            mgrs_s = self.mgrs_var.get().strip()
+            if not mgrs_s:
+                ensure_window_stacking(self)
+                messagebox.showwarning(APP_TITLE, "Enter an MGRS coordinate.", parent=self)
+                return
+            try:
+                lat, lon = parse_mgrs_to_latlon(mgrs_s)
+            except Exception as exc:
+                ensure_window_stacking(self)
+                messagebox.showwarning(APP_TITLE, f"Could not parse MGRS:\n{exc}", parent=self)
+                return
+        else:
+            try:
+                lat = float(self.lat_var.get().strip())
+                lon = float(self.lon_var.get().strip())
+            except ValueError:
+                ensure_window_stacking(self)
+                messagebox.showwarning(
+                    APP_TITLE, "Enter numeric latitude and longitude in decimal degrees.", parent=self
+                )
+                return
+            if lat < -90 or lat > 90 or lon < -180 or lon > 180:
+                ensure_window_stacking(self)
+                messagebox.showwarning(APP_TITLE, "Latitude or longitude is out of range.", parent=self)
+                return
+
+        self.center_lat = lat
+        self.center_lon = lon
+        self.radius_miles = miles
+        self.accepted = True
+        self.destroy()
+
+    def cancel(self) -> None:
+        self.accepted = False
+        self.destroy()
+
+
 class StateSelectionDialog(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -710,13 +945,24 @@ class StateSelectionDialog(tk.Tk):
 
 
 class ZoomDialog(tk.Tk):
-    def __init__(self, selected_states: List[str], zoom_estimates: Dict[str, Dict[str, Dict[str, int]]]) -> None:
+    def __init__(
+        self,
+        selected_states: List[str],
+        zoom_estimates: Dict[str, Dict[str, Dict[str, int]]],
+        *,
+        download_scope: str = "state",
+        radius_center: Optional[Tuple[float, float]] = None,
+        radius_miles: Optional[float] = None,
+        avg_tile_bytes_by_zoom: Optional[Dict[int, int]] = None,
+    ) -> None:
         super().__init__()
         self.title(f"{APP_TITLE} - Select Zoom Levels")
         self.resizable(False, False)
         self.configure(cursor="arrow")
         self.update_idletasks()
         _zs = scale_factor(self)
+
+        self.download_scope = download_scope
 
         self.result: List[int] = []
         self.go_back = False
@@ -729,20 +975,28 @@ class ZoomDialog(tk.Tk):
         frame = tk.Frame(self, padx=28, pady=20)
         frame.pack(fill="both", expand=True)
 
-        # Pixel wrap for labels/checkbuttons (~window inner width minus frame pad).
         note_wrap = scaled_int(940, _zs)
+
+        if download_scope == "radius" and radius_center is not None and radius_miles is not None:
+            header = "Radius download — full tiles that intersect the circle:"
+            sub = (
+                f"Center ({radius_center[0]:.5f}, {radius_center[1]:.5f}) decimal deg | "
+                f"radius {radius_miles:g} mi | folder Imagery/{RADIUS_REGION_FOLDER}/…"
+            )
+        else:
+            header = "Selected states to be installed:"
+            sub = ", ".join(sorted(selected_states))
 
         tk.Label(
             frame,
-            text="Selected states to be installed:",
+            text=header,
             font=("Arial", 11, "bold"),
             anchor="w",
         ).pack(anchor="w", pady=(0, 4))
 
-        states_csv = ", ".join(sorted(selected_states))
         tk.Label(
             frame,
-            text=states_csv,
+            text=sub,
             justify="left",
             wraplength=note_wrap,
             anchor="w",
@@ -821,14 +1075,25 @@ class ZoomDialog(tk.Tk):
         checks = tk.Frame(mid)
         checks.place(relx=0.5, rely=0.5, anchor="center")
 
+        default_avg: Dict[int, int] = {zz: 25000 for zz in range(10, 17)}
+        avgs = avg_tile_bytes_by_zoom if avg_tile_bytes_by_zoom else default_avg
+
         for z in range(10, 17):
             total_tiles = 0
             total_bytes = 0
-            for state_name in selected_states:
-                state_info = zoom_estimates.get(state_name, {})
-                zoom_info = state_info.get(str(z), {})
-                total_tiles += int(zoom_info.get("estimated_tiles", 0))
-                total_bytes += int(zoom_info.get("estimated_bytes", 0))
+            if download_scope == "radius":
+                if radius_center is not None and radius_miles is not None:
+                    tiles = compute_tiles_for_radius(radius_center[0], radius_center[1], radius_miles, z)
+                    n = len(tiles)
+                    avg_b = int(avgs.get(z, 25000))
+                    total_tiles = n
+                    total_bytes = n * avg_b
+            else:
+                for state_name in selected_states:
+                    state_info = zoom_estimates.get(state_name, {})
+                    zoom_info = state_info.get(str(z), {})
+                    total_tiles += int(zoom_info.get("estimated_tiles", 0))
+                    total_bytes += int(zoom_info.get("estimated_bytes", 0))
 
             self.zoom_total_tiles[z] = total_tiles
             self.zoom_total_bytes[z] = total_bytes
@@ -1146,19 +1411,38 @@ class ProgressWindow(tk.Tk):
 # Workflow helpers
 # -----------------------------
 
-def show_summary_confirm(selected_states: List[str], selected_zooms: List[int], total_bytes: int, total_tiles: int) -> bool:
-    state_summary = ", ".join(selected_states[:6])
-    if len(selected_states) > 6:
-        state_summary += f", ... ({len(selected_states)} total)"
-    msg = (
-        f"States:\n{state_summary}\n\n"
-        f"Zooms:\n{', '.join(map(str, selected_zooms))}\n\n"
-        f"Estimated size:\n{human_bytes(total_bytes)}\n\n"
-        f"Estimated tiles:\n{total_tiles:,}\n\n"
-        "Select a temporary folder for install on the next screen (defaults to your "
-        "Downloads folder if you have not chosen one before).\n\n"
-        "Press OK to continue."
-    )
+def show_summary_confirm(
+    selected_states: List[str],
+    selected_zooms: List[int],
+    total_bytes: int,
+    total_tiles: int,
+    *,
+    download_scope: str = "state",
+    radius_summary: Optional[str] = None,
+) -> bool:
+    if download_scope == "radius" and radius_summary:
+        msg = (
+            f"{radius_summary}\n\n"
+            f"Zooms:\n{', '.join(map(str, selected_zooms))}\n\n"
+            f"Estimated size:\n{human_bytes(total_bytes)}\n\n"
+            f"Estimated tiles:\n{total_tiles:,}\n\n"
+            "Select a temporary folder for install on the next screen (defaults to your "
+            "Downloads folder if you have not chosen one before).\n\n"
+            "Press OK to continue."
+        )
+    else:
+        state_summary = ", ".join(selected_states[:6])
+        if len(selected_states) > 6:
+            state_summary += f", ... ({len(selected_states)} total)"
+        msg = (
+            f"States:\n{state_summary}\n\n"
+            f"Zooms:\n{', '.join(map(str, selected_zooms))}\n\n"
+            f"Estimated size:\n{human_bytes(total_bytes)}\n\n"
+            f"Estimated tiles:\n{total_tiles:,}\n\n"
+            "Select a temporary folder for install on the next screen (defaults to your "
+            "Downloads folder if you have not chosen one before).\n\n"
+            "Press OK to continue."
+        )
     if shutil.which("zenity"):
         try:
             subprocess.run(
@@ -1281,11 +1565,28 @@ def get_download_session() -> requests.Session:
     return session
 
 
-def fetch_tile(z: int, x: int, y: int, out_path: Path) -> Tuple[str, int]:
+def fetch_tile(
+    z: int,
+    x: int,
+    y: int,
+    out_path: Path,
+    *,
+    state_label: str,
+    raw_imagery_root: Optional[Path] = None,
+) -> Tuple[str, int]:
     if out_path.exists():
         return "existing", 0
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    if raw_imagery_root is not None and raw_imagery_root.is_dir():
+        local = raw_imagery_root / state_label / str(z) / str(x) / f"{y}.jpg"
+        if local.is_file():
+            try:
+                shutil.copy2(local, out_path)
+                return "downloaded", local.stat().st_size
+            except Exception as e:
+                log(f"ERROR copying local tile {local}: {e}")
+
     url = USGS_TILE_URL.format(z=z, x=x, y=y)
     bytes_written = 0
     try:
@@ -1310,44 +1611,40 @@ def fetch_tile(z: int, x: int, y: int, out_path: Path) -> Tuple[str, int]:
         return "failed", 0
 
 
-def run_download(selected_zooms: List[int], selected_states: List[str], mode: str, output_parent: Path, progress: ProgressWindow) -> None:
+def run_download(
+    selected_zooms: List[int],
+    selected_states: List[str],
+    mode: str,
+    output_parent: Path,
+    progress: ProgressWindow,
+    *,
+    raw_imagery_root: Optional[Path] = None,
+    radius_center: Optional[Tuple[float, float]] = None,
+    radius_miles: Optional[float] = None,
+) -> None:
     stats = {"downloaded": 0, "existing": 0, "failed": 0, "missing": 0}
     executor: Optional[ThreadPoolExecutor] = None
 
+    if raw_imagery_root is not None:
+        raw_imagery_root = raw_imagery_root.expanduser()
+        if not raw_imagery_root.is_dir():
+            log(f"Raw imagery root not found or not a directory (ignored): {raw_imagery_root}")
+            raw_imagery_root = None
+        else:
+            log(f"Raw imagery tree (try local copy before HTTP): {raw_imagery_root}")
+
+    radius_mode = radius_center is not None and radius_miles is not None
+
     try:
-        log(f"run_download: states={selected_states!r} zooms={selected_zooms!r} mode={mode!r}")
+        log(
+            f"run_download: states={selected_states!r} zooms={selected_zooms!r} mode={mode!r} "
+            f"radius_mode={radius_mode}"
+        )
         progress.wait_if_paused()
-        progress.set_status("Loading state boundaries...")
-        geojson_path = bundled_state_geojson_path()
-        states = load_states(geojson_path)
-
-        state_names = []
-        for state_name in selected_states:
-            if state_name not in states:
-                raise RuntimeError(f"State not found in boundary file: {state_name}")
-            if state_name == "District of Columbia":
-                continue
-            state_names.append(state_name)
-
-        if not state_names:
-            if not selected_states:
-                raise RuntimeError(
-                    "No valid states selected (empty list). "
-                    "Try running the downloader again; if this repeats, keep the log file for support."
-                )
-            raise RuntimeError(
-                "No states to download imagery for.\n\n"
-                f"You selected: {', '.join(selected_states)}\n\n"
-                "This tool skips District of Columbia: USGS state imagery uses full state shapes, "
-                "and D.C. is not included as its own download region. "
-                "Choose at least one state (for example Delaware or Maryland). "
-                "D.C. is listed directly under Delaware in the list — easy to select by mistake."
-            )
 
         output_root = output_parent / "Imagery"
         output_root.mkdir(parents=True, exist_ok=True)
 
-        from datetime import datetime
         date_str = datetime.now().strftime("%Y%m%d")
         upload_dir = output_parent / f"ATAK_Upload_{date_str}"
         upload_dir.mkdir(parents=True, exist_ok=True)
@@ -1355,51 +1652,94 @@ def run_download(selected_zooms: List[int], selected_states: List[str], mode: st
         LAST_IMAGERY_ROOT_FILE.write_text(str(output_root), encoding="utf-8")
         log(f"Using output root: {output_root}")
         log(f"Using upload folder: {upload_dir}")
-        log(
-            f"Tile coverage: GeoJSON boundaries + {STATE_BOUNDARY_BUFFER_MILES:g} mi edge buffer "
-            "(tile center inside polygon or within buffer of boundary)"
-        )
-        log(f"Selected states: {', '.join(state_names)}")
 
         plan: List[Tuple[str, int, int, int, Path]] = []
-        progress.set_status("Building tile download plan…")
-        for state_name in state_names:
-            progress.wait_if_paused()
-            rings = states[state_name]
+
+        if radius_mode:
+            lat, lon = radius_center  # type: ignore[assignment]
+            miles = float(radius_miles)  # type: ignore[arg-type]
+            log(
+                f"Tile coverage: geodesic circle {miles:g} mi from ({lat:.5f}, {lon:.5f}); "
+                "include any tile the circle intersects"
+            )
+            state_names = [RADIUS_REGION_FOLDER]
+            progress.set_status("Building radius tile download plan…")
             for z in selected_zooms:
                 progress.wait_if_paused()
-                progress.set_status(f"Tile plan: {state_name} zoom {z}…")
-                tpr = build_tiles_for_state_result(
-                    state_name,
-                    rings,
-                    z,
-                    geojson_path=STATE_GEOJSON_PATH,
-                    tile_plan_dir=TILE_PLAN_DIR,
-                )
-                tiles = tpr.tiles
-                if tpr.from_cache:
-                    log(
-                        f"Tile plan (cache): {len(tiles):,} tiles for {state_name}, zoom {z} "
-                        f"— {state_name.replace('/', '_')}_z{z}.tiles.gz"
-                    )
-                else:
-                    log(f"Tile plan (computed): {len(tiles):,} tiles for {state_name}, zoom {z}")
+                progress.set_status(f"Tile plan: radius zoom {z}…")
+                tiles = compute_tiles_for_radius(lat, lon, miles, z)
+                log(f"Tile plan (radius): {len(tiles):,} tiles for zoom {z}")
                 for i, (x, y) in enumerate(tiles, start=1):
                     if i % 2048 == 0:
                         progress.wait_if_paused()
-                    out_path = output_root / state_name / str(z) / str(x) / f"{y}.jpg"
-                    plan.append((state_name, z, x, y, out_path))
+                    out_path = output_root / RADIUS_REGION_FOLDER / str(z) / str(x) / f"{y}.jpg"
+                    plan.append((RADIUS_REGION_FOLDER, z, x, y, out_path))
+        else:
+            progress.set_status("Loading state boundaries...")
+            geojson_path = bundled_state_geojson_path()
+            states = load_states(geojson_path)
+
+            state_names = []
+            for state_name in selected_states:
+                if state_name not in states:
+                    raise RuntimeError(f"State not found in boundary file: {state_name}")
+                if state_name == "District of Columbia":
+                    continue
+                state_names.append(state_name)
+
+            if not state_names:
+                if not selected_states:
+                    raise RuntimeError(
+                        "No valid states selected (empty list). "
+                        "Try running the downloader again; if this repeats, keep the log file for support."
+                    )
+                raise RuntimeError(
+                    "No states to download imagery for.\n\n"
+                    f"You selected: {', '.join(selected_states)}\n\n"
+                    "This tool skips District of Columbia: USGS state imagery uses full state shapes, "
+                    "and D.C. is not included as its own download region. "
+                    "Choose at least one state (for example Delaware or Maryland). "
+                    "D.C. is listed directly under Delaware in the list — easy to select by mistake."
+                )
+
+            log(
+                f"Tile coverage: GeoJSON boundaries + {STATE_BOUNDARY_BUFFER_MILES:g} mi edge buffer "
+                "(tile center inside polygon or within buffer of boundary)"
+            )
+            log(f"Selected states: {', '.join(state_names)}")
+
+            progress.set_status("Building tile download plan…")
+            for state_name in state_names:
+                progress.wait_if_paused()
+                rings = states[state_name]
+                for z in selected_zooms:
+                    progress.wait_if_paused()
+                    progress.set_status(f"Tile plan: {state_name} zoom {z}…")
+                    tpr = build_tiles_for_state_result(
+                        state_name,
+                        rings,
+                        z,
+                        geojson_path=STATE_GEOJSON_PATH,
+                        tile_plan_dir=TILE_PLAN_DIR,
+                    )
+                    tiles = tpr.tiles
+                    if tpr.from_cache:
+                        log(
+                            f"Tile plan (cache): {len(tiles):,} tiles for {state_name}, zoom {z} "
+                            f"— {state_name.replace('/', '_')}_z{z}.tiles.gz"
+                        )
+                    else:
+                        log(f"Tile plan (computed): {len(tiles):,} tiles for {state_name}, zoom {z}")
+                    for i, (x, y) in enumerate(tiles, start=1):
+                        if i % 2048 == 0:
+                            progress.wait_if_paused()
+                        out_path = output_root / state_name / str(z) / str(x) / f"{y}.jpg"
+                        plan.append((state_name, z, x, y, out_path))
 
         total = len(plan)
         log(f"Total tile candidates: {total}")
         progress.set_progress(0, total)
         progress.set_status("Starting download...")
-
-        estimated_total_bytes = 0
-        for state_name in state_names:
-            for z in selected_zooms:
-                info = load_zoom_estimates().get(state_name, {}).get(str(z), {})
-                estimated_total_bytes += int(info.get("estimated_bytes", 0))
 
         completed = 0
         downloaded_bytes = 0
@@ -1416,7 +1756,14 @@ def run_download(selected_zooms: List[int], selected_states: List[str], mode: st
 
         def download_one(tile: Tuple[str, int, int, int, Path]) -> Tuple[str, int, int, int, str, int]:
             state_name, z, x, y, out_path = tile
-            result, bytes_written = fetch_tile(z, x, y, out_path)
+            result, bytes_written = fetch_tile(
+                z,
+                x,
+                y,
+                out_path,
+                state_label=state_name,
+                raw_imagery_root=raw_imagery_root,
+            )
             return state_name, z, x, y, result, bytes_written
 
         max_workers = max(1, min(MAX_DOWNLOAD_WORKERS, total if total > 0 else 1))
@@ -1557,24 +1904,27 @@ def run_download(selected_zooms: List[int], selected_states: List[str], mode: st
             log(f"WARNING: could not write session state list: {exc}")
 
         dted_note = ""
-        try:
-            from atak_dted_downloader import mark_standalone_dted_skip, run_dted_inline_for_states
+        if not radius_mode:
+            try:
+                from atak_dted_downloader import mark_standalone_dted_skip, run_dted_inline_for_states
 
-            dted_zip = run_dted_inline_for_states(
-                state_names,
-                upload_dir,
-                log_sink=log,
-                progress=progress,
-            )
-            if dted_zip is not None:
-                mark_standalone_dted_skip()
-                dted_note = f"\n\nDTED archive ready:\n{dted_zip.name}"
-        except ImportError as exc:
-            log(f"DTED: skipped (module not loadable: {exc}).")
-        except DownloadCancelled:
-            raise
-        except Exception as exc:
-            log(f"DTED: failed — {exc}")
+                dted_zip = run_dted_inline_for_states(
+                    state_names,
+                    upload_dir,
+                    log_sink=log,
+                    progress=progress,
+                )
+                if dted_zip is not None:
+                    mark_standalone_dted_skip()
+                    dted_note = f"\n\nDTED archive ready:\n{dted_zip.name}"
+            except ImportError as exc:
+                log(f"DTED: skipped (module not loadable: {exc}).")
+            except DownloadCancelled:
+                raise
+            except Exception as exc:
+                log(f"DTED: failed — {exc}")
+        else:
+            log("DTED: skipped for fixed-radius imagery download.")
 
         progress.set_status("Complete")
         progress.completion_log_summary = "Download complete." + dted_note
@@ -1655,7 +2005,9 @@ def pump_gui_logs(window: ProgressWindow) -> None:
 def main() -> None:
     run_startup_git_update_check(app_title=APP_TITLE, script_path=Path(__file__).resolve())
     log(f"Log file: {LOGGER.log_file}")
-    zoom_estimates = load_zoom_estimates()
+    zoom_payload = read_zoom_estimates_file()
+    zoom_estimates = zoom_payload["states"]
+    avg_tile_bytes_map = avg_tile_bytes_by_zoom(zoom_payload)
 
     if is_launched_from_device_installer():
         log("Launched from Device Installer — skipping standalone USB/adb intro.")
@@ -1665,54 +2017,177 @@ def main() -> None:
             return
 
     while True:
-        selector = StateSelectionDialog()
-        selector.mainloop()
-        if not selector.result_states:
-            log("Cancelled at state selection.")
+        scope_dlg = DownloadScopeDialog()
+        scope_dlg.mainloop()
+        if not scope_dlg.accepted:
+            log("Cancelled at download scope.")
             return
 
-        zoom_dialog = ZoomDialog(selector.result_states, zoom_estimates)
-        zoom_dialog.mainloop()
+        raw_path: Optional[Path] = None
+        if scope_dlg.raw_imagery_path:
+            candidate = Path(scope_dlg.raw_imagery_path).expanduser()
+            if not candidate.is_dir():
+                root = tk.Tk()
+                try:
+                    root.option_add("*cursor", "arrow")
+                except tk.TclError:
+                    pass
+                root.withdraw()
+                root.update_idletasks()
+                ensure_window_stacking(root)
+                messagebox.showwarning(
+                    APP_TITLE,
+                    f"Raw imagery folder is not a directory:\n{candidate}",
+                    parent=root,
+                )
+                try:
+                    root.destroy()
+                except tk.TclError:
+                    pass
+                continue
+            raw_path = candidate
 
-        if zoom_dialog.go_back:
-            log("Back selected on zoom dialog.")
-            continue
+        if scope_dlg.download_scope == "state":
+            while True:
+                selector = StateSelectionDialog()
+                selector.mainloop()
+                if not selector.result_states:
+                    log("Cancelled at state selection.")
+                    return
 
-        selected_zooms = zoom_dialog.result
-        if not selected_zooms:
-            log("Cancelled at zoom selection.")
-            return
+                while True:
+                    zoom_dialog = ZoomDialog(
+                        selector.result_states,
+                        zoom_estimates,
+                        download_scope="state",
+                    )
+                    zoom_dialog.mainloop()
+                    if zoom_dialog.go_back:
+                        log("Back from zoom to state selection.")
+                        break
 
-        est_total_bytes = 0
-        est_total_tiles = 0
-        for z in selected_zooms:
-            for state_name in selector.result_states:
-                info = zoom_estimates.get(state_name, {}).get(str(z), {})
-                est_total_bytes += int(info.get("estimated_bytes", 0))
-                est_total_tiles += int(info.get("estimated_tiles", 0))
+                    selected_zooms = zoom_dialog.result
+                    if not selected_zooms:
+                        log("Cancelled at zoom selection.")
+                        return
 
-        if not show_summary_confirm(selector.result_states, selected_zooms, est_total_bytes, est_total_tiles):
-            log("Summary declined. Returning to state selection.")
-            continue
+                    est_total_bytes = 0
+                    est_total_tiles = 0
+                    for z in selected_zooms:
+                        for state_name in selector.result_states:
+                            info = zoom_estimates.get(state_name, {}).get(str(z), {})
+                            est_total_bytes += int(info.get("estimated_bytes", 0))
+                            est_total_tiles += int(info.get("estimated_tiles", 0))
 
-        output_folder = ask_output_parent()
-        if not output_folder:
-            log("Cancelled at output folder prompt.")
-            return
+                    if not show_summary_confirm(
+                        selector.result_states,
+                        selected_zooms,
+                        est_total_bytes,
+                        est_total_tiles,
+                        download_scope="state",
+                    ):
+                        log("Summary declined. Returning to state selection.")
+                        continue
 
-        progress = ProgressWindow(LOGGER.log_file)
-        pump_gui_logs(progress)
+                    output_folder = ask_output_parent()
+                    if not output_folder:
+                        log("Cancelled at output folder prompt.")
+                        return
 
-        zooms_arg = list(selected_zooms)
-        states_arg = list(selector.result_states)
-        worker = threading.Thread(
-            target=run_download,
-            args=(zooms_arg, states_arg, selector.result_mode, Path(output_folder), progress),
-            daemon=True,
-        )
-        worker.start()
-        progress.mainloop()
-        return
+                    progress = ProgressWindow(LOGGER.log_file)
+                    pump_gui_logs(progress)
+                    worker = threading.Thread(
+                        target=run_download,
+                        args=(
+                            list(selected_zooms),
+                            list(selector.result_states),
+                            selector.result_mode,
+                            Path(output_folder),
+                            progress,
+                        ),
+                        kwargs={
+                            "raw_imagery_root": raw_path,
+                            "radius_center": None,
+                            "radius_miles": None,
+                        },
+                        daemon=True,
+                    )
+                    worker.start()
+                    progress.mainloop()
+                    return
+        else:
+            while True:
+                rd = RadiusCenterDialog()
+                rd.mainloop()
+                if not rd.accepted:
+                    log("Returned to download scope from radius / center dialog.")
+                    break
+
+                while True:
+                    zoom_dialog = ZoomDialog(
+                        [],
+                        zoom_estimates,
+                        download_scope="radius",
+                        radius_center=(rd.center_lat, rd.center_lon),
+                        radius_miles=rd.radius_miles,
+                        avg_tile_bytes_by_zoom=avg_tile_bytes_map,
+                    )
+                    zoom_dialog.mainloop()
+                    if zoom_dialog.go_back:
+                        log("Back from zoom to radius center.")
+                        break
+
+                    selected_zooms = zoom_dialog.result
+                    if not selected_zooms:
+                        log("Cancelled at zoom selection.")
+                        return
+
+                    est_total_bytes = 0
+                    est_total_tiles = 0
+                    for z in selected_zooms:
+                        tiles = compute_tiles_for_radius(rd.center_lat, rd.center_lon, rd.radius_miles, z)
+                        n = len(tiles)
+                        ab = int(avg_tile_bytes_map.get(z, 25000))
+                        est_total_bytes += n * ab
+                        est_total_tiles += n
+
+                    radius_summary = (
+                        f"Fixed-radius download:\n"
+                        f"Center ({rd.center_lat:.5f}, {rd.center_lon:.5f}) decimal deg, "
+                        f"radius {rd.radius_miles:g} mi\n"
+                        f"Imagery folder: {RADIUS_REGION_FOLDER}"
+                    )
+                    if not show_summary_confirm(
+                        [],
+                        selected_zooms,
+                        est_total_bytes,
+                        est_total_tiles,
+                        download_scope="radius",
+                        radius_summary=radius_summary,
+                    ):
+                        log("Summary declined. Returning to radius center.")
+                        continue
+
+                    output_folder = ask_output_parent()
+                    if not output_folder:
+                        log("Cancelled at output folder prompt.")
+                        return
+
+                    progress = ProgressWindow(LOGGER.log_file)
+                    pump_gui_logs(progress)
+                    worker = threading.Thread(
+                        target=run_download,
+                        args=(list(selected_zooms), [], "radius", Path(output_folder), progress),
+                        kwargs={
+                            "raw_imagery_root": raw_path,
+                            "radius_center": (rd.center_lat, rd.center_lon),
+                            "radius_miles": rd.radius_miles,
+                        },
+                        daemon=True,
+                    )
+                    worker.start()
+                    progress.mainloop()
+                    return
 
 
 if __name__ == "__main__":
