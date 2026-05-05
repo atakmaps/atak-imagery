@@ -674,6 +674,7 @@ class DownloadScopeDialog(tk.Tk):
         self.accepted = False
         self.download_scope = "state"
         self.raw_imagery_path = ""
+        self.local_dted_path = ""
 
         frame = tk.Frame(self, padx=14, pady=14)
         frame.pack(fill="both", expand=True)
@@ -730,17 +731,45 @@ class DownloadScopeDialog(tk.Tk):
 
         tk.Button(raw_row, text="Browse…", command=browse_raw).pack(side="left", padx=(8, 0))
 
+        tk.Label(
+            frame,
+            text="Optional — local elevation (DTED) packages",
+            font=("Arial", 11, "bold"),
+        ).pack(anchor="w", pady=(12, 0))
+        dted_help = (
+            "For an offline or air-gapped machine, point at a folder that mirrors the DTED server layout — "
+            "one folder per state, each containing that state’s zip (same names as download):\n"
+            "  <root>/<State name>/<State name>.zip\n"
+            "If a state zip exists here, it is copied first; missing states are still fetched over the network. "
+            "Leave blank to download all elevation data from the server."
+        )
+        tk.Label(frame, text=dted_help, justify="left", wraplength=560).pack(anchor="w", pady=(4, 6))
+
+        dted_row = tk.Frame(frame)
+        dted_row.pack(fill="x", pady=(0, 12))
+        self.dted_var = tk.StringVar(value="")
+        tk.Entry(dted_row, textvariable=self.dted_var, width=52).pack(side="left", fill="x", expand=True)
+
+        def browse_dted() -> None:
+            initial = self.dted_var.get().strip() or str(Path.home())
+            folder = filedialog.askdirectory(title="Local DTED state zips (optional)", initialdir=initial)
+            if folder:
+                self.dted_var.set(folder)
+
+        tk.Button(dted_row, text="Browse…", command=browse_dted).pack(side="left", padx=(8, 0))
+
         btns = tk.Frame(frame)
         btns.pack(fill="x")
         tk.Button(btns, text="Cancel", width=12, command=self.cancel).pack(side="right", padx=(6, 0))
         tk.Button(btns, text="OK", width=12, command=self.submit).pack(side="right")
 
         self.protocol("WM_DELETE_WINDOW", self.cancel)
-        apply_fixed_size_window(self, 620, 480)
+        apply_fixed_size_window(self, 620, 660)
 
     def submit(self) -> None:
         self.download_scope = self.scope_var.get()
         self.raw_imagery_path = self.raw_var.get().strip()
+        self.local_dted_path = self.dted_var.get().strip()
         self.accepted = True
         self.destroy()
 
@@ -1568,6 +1597,7 @@ def run_download(
     progress: ProgressWindow,
     *,
     raw_imagery_root: Optional[Path] = None,
+    local_dted_root: Optional[Path] = None,
     radius_center: Optional[Tuple[float, float]] = None,
     radius_miles: Optional[float] = None,
 ) -> None:
@@ -1581,6 +1611,14 @@ def run_download(
             raw_imagery_root = None
         else:
             log(f"Raw imagery tree (try local copy before HTTP): {raw_imagery_root}")
+
+    if local_dted_root is not None:
+        local_dted_root = local_dted_root.expanduser()
+        if not local_dted_root.is_dir():
+            log(f"Local DTED root not found or not a directory (ignored): {local_dted_root}")
+            local_dted_root = None
+        else:
+            log(f"Local DTED state zip tree (copy before network): {local_dted_root}")
 
     radius_mode = radius_center is not None and radius_miles is not None
 
@@ -1810,6 +1848,7 @@ def run_download(
                     upload_dir,
                     log_sink=log,
                     progress=progress,
+                    local_state_zip_root=local_dted_root,
                 )
                 if dted_zip is not None:
                     dted_mod.mark_standalone_dted_skip()
@@ -1944,6 +1983,30 @@ def main() -> None:
                 continue
             raw_path = candidate
 
+        dted_path: Optional[Path] = None
+        if scope_dlg.local_dted_path:
+            dc = Path(scope_dlg.local_dted_path).expanduser()
+            if not dc.is_dir():
+                root = tk.Tk()
+                try:
+                    root.option_add("*cursor", "arrow")
+                except tk.TclError:
+                    pass
+                root.withdraw()
+                root.update_idletasks()
+                ensure_window_stacking(root)
+                messagebox.showwarning(
+                    APP_TITLE,
+                    f"Local DTED folder is not a directory:\n{dc}",
+                    parent=root,
+                )
+                try:
+                    root.destroy()
+                except tk.TclError:
+                    pass
+                continue
+            dted_path = dc
+
         if scope_dlg.download_scope == "state":
             while True:
                 selector = StateSelectionDialog()
@@ -2004,6 +2067,7 @@ def main() -> None:
                         ),
                         kwargs={
                             "raw_imagery_root": raw_path,
+                            "local_dted_root": dted_path,
                             "radius_center": None,
                             "radius_miles": None,
                         },
@@ -2077,6 +2141,7 @@ def main() -> None:
                         args=(list(selected_zooms), [], "radius", Path(output_folder), progress),
                         kwargs={
                             "raw_imagery_root": raw_path,
+                            "local_dted_root": dted_path,
                             "radius_center": (rd.center_lat, rd.center_lon),
                             "radius_miles": rd.radius_miles,
                         },

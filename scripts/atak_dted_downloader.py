@@ -971,11 +971,15 @@ def run_dted_inline_for_states(
     *,
     log_sink: Callable[[str], None],
     progress: object,
+    local_state_zip_root: Optional[Path] = None,
 ) -> Optional[Path]:
     """
     Download DTED state ZIPs for the given states into upload_dir, same server/layout as the DTED app.
     Uses progress.wait_if_paused / set_status / set_progress_fraction / set_stat; optional set_speed_eta cleared when present.
     Returns path to dted2_*.zip or None if nothing could be produced.
+
+    When ``local_state_zip_root`` is set, looks for ``<root>/<State>/<State>.zip`` first and copies it
+    before using HTTP (offline-friendly if you mirror the server tree).
     """
     import tempfile
 
@@ -1000,6 +1004,8 @@ def run_dted_inline_for_states(
 
     log_sink(f"DTED: using upload folder {upload_dir}")
     log_sink(f"DTED: temp work folder {temp_root}")
+    if local_state_zip_root is not None:
+        log_sink(f"DTED: local state ZIP tree (copy first): {local_state_zip_root}")
     log_sink(f"DTED: server base URL {BASE_URL}")
 
     plan: List[Tuple[str, str, Path]] = []
@@ -1028,8 +1034,6 @@ def run_dted_inline_for_states(
     try:
         for i, (state_name, url, out_path) in enumerate(plan):
             progress.wait_if_paused()
-            progress.set_status(f"DTED: downloading {state_name}…")
-            log_sink(f"DTED: GET {url}")
 
             idx = i
 
@@ -1038,7 +1042,28 @@ def run_dted_inline_for_states(
                     set_overall(fr, f"{int(fr * 100)}% · state {ix + 1} / {total}")
                 _dted_download_slice_progress(apply_fr, ix, total, read, tot)
 
-            result = download_file(session, url, out_path, log_fn=log_sink, progress_cb=dl_progress)
+            local_zip: Optional[Path] = None
+            if local_state_zip_root is not None:
+                cand = local_state_zip_root / state_name / f"{state_name}.zip"
+                if cand.is_file():
+                    local_zip = cand
+
+            if local_zip is not None:
+                progress.set_status(f"DTED: copying {state_name} from local tree…")
+                log_sink(f"DTED: local copy {local_zip}")
+                try:
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(local_zip, out_path)
+                    result = "downloaded"
+                except Exception as exc:
+                    log_sink(f"DTED: local copy failed ({exc}); trying network")
+                    progress.set_status(f"DTED: downloading {state_name}…")
+                    log_sink(f"DTED: GET {url}")
+                    result = download_file(session, url, out_path, log_fn=log_sink, progress_cb=dl_progress)
+            else:
+                progress.set_status(f"DTED: downloading {state_name}…")
+                log_sink(f"DTED: GET {url}")
+                result = download_file(session, url, out_path, log_fn=log_sink, progress_cb=dl_progress)
             stats[result] += 1
             completed += 1
             set_overall(_DTED_W_DOWNLOAD * ((idx + 1) / n_states), f"{int(_DTED_W_DOWNLOAD * (idx + 1) / n_states * 100)}% · state {idx + 1} / {total}")
