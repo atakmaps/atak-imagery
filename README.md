@@ -18,7 +18,7 @@ Source repository: `https://github.com/atakmaps/atak-imagery`
 
      ```bash
      cd ~/Downloads
-     unzip atak-imagery-v1.1.0-linux-install.zip
+     unzip atak-imagery-v1.2.0-linux-install.zip
      ls atak-imagery/install_linux.sh
      cd atak-imagery
      chmod +x install_linux.sh
@@ -55,7 +55,7 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.1.0` (tag **`v1.1.0`** on GitHub).
+**Linux / source release:** `v1.2.0` (tag **`v1.2.0`** on GitHub).
 
 **Windows:** A new Windows packaged build is **not** included in this cycle. **Use Windows release `2.8`** until a newer Windows installer is published. Source copies under `windows_build/` include the same startup behaviors when run with Python.
 

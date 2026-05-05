@@ -8,7 +8,7 @@ REPO=/home/paul/Documents/ATAK/pipeline
 REPORT="${HOME}/Downloads/atak-imagery-test-install-report.txt"
 SSH_DST="${TILE_PLAN_FETCH_SSH:-root@31.220.30.74}"
 REMOTE_V1="${TILE_PLAN_FETCH_REMOTE:-/root/atak-tile-plan/scripts/data/tile_plans/v1}"
-ZIP_BASENAME="atak-imagery-v1.1.0-linux-install.zip"
+ZIP_BASENAME="atak-imagery-v1.2.0-linux-install.zip"
 
 mkdir -p "${HOME}/Downloads"
 touch "$REPORT"
