@@ -68,6 +68,9 @@ class DownloadCancelled(Exception):
 
 USGS_TILE_URL = "https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/tile/{z}/{y}/{x}"
 USER_AGENT = "ATAK-Ortho-Downloader/1.1"
+USGS_MAPSERVER_BASE_URL = "https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer"
+DTED_SERVER_BASE_URL = "http://31.220.30.74/dted"
+OFFLINE_MISSING_DATA_MSG = "Internet unreachable to download missing data."
 # Parallel tile fetches (thread pool + throughput probe burst). Match Linux script.
 MAX_DOWNLOAD_WORKERS = 24
 
@@ -1543,6 +1546,56 @@ def get_download_session() -> requests.Session:
     return session
 
 
+def plan_requires_network_for_imagery(
+    plan: List[Tuple[str, int, int, int, Path]],
+    raw_imagery_root: Optional[Path],
+) -> bool:
+    raw = raw_imagery_root if raw_imagery_root is not None and raw_imagery_root.is_dir() else None
+    for state_label, z, x, y, out_path in plan:
+        if out_path.is_file():
+            continue
+        if raw is not None:
+            local = raw / state_label / str(z) / str(x) / f"{y}.jpg"
+            if local.is_file():
+                continue
+        return True
+    return False
+
+
+def dted_requires_network_fetch(
+    dted_state_list: List[str],
+    local_dted_root: Optional[Path],
+) -> bool:
+    if not dted_state_list:
+        return False
+    root = local_dted_root if local_dted_root is not None and local_dted_root.is_dir() else None
+    if root is None:
+        return True
+    for state_name in dted_state_list:
+        cand = root / state_name / f"{state_name}.zip"
+        if not cand.is_file():
+            return True
+    return False
+
+
+def http_host_reachable(url: str, timeout: float = 6.0) -> bool:
+    try:
+        session = requests.Session()
+        session.headers.update({"User-Agent": USER_AGENT})
+        r = session.head(url, timeout=timeout, allow_redirects=True)
+        if r.status_code < 400:
+            return True
+        if r.status_code == 405:
+            rr = session.get(url, timeout=timeout, stream=True)
+            try:
+                return rr.status_code < 400
+            finally:
+                rr.close()
+        return False
+    except Exception:
+        return False
+
+
 def fetch_tile(
     z: int,
     x: int,
@@ -1735,6 +1788,24 @@ def run_download(
             )
         else:
             dted_state_list = list(state_names)
+
+        need_img_net = plan_requires_network_for_imagery(plan, raw_imagery_root)
+        need_dted_net = dted_requires_network_fetch(dted_state_list, local_dted_root)
+        if need_img_net or need_dted_net:
+            log(
+                f"Pre-download check: need network for imagery={need_img_net}, "
+                f"for DTED={need_dted_net}"
+            )
+            if need_img_net and not http_host_reachable(USGS_MAPSERVER_BASE_URL):
+                log("USGS MapServer unreachable; cannot fetch missing imagery tiles.")
+                progress.error_message = OFFLINE_MISSING_DATA_MSG
+                progress.set_status("Incomplete")
+                return
+            if need_dted_net and not http_host_reachable(DTED_SERVER_BASE_URL):
+                log("DTED server unreachable; cannot fetch missing elevation packages.")
+                progress.error_message = OFFLINE_MISSING_DATA_MSG
+                progress.set_status("Incomplete")
+                return
 
         total = len(plan)
         log(f"Total tile candidates: {total}")
