@@ -988,7 +988,10 @@ def download_file(
     out_path: Path,
     log_fn: Optional[Callable[[str], None]] = None,
     progress_cb: Optional[Callable[[int, int], None]] = None,
+    cancel_check: Optional[Callable[[], None]] = None,
 ) -> str:
+    """Download url to out_path.  cancel_check() is called each chunk; if it
+    raises, the exception propagates immediately (not caught as a failure)."""
     _log = log_fn or log
     size_hint = remote_file_size(session, url)
     if size_hint < 0:
@@ -1001,9 +1004,10 @@ def download_file(
     tmp_path = out_path.with_suffix(out_path.suffix + ".part")
 
     last_emit = 0.0
+    _cancel_exc: Optional[BaseException] = None
 
     def _emit_progress(read: int, total_known: int, *, force: bool = False) -> None:
-        nonlocal last_emit
+        nonlocal last_emit, _cancel_exc
         if not progress_cb:
             return
         now = time.monotonic()
@@ -1024,6 +1028,12 @@ def download_file(
             read = 0
             with open(tmp_path, "wb") as f:
                 for chunk in r.iter_content(chunk_size=1024 * 256):
+                    if cancel_check:
+                        try:
+                            cancel_check()
+                        except BaseException as ce:
+                            _cancel_exc = ce
+                            raise
                     if chunk:
                         f.write(chunk)
                         read += len(chunk)
@@ -1031,14 +1041,18 @@ def download_file(
             _emit_progress(read, total_bytes if total_bytes > 0 else read, force=True)
         tmp_path.replace(out_path)
         return "downloaded"
-    except Exception as exc:
-        _log(f"ERROR downloading {url}: {exc}")
+    except BaseException as exc:
         try:
             if tmp_path.exists():
                 tmp_path.unlink()
         except Exception:
             pass
-        return "failed"
+        if _cancel_exc is not None:
+            raise _cancel_exc
+        if isinstance(exc, Exception):
+            _log(f"ERROR downloading {url}: {exc}")
+            return "failed"
+        raise
 
 
 def extract_state_zip(
@@ -1185,11 +1199,19 @@ def run_dted_inline_for_states(
                     log_sink(f"DTED: local copy failed ({exc}); trying network")
                     progress.set_status(f"DTED: downloading {state_name}…")
                     log_sink(f"DTED: GET {url}")
-                    result = download_file(session, url, out_path, log_fn=log_sink, progress_cb=dl_progress)
+                    result = download_file(
+                        session, url, out_path,
+                        log_fn=log_sink, progress_cb=dl_progress,
+                        cancel_check=progress.wait_if_paused,
+                    )
             else:
                 progress.set_status(f"DTED: downloading {state_name}…")
                 log_sink(f"DTED: GET {url}")
-                result = download_file(session, url, out_path, log_fn=log_sink, progress_cb=dl_progress)
+                result = download_file(
+                    session, url, out_path,
+                    log_fn=log_sink, progress_cb=dl_progress,
+                    cancel_check=progress.wait_if_paused,
+                )
             stats[result] += 1
             completed += 1
             set_overall(_DTED_W_DOWNLOAD * ((idx + 1) / n_states), f"{int(_DTED_W_DOWNLOAD * (idx + 1) / n_states * 100)}% · state {idx + 1} / {total}")

@@ -34,6 +34,15 @@ import subprocess
 import sys
 import threading
 import time
+import warnings
+
+# os._exit() is used on cancel/completion to avoid hanging threads; suppress the
+# benign "leaked semaphore" noise that Python's resource tracker emits on hard exit.
+warnings.filterwarnings(
+    "ignore",
+    message="resource_tracker.*leaked semaphore",
+    category=UserWarning,
+)
 import traceback
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, CancelledError, ThreadPoolExecutor, wait

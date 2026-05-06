@@ -55,11 +55,16 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.3.8` (tag **`v1.3.8`** on GitHub).
+**Linux / source release:** `v1.3.9` (tag **`v1.3.9`** on GitHub).
 
 **Windows:** A new Windows packaged build is **not** included in this cycle. **Use Windows release `2.8`** until a newer Windows installer is published. Source copies under `windows_build/` include the same startup behaviors when run with Python.
 
-Version **1.3.8** highlights:
+Version **1.3.9** highlights:
+
+- **Cancel works immediately during DTED download:** pressing Cancel now responds within one 256 KB chunk instead of waiting for the entire state ZIP to finish. The cancel signal is checked on every chunk in `download_file`; the partial `.part` file is cleaned up automatically.
+- **Suppress benign semaphore warning:** the `resource_tracker: leaked semaphore` warning that appeared on exit after a cancel is now suppressed — it was harmless noise from the hard-exit path.
+
+### Previous release (v1.3.8)
 
 - **Imagery Downloader — DTED state dialog removed:** the "Local Elevation Location" section has been fully removed from the download scope screen; DTED is always handled automatically.
 - **Imagery Downloader — DTED skip flag fix:** `mark_standalone_dted_skip()` is now set as soon as DTED processing begins, not only when a new zip is produced. This prevents the standalone DTED downloader from launching after the SQLite build when all required states were already on the device.
