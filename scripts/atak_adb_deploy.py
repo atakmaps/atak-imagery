@@ -765,7 +765,8 @@ class DeployWizard(tk.Tk):
             self.body.configure(
                 text=(
                     "This program will install the ATAK software and/or the TAK-UV-PRO plugin.\n\n"
-                    "The installer will guide you through the process."
+                    "The installer will guide you through the process.\n\n"
+                    "Upon completion, run the ATAK Imagery Downloader from your start menu or desktop to download any required imagery."
                 )
             )
             self.btn_primary.configure(text="Continue", command=lambda: self._advance(1))
