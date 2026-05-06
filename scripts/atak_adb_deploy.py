@@ -642,7 +642,6 @@ class DeployWizard(tk.Tk):
         self._setup_scroll = scrolledtext.ScrolledText(
             self._instructions_outer,
             height=15,
-            width=66,
             wrap=tk.WORD,
             font=("Arial", 10),
         )
@@ -666,8 +665,8 @@ class DeployWizard(tk.Tk):
         self.status = tk.Label(self.footer, text="", anchor="w", justify="left", fg="gray25")
 
         self.body.pack(fill="both", expand=True, pady=(0, 12))
-        _dw_scale = apply_resizable_window(self, 640, 540, (560, 440))
-        self.body.configure(wraplength=scaled_int(580, _dw_scale))
+        _dw_scale = apply_resizable_window(self, 700, 560, (600, 460))
+        self.body.configure(wraplength=scaled_int(640, _dw_scale))
 
         # Note label below scroll box — built after scale is known so wraplength is correct
         self._instructions_note = tk.Label(
@@ -676,13 +675,13 @@ class DeployWizard(tk.Tk):
             anchor="w",
             justify="left",
             font=("Arial", 10, "bold"),
-            wraplength=scaled_int(560, _dw_scale),
+            wraplength=scaled_int(620, _dw_scale),
         )
 
         # Step 1 — install selection panel (built after scale is known)
         self._selection_outer = tk.Frame(outer)
         self._choice_var = tk.StringVar(value="both")
-        _rb_wrap = scaled_int(560, _dw_scale)
+        _rb_wrap = scaled_int(620, _dw_scale)
         for val, label in (
             ("both", "ATAK + TAK-UV-PRO plugin (recommended for first-time install)"),
             ("atak", "ATAK only"),
