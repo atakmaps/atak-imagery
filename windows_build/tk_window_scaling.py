@@ -144,7 +144,7 @@ def pack_vertical_scroll_area(parent: tk.Misc) -> tk.Frame:
     canvas.bind("<Configure>", _on_canvas_configure)
     canvas.configure(yscrollcommand=vsb.set)
 
-    def _wheel_mousewheel(event: tk.Event) -> Optional[str]:
+    def _wheel_mousewheel(event: tk.Event) -> str | None:
         if getattr(event, "num", None) == 5:
             canvas.yview_scroll(1, "units")
         elif getattr(event, "num", None) == 4:
@@ -201,7 +201,8 @@ def pack_vertical_scroll_area_when_needed(
         if bbox is not None:
             y1, y2 = int(bbox[1]), int(bbox[3])
             ih = max(ih, y2 - y1)
-        need = ih > ch + 2
+        content_h = ih
+        need = content_h > ch + 2
         scroll_active[0] = need
         if need:
             vsb.grid(row=0, column=1, sticky="ns")
@@ -231,7 +232,7 @@ def pack_vertical_scroll_area_when_needed(
     canvas.bind("<Configure>", _on_canvas_configure)
     canvas.configure(yscrollcommand=vsb.set)
 
-    def _wheel_mousewheel(event: tk.Event) -> Optional[str]:
+    def _wheel_mousewheel(event: tk.Event) -> str | None:
         if scroll_active[0]:
             if getattr(event, "num", None) == 5:
                 canvas.yview_scroll(1, "units")
@@ -257,91 +258,49 @@ def pack_vertical_scroll_area_when_needed(
     return inner
 
 
-def raise_to_front(
-    win: tk.Misc,
-    *,
-    persistent_topmost: bool = False,
-    above: Optional[tk.Misc] = None,
-    flash_topmost: bool = True,
-    topmost_ms: int = 450,
-) -> None:
-    """
-    Raise a window so it stacks above normal windows. On many Linux WMs, ``lift()`` alone
-    leaves new windows behind; a short ``-topmost`` flash (or repeat lifts after map)
-    matches what users expect for modals.
-    """
-    try:
-        top = win.winfo_toplevel()
-    except tk.TclError:
-        return
-    try:
-        if above is not None:
-            try:
-                top.lift(above)
-            except tk.TclError:
-                top.lift()
-        else:
-            top.lift()
-        if flash_topmost or persistent_topmost:
-            top.attributes("-topmost", True)
-    except tk.TclError:
-        try:
-            top.lift()
-        except tk.TclError:
-            return
-    try:
-        top.update_idletasks()
-    except tk.TclError:
-        pass
-    try:
-        top.focus_force()
-    except tk.TclError:
-        pass
-    if flash_topmost and not persistent_topmost:
-
-        def clear() -> None:
-            try:
-                top.attributes("-topmost", False)
-            except tk.TclError:
-                pass
-
-        top.after(topmost_ms, clear)
-
-
 def ensure_window_stacking(
     win: tk.Misc,
     *,
     above: Optional[tk.Misc] = None,
     persistent_topmost: bool = False,
 ) -> None:
-    """Raise immediately and again after idle / short delays (compositor timing).
+    """Keep a window reliably in front on Linux/X11 WMs.
 
-    On some Linux WMs the first ``-topmost`` flash runs before the window is fully mapped,
-    so we repeat short flashes after idle and at staggered delays—not only ``lift()``—so
-    new roots and dialogs tend to land in front reliably.
+    Many compositors (GNOME/Mutter, KDE/KWin) honor ``-topmost`` only after the window
+    is fully mapped, which can take several frames.  We pulse ``-topmost True`` + ``lift``
+    every 100 ms for 3 seconds so the window lands in front regardless of WM timing.
+    After the pulse period the flag is cleared (unless ``persistent_topmost=True``).
     """
-    raise_to_front(
-        win,
-        persistent_topmost=persistent_topmost,
-        above=above,
-        flash_topmost=True,
-        topmost_ms=550,
-    )
     try:
         top = win.winfo_toplevel()
     except tk.TclError:
         return
 
-    def again(*, flash: bool, ms: int = 450) -> None:
-        raise_to_front(
-            win,
-            persistent_topmost=persistent_topmost,
-            above=above,
-            flash_topmost=flash,
-            topmost_ms=ms,
-        )
+    _PULSE_INTERVAL_MS = 100
+    _PULSE_DURATION_MS = 3000
+    _pulses = [0]
 
-    top.after_idle(lambda: again(flash=True, ms=380))
-    top.after(90, lambda: again(flash=True, ms=380))
-    top.after(220, lambda: again(flash=True, ms=320))
-    top.after(520, lambda: again(flash=False))
+    def _pulse() -> None:
+        try:
+            if above is not None:
+                try:
+                    top.lift(above)
+                except tk.TclError:
+                    top.lift()
+            else:
+                top.lift()
+            top.attributes("-topmost", True)
+            top.focus_force()
+        except tk.TclError:
+            return
+
+        _pulses[0] += _PULSE_INTERVAL_MS
+        if persistent_topmost or _pulses[0] < _PULSE_DURATION_MS:
+            top.after(_PULSE_INTERVAL_MS, _pulse)
+        else:
+            try:
+                top.attributes("-topmost", False)
+            except tk.TclError:
+                pass
+
+    _pulse()
