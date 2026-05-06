@@ -84,7 +84,7 @@ try:
     import tkinter as tk
     from tkinter import messagebox, scrolledtext, ttk
 
-    from git_update_check import run_startup_git_update_check
+    from git_update_check import run_startup_git_update_check, run_startup_release_update_check
     from tk_window_scaling import apply_resizable_window, ensure_window_stacking, scaled_int
 except Exception:  # pragma: no cover
     tk = None
@@ -95,6 +95,7 @@ except Exception:  # pragma: no cover
     scaled_int = None  # type: ignore[assignment]
     ensure_window_stacking = None  # type: ignore[assignment]
     run_startup_git_update_check = None  # type: ignore[assignment]
+    run_startup_release_update_check = None  # type: ignore[assignment]
 
 APP_TITLE = "ATAK Device Installer"
 DEFAULT_ATAK_PACKAGE = "com.atakmap.app.civ"
@@ -1084,6 +1085,8 @@ def main() -> None:
         sys.exit(1)
     if run_startup_git_update_check is not None:
         run_startup_git_update_check(app_title=APP_TITLE, script_path=Path(__file__).resolve())
+    if run_startup_release_update_check is not None:
+        run_startup_release_update_check(app_title=APP_TITLE, script_path=Path(__file__).resolve())
     ensure_gui_path_for_adb()
     load_deploy_env_file()
     w = DeployWizard()

@@ -1,20 +1,29 @@
 """
-Optional git-based update check against origin/main (release line).
+Optional update checks for ATAK Imagery Pipeline.
 
-Skips entirely when not running from a git checkout (e.g. PyInstaller exe or release zip
-without .git). Uses git fetch + compare; never runs in debug-only branches as the target —
-updates always move the working tree to main and pull the latest release commits.
+Two modes:
+  run_startup_git_update_check   — git clone only; fetches origin/main and offers to pull + restart.
+  run_startup_release_update_check — zip installs; hits GitHub releases API and opens the download
+                                     page if a newer version exists. Skipped in git clones (the git
+                                     check already handles those) and PyInstaller bundles.
 
-Restart after update uses os.execv with the same interpreter and argv.
+Restart after git update uses os.execv with the same interpreter and argv.
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
 import threading
+import urllib.request
+import webbrowser
 from pathlib import Path
 from typing import List, Optional, Tuple
+
+GITHUB_REPO = "atakmaps/atak-imagery"
+_RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+_RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases"
 
 
 def read_version_file(repo_root: Path) -> str:
@@ -262,6 +271,253 @@ def run_startup_git_update_check(*, app_title: str, script_path: Path) -> None:
             finish()
         else:
             root.after(100, poll)
+
+    root.after(50, poll)
+    root.mainloop()
+
+
+# ---------------------------------------------------------------------------
+# GitHub releases API update check (works from zip installs — no git needed)
+# ---------------------------------------------------------------------------
+
+_GH_RAW = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main"
+_GH_CONTENTS_API = f"https://api.github.com/repos/{GITHUB_REPO}/contents"
+_GH_HEADERS = {
+    "Accept": "application/vnd.github+json",
+    "User-Agent": "atak-imagery-update-check/1.0",
+}
+
+
+def _parse_semver(v: str) -> Tuple[int, ...]:
+    """Convert 'v1.3.1' or '1.3.1' to (1, 3, 1) for comparison."""
+    parts = []
+    for p in v.strip().lstrip("v").split("."):
+        try:
+            parts.append(int(p))
+        except ValueError:
+            parts.append(0)
+    return tuple(parts)
+
+
+def _gh_get(url: str, timeout: int = 15) -> bytes:
+    req = urllib.request.Request(url, headers=_GH_HEADERS)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read()
+
+
+class _ReleaseCheckState:
+    __slots__ = ("done", "error", "update_available", "remote_version", "release_body")
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.error: Optional[str] = None
+        self.update_available = False
+        self.remote_version = ""
+        self.release_body = ""
+
+
+def _worker_check_github_release(local_version: str, state: _ReleaseCheckState) -> None:
+    try:
+        data = json.loads(_gh_get(_RELEASES_API, timeout=8))
+        tag = (data.get("tag_name") or "").strip()
+        if not tag:
+            return
+        state.remote_version = tag.lstrip("v")
+        state.release_body = (data.get("body") or "").strip()
+        if _parse_semver(tag) > _parse_semver(local_version):
+            state.update_available = True
+    except Exception as exc:
+        state.error = str(exc)
+    finally:
+        state.done.set()
+
+
+class _DownloadState:
+    __slots__ = ("done", "error", "current_file", "total", "completed")
+
+    def __init__(self, total: int) -> None:
+        self.done = threading.Event()
+        self.error: Optional[str] = None
+        self.current_file = ""
+        self.total = total
+        self.completed = 0
+
+
+def _worker_download_and_apply(
+    scripts_dir: Path,
+    repo_root: Path,
+    dl_state: _DownloadState,
+) -> None:
+    """Download all scripts/*.py files + VERSION from main branch and replace in place."""
+    import shutil
+    import tempfile
+
+    try:
+        # Get file list for scripts/
+        entries = json.loads(_gh_get(f"{_GH_CONTENTS_API}/scripts", timeout=15))
+        py_files = [e for e in entries if e.get("type") == "file" and e["name"].endswith(".py")]
+        dl_state.total = len(py_files) + 1  # +1 for VERSION
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+
+            # Download scripts
+            for entry in py_files:
+                name = entry["name"]
+                dl_state.current_file = name
+                url = entry.get("download_url") or f"{_GH_RAW}/scripts/{name}"
+                content = _gh_get(url, timeout=30)
+                (tmp / name).write_bytes(content)
+                dl_state.completed += 1
+
+            # Download VERSION
+            dl_state.current_file = "VERSION"
+            version_content = _gh_get(f"{_GH_RAW}/VERSION", timeout=15)
+            (tmp / "VERSION").write_bytes(version_content)
+            dl_state.completed += 1
+
+            # Apply — replace scripts in place
+            for entry in py_files:
+                name = entry["name"]
+                src = tmp / name
+                if src.exists():
+                    shutil.copy2(src, scripts_dir / name)
+
+            # Update VERSION at repo root
+            shutil.copy2(tmp / "VERSION", repo_root / "VERSION")
+
+    except Exception as exc:
+        dl_state.error = str(exc)
+    finally:
+        dl_state.done.set()
+
+
+def run_startup_release_update_check(*, app_title: str, script_path: Path) -> None:
+    """Check GitHub releases API for a newer version.
+
+    When a newer version is found, offers to download the updated scripts directly
+    from the repository, replace them in the installed folder, and restart.
+
+    Designed for zip installs (no .git folder). Skipped automatically for git
+    clones (handled by run_startup_git_update_check) and PyInstaller bundles.
+    """
+    if getattr(sys, "frozen", False):
+        return
+
+    # Git clones are handled by run_startup_git_update_check; avoid a double-dialog.
+    if find_repo_root(script_path.parent) is not None:
+        return
+
+    scripts_dir = script_path.parent          # …/atak-imagery/scripts/
+    repo_root = scripts_dir.parent            # …/atak-imagery/
+
+    local_version = read_version_file(repo_root)
+    if not local_version or local_version == "unknown":
+        return
+
+    check_state = _ReleaseCheckState()
+    threading.Thread(
+        target=_worker_check_github_release,
+        args=(local_version, check_state),
+        daemon=True,
+    ).start()
+
+    import tkinter as tk
+    from tkinter import messagebox, ttk
+
+    from tk_window_scaling import ensure_window_stacking
+
+    root = tk.Tk()
+    root.withdraw()
+
+    def _lift() -> None:
+        root.deiconify()
+        root.update_idletasks()
+        ensure_window_stacking(root)
+        root.update_idletasks()
+
+    # ---- download + progress phase ----------------------------------------
+    def start_download() -> None:
+        dl_state = _DownloadState(total=1)
+        threading.Thread(
+            target=_worker_download_and_apply,
+            args=(scripts_dir, repo_root, dl_state),
+            daemon=True,
+        ).start()
+
+        prog_win = tk.Toplevel(root)
+        prog_win.title(app_title)
+        prog_win.resizable(False, False)
+        frm = tk.Frame(prog_win, padx=20, pady=16)
+        frm.pack()
+        tk.Label(frm, text="Downloading update…", font=("Arial", 10, "bold")).pack(anchor="w")
+        file_lbl = tk.Label(frm, text="", font=("Arial", 9), fg="gray40", width=40, anchor="w")
+        file_lbl.pack(anchor="w", pady=(4, 6))
+        bar = ttk.Progressbar(frm, mode="determinate", length=320, maximum=100)
+        bar.pack(fill="x")
+        prog_win.update_idletasks()
+        ensure_window_stacking(prog_win)
+
+        def poll_dl() -> None:
+            if dl_state.total > 0:
+                bar["value"] = 100 * dl_state.completed / dl_state.total
+            file_lbl.configure(text=dl_state.current_file)
+
+            if dl_state.done.is_set():
+                prog_win.destroy()
+                if dl_state.error:
+                    _lift()
+                    messagebox.showerror(
+                        app_title,
+                        f"Update failed:\n{dl_state.error}",
+                        parent=root,
+                    )
+                    root.destroy()
+                    return
+                _lift()
+                messagebox.showinfo(
+                    app_title,
+                    "Update complete. The application will now restart.",
+                    parent=root,
+                )
+                root.destroy()
+                os.execv(sys.executable, [sys.executable, *sys.argv])
+            else:
+                root.after(150, poll_dl)
+
+        root.after(150, poll_dl)
+
+    # ---- version-check phase -----------------------------------------------
+    def finish() -> None:
+        if check_state.error or not check_state.update_available:
+            root.destroy()
+            return
+
+        notes = check_state.release_body
+        if len(notes) > 500:
+            notes = notes[:500].rsplit("\n", 1)[0] + "\n…"
+
+        body = (
+            f"Version {check_state.remote_version} is available "
+            f"(you are running {local_version}).\n\n"
+        )
+        if notes:
+            body += notes + "\n\n"
+        body += "Update now? The scripts will be replaced and the app will restart automatically."
+
+        _lift()
+        if not messagebox.askyesno(app_title, body, parent=root):
+            root.destroy()
+            return
+
+        root.withdraw()
+        start_download()
+
+    def poll() -> None:
+        if check_state.done.is_set():
+            finish()
+        else:
+            root.after(200, poll)
 
     root.after(50, poll)
     root.mainloop()

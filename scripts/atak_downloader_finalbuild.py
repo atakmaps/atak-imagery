@@ -45,7 +45,7 @@ import requests
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
-from git_update_check import run_startup_git_update_check
+from git_update_check import run_startup_git_update_check, run_startup_release_update_check
 from tk_window_scaling import (
     apply_fixed_size_window,
     apply_resizable_window,
@@ -2457,6 +2457,7 @@ def pump_gui_logs(window: ProgressWindow) -> None:
 
 def main() -> None:
     run_startup_git_update_check(app_title=APP_TITLE, script_path=Path(__file__).resolve())
+    run_startup_release_update_check(app_title=APP_TITLE, script_path=Path(__file__).resolve())
     log(f"Log file: {LOGGER.log_file}")
     zoom_payload = read_zoom_estimates_file()
     zoom_estimates = zoom_payload["states"]
