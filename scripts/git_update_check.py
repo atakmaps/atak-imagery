@@ -26,6 +26,21 @@ _RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 _RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases"
 
 
+def _center_window(win: object) -> None:
+    """Center a Tk window on the screen."""
+    try:
+        win.update_idletasks()  # type: ignore[attr-defined]
+        w = win.winfo_width()  # type: ignore[attr-defined]
+        h = win.winfo_height()  # type: ignore[attr-defined]
+        sw = win.winfo_screenwidth()  # type: ignore[attr-defined]
+        sh = win.winfo_screenheight()  # type: ignore[attr-defined]
+        x = max(0, (sw - w) // 2)
+        y = max(0, (sh - h) // 2)
+        win.geometry(f"+{x}+{y}")  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+
 def read_version_file(repo_root: Path) -> str:
     vf = repo_root / "VERSION"
     if vf.is_file():
@@ -215,6 +230,7 @@ def run_startup_git_update_check(*, app_title: str, script_path: Path) -> None:
         bar.pack(pady=(8, 0))
         bar.start(12)
         progress.update_idletasks()
+        _center_window(progress)
         ensure_window_stacking(progress)
 
     progress_timer = root.after(2000, show_progress)
@@ -257,6 +273,7 @@ def run_startup_git_update_check(*, app_title: str, script_path: Path) -> None:
         )
         root.deiconify()
         root.update_idletasks()
+        _center_window(root)
         ensure_window_stacking(root)
         root.update_idletasks()
         if not messagebox.askyesno(app_title, body, parent=root):
@@ -433,6 +450,7 @@ def run_startup_release_update_check(*, app_title: str, script_path: Path) -> No
     def _lift() -> None:
         root.deiconify()
         root.update_idletasks()
+        _center_window(root)
         ensure_window_stacking(root)
         root.update_idletasks()
 
@@ -456,6 +474,7 @@ def run_startup_release_update_check(*, app_title: str, script_path: Path) -> No
         bar = ttk.Progressbar(frm, mode="determinate", length=320, maximum=100)
         bar.pack(fill="x")
         prog_win.update_idletasks()
+        _center_window(prog_win)
         ensure_window_stacking(prog_win)
 
         def poll_dl() -> None:
