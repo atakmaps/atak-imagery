@@ -39,11 +39,11 @@ from collections import deque
 from concurrent.futures import FIRST_COMPLETED, CancelledError, ThreadPoolExecutor, wait
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Set, Tuple, Optional
+from typing import Any, Callable, Dict, List, Set, Tuple, Optional
 
 import requests
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 
 from git_update_check import run_startup_git_update_check, run_startup_release_update_check
 from tk_window_scaling import (
@@ -813,57 +813,6 @@ class DownloadScopeDialog(tk.Tk):
 
         tk.Button(raw_row, text="Browse…", command=browse_raw).grid(row=0, column=1, sticky="e")
 
-        tk.Label(
-            scroll_inner,
-            text="Local Elevation Location",
-            font=("Arial", 11, "bold"),
-        ).pack(anchor="w", pady=(_g2, 4))
-        _add_wrapped(
-            scroll_inner,
-            text="If you have elevation data (DTED) on a local disk, choose the path below.",
-            justify="left",
-            wraplength=_scope_wrap,
-            anchor="w",
-        ).pack(anchor="w", pady=(0, 4))
-        _add_wrapped(
-            scroll_inner,
-            text="Note: This data must be stored in this format:",
-            justify="left",
-            wraplength=_scope_wrap,
-            anchor="w",
-        ).pack(anchor="w", pady=(0, 2))
-        tk.Label(
-            scroll_inner,
-            text="State name/State name.zip",
-            justify="left",
-            anchor="w",
-            font=("Courier", 10),
-        ).pack(anchor="w", padx=(_fmt_indent, 0), pady=(0, 6))
-        _add_wrapped(
-            scroll_inner,
-            text=(
-                "Any required elevation not present on the local disk will be downloaded. "
-                "Leave blank if you do not have the elevation data required to build your selection."
-            ),
-            justify="left",
-            wraplength=_scope_wrap,
-            anchor="w",
-        ).pack(anchor="w", pady=(0, 12))
-
-        dted_row = tk.Frame(scroll_inner)
-        dted_row.pack(fill="x", pady=(0, 0))
-        dted_row.grid_columnconfigure(0, weight=1)
-        self.dted_var = tk.StringVar(value="")
-        tk.Entry(dted_row, textvariable=self.dted_var).grid(row=0, column=0, sticky="ew", padx=(0, 8))
-
-        def browse_dted() -> None:
-            initial = Path(self.dted_var.get().strip() or str(Path.home()))
-            folder = pick_directory("Local DTED state zips (optional)", initial, self)
-            if folder:
-                self.dted_var.set(folder)
-
-        tk.Button(dted_row, text="Browse…", command=browse_dted).grid(row=0, column=1, sticky="e")
-
         apply_resizable_window(self, 740, 780, (560, 300))
 
         self.bind("<Configure>", lambda e: _sync_scroll_wrap())
@@ -893,7 +842,7 @@ class DownloadScopeDialog(tk.Tk):
         else:
             self.radius_region_folder = ""
         self.raw_imagery_path = self.raw_var.get().strip()
-        self.local_dted_path = self.dted_var.get().strip()
+        self.local_dted_path = ""
         self.accepted = True
         self.destroy()
 
@@ -1139,6 +1088,7 @@ class ZoomDialog(tk.Tk):
         radius_miles: Optional[float] = None,
         radius_imagery_folder: Optional[str] = None,
         avg_tile_bytes_by_zoom: Optional[Dict[int, int]] = None,
+        precomputed_radius_tiles: Optional[Dict[int, int]] = None,
     ) -> None:
         super().__init__()
         # Hide until layout + radius tile counts finish; otherwise a blank Tk flashes for seconds
@@ -1290,7 +1240,11 @@ class ZoomDialog(tk.Tk):
             total_tiles = 0
             total_bytes = 0
             if download_scope == "radius":
-                if radius_center is not None and radius_miles is not None:
+                if precomputed_radius_tiles is not None:
+                    n = precomputed_radius_tiles.get(z, 0)
+                    total_tiles = n
+                    total_bytes = n * int(avgs.get(z, 25000))
+                elif radius_center is not None and radius_miles is not None:
                     tiles = compute_tiles_for_radius(radius_center[0], radius_center[1], radius_miles, z)
                     n = len(tiles)
                     avg_b = int(avgs.get(z, 25000))
@@ -1691,6 +1645,46 @@ class ProgressWindow(tk.Tk):
 # Workflow helpers
 # -----------------------------
 
+def run_with_busy_dialog(message: str, fn: Callable[[], None]) -> None:
+    """Show a pulsing zenity progress bar while ``fn()`` runs, then close it.
+
+    Uses zenity (already a dependency on Linux) so no extra Tk root is created.
+    Falls back to running ``fn()`` silently if zenity is unavailable.
+    ``fn()`` is called on the main thread; zenity runs in a subprocess.
+    """
+    if not shutil.which("zenity"):
+        fn()
+        return
+
+    proc = subprocess.Popen(
+        [
+            "zenity",
+            "--progress",
+            "--pulsate",
+            "--no-cancel",
+            "--auto-close",
+            "--width=400",
+            "--height=120",
+            f"--title={APP_TITLE}",
+            f"--text={message}",
+        ],
+        stdin=subprocess.PIPE,
+    )
+    try:
+        fn()
+    finally:
+        try:
+            proc.stdin.write(b"100\n")
+            proc.stdin.flush()
+            proc.stdin.close()
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=3)
+        except Exception:
+            proc.kill()
+
+
 def show_summary_confirm(
     selected_states: List[str],
     selected_zooms: List[int],
@@ -1739,13 +1733,16 @@ def show_summary_confirm(
     except tk.TclError:
         pass
     root.configure(cursor="arrow")
-    root.withdraw()
+    # Position at center but keep visible so topmost works on GNOME/Mutter.
+    root.geometry("1x1")
     root.update_idletasks()
-    try:
-        root.update()
-    except tk.TclError:
-        pass
-    ensure_window_stacking(root)
+    sw = root.winfo_screenwidth()
+    sh = root.winfo_screenheight()
+    root.geometry(f"1x1+{sw // 2}+{sh // 2}")
+    root.attributes("-topmost", True)
+    root.lift()
+    root.focus_force()
+    root.update_idletasks()
     messagebox.showinfo(APP_TITLE, msg, parent=root)
     try:
         root.destroy()
@@ -1836,11 +1833,15 @@ def ask_output_parent() -> str:
 
     root = tk.Tk()
     root.configure(cursor="arrow")
-    root.withdraw()
-    root.attributes("-topmost", True)
+    root.geometry("1x1")
     root.update_idletasks()
+    sw = root.winfo_screenwidth()
+    sh = root.winfo_screenheight()
+    root.geometry(f"1x1+{sw // 2}+{sh // 2}")
+    root.attributes("-topmost", True)
     root.lift()
-    ensure_window_stacking(root)
+    root.focus_force()
+    root.update_idletasks()
     try:
         folder = filedialog.askdirectory(
             title=pick_title,
@@ -2345,6 +2346,10 @@ def run_download(
             if not dted_state_list:
                 log("DTED: no state packages match this download region; skipping.")
             else:
+                # Mark that DTED is handled inline so the SQLite builder won't
+                # launch the standalone DTED downloader afterward.
+                mark_standalone_dted_skip()
+
                 # Check what's already on the device and skip states already installed.
                 progress.set_status("DTED: checking what is already installed on device…")
                 device_dted_states: Set[str] = query_device_installed_dted_states(log) or set()
@@ -2370,7 +2375,6 @@ def run_download(
                         local_state_zip_root=local_dted_root,
                     )
                     if dted_zip is not None:
-                        mark_standalone_dted_skip()
                         dted_note = f"\n\nDTED archive ready:\n{dted_zip.name}"
         except ImportError as exc:
             log(f"DTED: skipped (module not loadable: {exc}).")
@@ -2603,6 +2607,15 @@ def main() -> None:
                     break
 
                 while True:
+                    _radius_tiles: Dict[int, int] = {}
+
+                    def _precompute_radius_tiles() -> None:
+                        for z in range(10, 17):
+                            tiles = compute_tiles_for_radius(rd.center_lat, rd.center_lon, rd.radius_miles, z)
+                            _radius_tiles[z] = len(tiles)
+
+                    run_with_busy_dialog("Calculating coverage…", _precompute_radius_tiles)
+
                     zoom_dialog = ZoomDialog(
                         [],
                         zoom_estimates,
@@ -2611,6 +2624,7 @@ def main() -> None:
                         radius_miles=rd.radius_miles,
                         radius_imagery_folder=scope_dlg.radius_region_folder,
                         avg_tile_bytes_by_zoom=avg_tile_bytes_map,
+                        precomputed_radius_tiles=_radius_tiles,
                     )
                     zoom_dialog.mainloop()
                     if zoom_dialog.go_back:
@@ -2625,10 +2639,8 @@ def main() -> None:
                     est_total_bytes = 0
                     est_total_tiles = 0
                     for z in selected_zooms:
-                        tiles = compute_tiles_for_radius(rd.center_lat, rd.center_lon, rd.radius_miles, z)
-                        n = len(tiles)
-                        ab = int(avg_tile_bytes_map.get(z, 25000))
-                        est_total_bytes += n * ab
+                        n = _radius_tiles.get(z, 0)
+                        est_total_bytes += n * int(avg_tile_bytes_map.get(z, 25000))
                         est_total_tiles += n
 
                     radius_summary = (

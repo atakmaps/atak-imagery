@@ -55,11 +55,18 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.3.0` (tag **`v1.3.0`** on GitHub).
+**Linux / source release:** `v1.3.8` (tag **`v1.3.8`** on GitHub).
 
 **Windows:** A new Windows packaged build is **not** included in this cycle. **Use Windows release `2.8`** until a newer Windows installer is published. Source copies under `windows_build/` include the same startup behaviors when run with Python.
 
-Version **1.3.0** highlights:
+Version **1.3.8** highlights:
+
+- **Imagery Downloader — DTED state dialog removed:** the "Local Elevation Location" section has been fully removed from the download scope screen; DTED is always handled automatically.
+- **Imagery Downloader — DTED skip flag fix:** `mark_standalone_dted_skip()` is now set as soon as DTED processing begins, not only when a new zip is produced. This prevents the standalone DTED downloader from launching after the SQLite build when all required states were already on the device.
+- **Imagery Downloader — "Calculating coverage" window:** the zenity progress window shown while computing radius tile counts is now wider (400 × 120 px) so the text fits comfortably.
+- **Window stacking — no more rapid flashing:** `ensure_window_stacking` now does three quiet nudges (150 ms apart) instead of 30 pulses per 3 seconds, and `focus_force()` has been removed — eliminating the rapid-pulse visual artifact seen on the installer and summary dialogs.
+
+### Previous release (v1.3.0)
 
 - **Device Installer — installer-only mode:** no longer launches the imagery downloader automatically. A new **install selection screen** lets you choose ATAK + Plugin, ATAK only, or Plugin only. A final completion screen confirms the install and reminds you to run the imagery downloader separately.
 - **Device Installer — signature mismatch recovery:** if the device has the plugin signed with a different certificate (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`), the installer automatically performs a full uninstall then reinstalls cleanly — no manual intervention required.

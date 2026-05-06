@@ -267,20 +267,23 @@ def ensure_window_stacking(
     """Keep a window reliably in front on Linux/X11 WMs.
 
     Many compositors (GNOME/Mutter, KDE/KWin) honor ``-topmost`` only after the window
-    is fully mapped, which can take several frames.  We pulse ``-topmost True`` + ``lift``
-    every 100 ms for 3 seconds so the window lands in front regardless of WM timing.
-    After the pulse period the flag is cleared (unless ``persistent_topmost=True``).
+    is fully mapped, which can take several frames.  Three quick nudges (lift + topmost)
+    spaced 150 ms apart are enough to beat WM timing without causing visible flashing.
+    After the nudges the flag is cleared (unless ``persistent_topmost=True``, in which
+    case the window stays on top and is re-nudged every 5 seconds).
     """
     try:
         top = win.winfo_toplevel()
     except tk.TclError:
         return
 
-    _PULSE_INTERVAL_MS = 100
-    _PULSE_DURATION_MS = 3000
-    _pulses = [0]
+    # Three quick nudges spaced 150 ms apart to beat WM restack timing without
+    # visible flashing. focus_force() is intentionally omitted — it caused the
+    # rapid-pulse appearance reported by the user.
+    _MAX_NUDGES = 3
+    _nudge_count = [0]
 
-    def _pulse() -> None:
+    def _nudge() -> None:
         try:
             if above is not None:
                 try:
@@ -290,17 +293,18 @@ def ensure_window_stacking(
             else:
                 top.lift()
             top.attributes("-topmost", True)
-            top.focus_force()
         except tk.TclError:
             return
 
-        _pulses[0] += _PULSE_INTERVAL_MS
-        if persistent_topmost or _pulses[0] < _PULSE_DURATION_MS:
-            top.after(_PULSE_INTERVAL_MS, _pulse)
+        _nudge_count[0] += 1
+        if persistent_topmost:
+            top.after(5000, _nudge)
+        elif _nudge_count[0] < _MAX_NUDGES:
+            top.after(150, _nudge)
         else:
             try:
                 top.attributes("-topmost", False)
             except tk.TclError:
                 pass
 
-    _pulse()
+    _nudge()
