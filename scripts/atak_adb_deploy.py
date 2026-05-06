@@ -648,14 +648,6 @@ class DeployWizard(tk.Tk):
         )
         self._setup_scroll.pack(fill="both", expand=True)
         self._setup_scroll.configure(cursor="arrow")
-        self._instructions_note = tk.Label(
-            self._instructions_outer,
-            text="",
-            anchor="w",
-            justify="left",
-            font=("Arial", 10, "bold"),
-            wraplength=580,
-        )
 
         # Bottom strip: buttons directly above progress (same for ATAK install, plugin install, etc.)
         self.footer = tk.Frame(outer)
@@ -676,6 +668,16 @@ class DeployWizard(tk.Tk):
         self.body.pack(fill="both", expand=True, pady=(0, 12))
         _dw_scale = apply_resizable_window(self, 640, 540, (560, 440))
         self.body.configure(wraplength=scaled_int(580, _dw_scale))
+
+        # Note label below scroll box — built after scale is known so wraplength is correct
+        self._instructions_note = tk.Label(
+            self._instructions_outer,
+            text="",
+            anchor="w",
+            justify="left",
+            font=("Arial", 10, "bold"),
+            wraplength=scaled_int(560, _dw_scale),
+        )
 
         # Step 1 — install selection panel (built after scale is known)
         self._selection_outer = tk.Frame(outer)
