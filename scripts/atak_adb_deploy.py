@@ -447,6 +447,28 @@ def _device_rejects_allow_downgrade_flag(combined: str) -> bool:
     return False
 
 
+def pin_shortcut_to_home(serial: str, log_fn=None) -> None:
+    """Request that the launcher pin an ATAK shortcut on the home screen.
+
+    Uses ACTION_INSTALL_SHORTCUT (works on most launchers including Samsung and stock Android).
+    Silently ignored on launchers that don't support it.
+    """
+    pkg = atak_package_name()
+    cmd = (
+        "am broadcast -a com.android.launcher.action.INSTALL_SHORTCUT "
+        f"--es duplicate false "
+        f"--es name 'ATAK' "
+        f"--es packageName '{pkg}' "
+        f"--es className 'com.atakmap.app.ATAKActivity'"
+    )
+    r = run_adb(["shell", cmd], serial=serial, timeout=30)
+    if log_fn:
+        if r.returncode == 0:
+            log_fn("Home screen shortcut requested.")
+        else:
+            log_fn(f"Home screen shortcut broadcast failed (may not be supported by this launcher): {r.stderr}")
+
+
 def launch_atak(serial: str) -> None:
     pkg = atak_package_name()
     r = run_adb(
@@ -625,6 +647,14 @@ class DeployWizard(tk.Tk):
         )
         self._setup_scroll.pack(fill="both", expand=True)
         self._setup_scroll.configure(cursor="arrow")
+        self._instructions_note = tk.Label(
+            self._instructions_outer,
+            text="",
+            anchor="w",
+            justify="left",
+            font=("Arial", 10, "bold"),
+            wraplength=580,
+        )
 
         # Bottom strip: buttons directly above progress (same for ATAK install, plugin install, etc.)
         self.footer = tk.Frame(outer)
@@ -701,11 +731,14 @@ class DeployWizard(tk.Tk):
         self._instructions_outer.pack(fill="both", expand=True, pady=(0, 12), before=self.footer)
         self._setup_scroll.configure(state="normal")
         self._setup_scroll.delete("1.0", tk.END)
-        self._setup_scroll.tag_configure("bold_note", font=("Arial", 10, "bold"))
         self._setup_scroll.insert("1.0", body)
-        if footer_note:
-            self._setup_scroll.insert(tk.END, f"\n\n{footer_note}", "bold_note")
         self._setup_scroll.configure(state="disabled")
+        if footer_note:
+            self._instructions_note.configure(text=footer_note)
+            self._instructions_note.pack(fill="x", pady=(8, 0))
+        else:
+            self._instructions_note.pack_forget()
+            self._instructions_note.configure(text="")
 
     def _show_selection_panel(self) -> None:
         self.body.pack_forget()
@@ -939,6 +972,7 @@ class DeployWizard(tk.Tk):
 
                 self.after(0, self.progress.start, 8)
                 install_apk(self.selected_serial, apk_path, ui_install)
+                pin_shortcut_to_home(self.selected_serial or "", log)
                 self.after(0, self.progress.stop)
                 if is_temp:
                     try:
