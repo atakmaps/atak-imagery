@@ -315,27 +315,34 @@ def ensure_window_stacking(
     above: Optional[tk.Misc] = None,
     persistent_topmost: bool = False,
 ) -> None:
-    """Raise immediately and again after idle / short delays (compositor timing)."""
+    """Raise immediately and again after idle / short delays (compositor timing).
+
+    On some Linux WMs the first ``-topmost`` flash runs before the window is fully mapped,
+    so we repeat short flashes after idle and at staggered delays—not only ``lift()``—so
+    new roots and dialogs tend to land in front reliably.
+    """
     raise_to_front(
         win,
         persistent_topmost=persistent_topmost,
         above=above,
         flash_topmost=True,
+        topmost_ms=550,
     )
     try:
         top = win.winfo_toplevel()
     except tk.TclError:
         return
 
-    def again(*, flash: bool) -> None:
+    def again(*, flash: bool, ms: int = 450) -> None:
         raise_to_front(
             win,
             persistent_topmost=persistent_topmost,
             above=above,
             flash_topmost=flash,
-            topmost_ms=450,
+            topmost_ms=ms,
         )
 
-    top.after_idle(lambda: again(flash=False))
-    top.after(100, lambda: again(flash=False))
-    top.after(280, lambda: again(flash=False))
+    top.after_idle(lambda: again(flash=True, ms=380))
+    top.after(90, lambda: again(flash=True, ms=380))
+    top.after(220, lambda: again(flash=True, ms=320))
+    top.after(520, lambda: again(flash=False))

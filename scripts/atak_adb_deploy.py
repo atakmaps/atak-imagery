@@ -98,6 +98,7 @@ except Exception:  # pragma: no cover
 
 APP_TITLE = "ATAK Device Installer"
 DEFAULT_ATAK_PACKAGE = "com.atakmap.app.civ"
+DEFAULT_PLUGIN_PACKAGE = "com.uvpro.plugin"
 
 # After ATAK APK is installed: show this while the user completes first-run on device.
 ATAK_POST_INSTALL_SETUP_INSTRUCTIONS = (
@@ -121,13 +122,11 @@ ATAK_POST_INSTALL_SETUP_INSTRUCTIONS = (
     "When setup is complete, select Continue."
 )
 
-# After plugin APK is installed: pause before starting the imagery downloader.
+# After plugin APK is installed: confirm the in-app prompt on the device.
 ATAK_POST_PLUGIN_SETUP_INSTRUCTIONS = (
     "Plugin install is complete.\n\n"
     "Please select OK on your device to install the plugin.\n\n"
-    "When you select Continue, the ATAK Imagery Downloader will open next to download "
-    "map tiles and terrain. That may take a while depending on what you select.\n\n"
-    "Select Continue when you are ready."
+    "When the plugin is installed on the device, click Continue."
 )
 
 if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
@@ -386,8 +385,14 @@ def download_file(url: str, dest: Path, status_cb=None, timeout: int = 600) -> N
                     status_cb(downloaded, total)
 
 
-def install_apk(serial: str, apk_path: Path, status_cb=None) -> None:
-    """Install APK with optional downgrade retries (newer and older Android pm installs)."""
+def install_apk(serial: str, apk_path: Path, status_cb=None, *, package_name: Optional[str] = None) -> None:
+    """Install APK with downgrade and signature-mismatch retries.
+
+    If the device already has the package signed with a different certificate
+    (INSTALL_FAILED_UPDATE_INCOMPATIBLE), the old package is uninstalled and the
+    install is retried automatically.  Pass ``package_name`` so the uninstall
+    targets the correct package; if omitted the recovery step is skipped.
+    """
     name = apk_path.name
     if status_cb:
         status_cb(f"Installing {name}…")
@@ -409,6 +414,22 @@ def install_apk(serial: str, apk_path: Path, status_cb=None) -> None:
             if status_cb:
                 status_cb(f"Installing {name} (allow downgrade, -d)…")
             r = run_adb(["install", "-d", "-r", str(apk_path)], serial=serial, timeout=600)
+            combined = (r.stderr or "") + (r.stdout or "")
+
+    # Signature mismatch: uninstall the old package and retry once.
+    if r.returncode != 0 and "INSTALL_FAILED_UPDATE_INCOMPATIBLE" in combined:
+        if package_name:
+            # -k cannot clear the stored signature — only a full uninstall does.
+            log(f"adb install: signature mismatch for {package_name}; performing full uninstall (clears signature) and retrying")
+            if status_cb:
+                status_cb(f"Removing old {name} (signature changed — full uninstall required)…")
+            run_adb(["uninstall", package_name], serial=serial, timeout=120)
+            if status_cb:
+                status_cb(f"Installing {name}…")
+            r = run_adb(["install", "-r", str(apk_path)], serial=serial, timeout=600)
+            combined = (r.stderr or "") + (r.stdout or "")
+        else:
+            log("adb install: INSTALL_FAILED_UPDATE_INCOMPATIBLE but no package_name provided for uninstall")
 
     if r.returncode != 0:
         raise RuntimeError(f"adb install failed:\n{(r.stderr or r.stdout).strip()}")
@@ -582,6 +603,8 @@ class DeployWizard(tk.Tk):
         self._manifest_cache: Optional[Dict[str, Any]] = None
         self._atak_version_value = ""
         self._plugin_report_label = ""
+        # "atak", "plugin", or "both" — set on step 1
+        self._install_choice: str = "both"
 
         outer = tk.Frame(self, padx=16, pady=16)
         outer.configure(cursor="arrow")
@@ -620,8 +643,29 @@ class DeployWizard(tk.Tk):
         self.status = tk.Label(self.footer, text="", anchor="w", justify="left", fg="gray25")
 
         self.body.pack(fill="both", expand=True, pady=(0, 12))
-        _dw_scale = apply_resizable_window(self, 560, 520, (520, 420))
-        self.body.configure(wraplength=scaled_int(500, _dw_scale))
+        _dw_scale = apply_resizable_window(self, 640, 540, (560, 440))
+        self.body.configure(wraplength=scaled_int(580, _dw_scale))
+
+        # Step 1 — install selection panel (built after scale is known)
+        self._selection_outer = tk.Frame(outer)
+        self._choice_var = tk.StringVar(value="both")
+        _rb_wrap = scaled_int(560, _dw_scale)
+        for val, label in (
+            ("both", "ATAK + TAK-UV-PRO plugin (recommended for first-time install)"),
+            ("atak", "ATAK only"),
+            ("plugin", "TAK-UV-PRO plugin only"),
+        ):
+            rb = tk.Radiobutton(
+                self._selection_outer,
+                text=label,
+                variable=self._choice_var,
+                value=val,
+                anchor="w",
+                justify="left",
+                wraplength=_rb_wrap,
+                font=("Arial", 11),
+            )
+            rb.pack(anchor="w", fill="x", pady=4)
         self.btn_row.pack(fill="x")
         self.progress.pack(fill="x", pady=(8, 0))
         self.status.pack(fill="x", pady=(4, 0))
@@ -648,38 +692,61 @@ class DeployWizard(tk.Tk):
 
     def _show_body_label(self) -> None:
         self._instructions_outer.pack_forget()
+        self._selection_outer.pack_forget()
         self.body.pack(fill="both", expand=True, pady=(0, 12), before=self.footer)
 
-    def _show_instructions_panel(self, body: str) -> None:
+    def _show_instructions_panel(self, body: str, *, footer_note: str = "") -> None:
         self.body.pack_forget()
+        self._selection_outer.pack_forget()
         self._instructions_outer.pack(fill="both", expand=True, pady=(0, 12), before=self.footer)
         self._setup_scroll.configure(state="normal")
         self._setup_scroll.delete("1.0", tk.END)
+        self._setup_scroll.tag_configure("bold_note", font=("Arial", 10, "bold"))
         self._setup_scroll.insert("1.0", body)
+        if footer_note:
+            self._setup_scroll.insert(tk.END, f"\n\n{footer_note}", "bold_note")
         self._setup_scroll.configure(state="disabled")
 
+    def _show_selection_panel(self) -> None:
+        self.body.pack_forget()
+        self._instructions_outer.pack_forget()
+        self._selection_outer.pack(fill="both", expand=True, pady=(0, 12), before=self.footer)
+
     def _show_setup_instructions_panel(self) -> None:
-        self._show_instructions_panel(ATAK_POST_INSTALL_SETUP_INSTRUCTIONS)
+        self._show_instructions_panel(
+            ATAK_POST_INSTALL_SETUP_INSTRUCTIONS,
+            footer_note=(
+                "NOTE: Make sure you have accomplished the ATAK setup BEFORE you select Continue."
+            ),
+        )
 
     def _render_step(self) -> None:
         self.progress.stop()
         self.progress.pack_forget()
 
+        # Step 0 — welcome
         if self._step == 0:
             self._show_body_label()
             self.step_label.configure(text="")
             self.body.configure(
                 text=(
-                    "This program is the full install assuming you have not installed ATAK or Imagery. "
-                    "The installer will guide you through the process.\n\n"
-                    "If you would like to add additional imagery at a later time, run the ATAK Imagery Downloader "
-                    "application, as it does not include ATAK installation."
+                    "This program will install the ATAK software and/or the TAK-UV-PRO plugin.\n\n"
+                    "The installer will guide you through the process."
                 )
             )
             self.btn_primary.configure(text="Continue", command=lambda: self._advance(1))
             self.status.configure(text="")
 
+        # Step 1 — choose what to install
         elif self._step == 1:
+            self.body.configure(text="")
+            self._show_selection_panel()
+            self.step_label.configure(text="What would you like to install?")
+            self.btn_primary.configure(state="normal", text="Continue", command=self._step_confirm_choice)
+            self.status.configure(text="")
+
+        # Step 2 — connect device
+        elif self._step == 2:
             self._show_body_label()
             self.step_label.configure(text="Connect your Android device")
             self.body.configure(
@@ -693,7 +760,8 @@ class DeployWizard(tk.Tk):
             self.btn_primary.configure(state="normal", text="Continue", command=self._step_connect_check)
             self.status.configure(text="")
 
-        elif self._step == 2:
+        # Step 3 — install ATAK  (skipped when plugin-only)
+        elif self._step == 3:
             self._show_body_label()
             self.step_label.configure(text="Installing ATAK")
             self.body.configure(
@@ -703,26 +771,48 @@ class DeployWizard(tk.Tk):
             self.btn_primary.configure(state="disabled", text="Working…")
             self._begin_install_atak()
 
-        elif self._step == 3:
+        # Step 4 — ATAK first-run setup  (skipped when plugin-only)
+        elif self._step == 4:
             self._show_setup_instructions_panel()
             self.step_label.configure(text="Complete ATAK setup on device")
-            self.btn_primary.configure(state="normal", text="Continue", command=lambda: self._advance(4))
+            # After ATAK setup: go to plugin install if needed, else skip to completion
+            next_step = 5 if self._install_choice == "both" else 7
+            self.btn_primary.configure(
+                state="normal", text="Continue", command=lambda n=next_step: self._advance(n)
+            )
             self.status.configure(text="")
 
-        elif self._step == 4:
+        # Step 5 — install plugin  (skipped when atak-only)
+        elif self._step == 5:
             self._show_body_label()
             self.step_label.configure(text="Installing plugin")
-            self.body.configure(text="Installing the ATAK plugin from your build.")
+            self.body.configure(text="Installing the TAK-UV-PRO plugin on your device.")
             self.progress.pack(fill="x", pady=(8, 0), before=self.status)
             self.btn_primary.configure(state="disabled", text="Working…")
             self._begin_install_plugin()
 
-        elif self._step == 5:
+        # Step 6 — post-plugin instructions  (skipped when atak-only)
+        elif self._step == 6:
             self._show_instructions_panel(ATAK_POST_PLUGIN_SETUP_INSTRUCTIONS)
             self.step_label.configure(text="Almost done")
             self.btn_primary.configure(
-                state="normal", text="Continue", command=self._finish_and_launch_downloader
+                state="normal", text="Continue", command=lambda: self._advance(7)
             )
+            self.status.configure(text="")
+
+        # Step 7 — completion
+        elif self._step == 7:
+            self._show_body_label()
+            self.step_label.configure(text="Installation complete")
+            self.body.configure(
+                text=(
+                    "Your device install is complete.\n\n"
+                    "You may now exit the program. Restart ATAK upon completion.\n\n"
+                    "Please run the ATAK Imagery Downloader to install imagery on your device."
+                )
+            )
+            self.btn_primary.configure(text="Exit", command=self.destroy)
+            self.btn_secondary.configure(state="disabled")
             self.status.configure(text="")
 
     def _on_primary(self) -> None:
@@ -733,8 +823,13 @@ class DeployWizard(tk.Tk):
         self._step = n
         self._render_step()
 
+    def _step_confirm_choice(self) -> None:
+        self._install_choice = self._choice_var.get()
+        self._advance(2)
+
     def _step_connect_check(self) -> None:
-        if not self._atak_install_ready():
+        need_atak = self._install_choice in ("atak", "both")
+        if need_atak and not self._atak_install_ready():
             self._focus_for_dialog()
             messagebox.showerror(
                 APP_TITLE,
@@ -777,7 +872,11 @@ class DeployWizard(tk.Tk):
 
         self.selected_serial = serial
         os.environ["ANDROID_SERIAL"] = serial
-        self._advance(2)
+        # Skip ATAK install steps when plugin-only
+        if self._install_choice == "plugin":
+            self._advance(5)
+        else:
+            self._advance(3)
 
     def _ask_serial_choice(self, devices: List[str]) -> Optional[str]:
         top = tk.Toplevel(self)
@@ -867,7 +966,7 @@ class DeployWizard(tk.Tk):
     def _after_install_atak(self, err: Optional[Exception]) -> None:
         if err:
             self.progress.stop()
-            self._step = 0
+            self._step = 2
             self._cleanup_temp_apks()
             self._focus_for_dialog()
             messagebox.showerror(APP_TITLE, f"Could not install ATAK:\n{err}", parent=self)
@@ -877,7 +976,7 @@ class DeployWizard(tk.Tk):
             launch_atak(self.selected_serial or "")
         except Exception:
             log("launch_atak after ATAK install failed (user can open ATAK manually)")
-        self._advance(3)
+        self._advance(4)
 
     def _begin_install_plugin(self) -> None:
         ser = self.selected_serial or ""
@@ -907,7 +1006,12 @@ class DeployWizard(tk.Tk):
                     self.after(0, lambda m=msg: self.status.configure(text=m))
 
                 self.after(0, self.progress.start, 8)
-                install_apk(self.selected_serial, apk_path, ui_install)
+                install_apk(
+                    self.selected_serial,
+                    apk_path,
+                    ui_install,
+                    package_name=DEFAULT_PLUGIN_PACKAGE,
+                )
                 self.after(0, self.progress.stop)
 
                 if self.report_url:
@@ -933,33 +1037,12 @@ class DeployWizard(tk.Tk):
             self._cleanup_temp_apks()
             self._focus_for_dialog()
             messagebox.showerror(APP_TITLE, f"Could not install plugin:\n{err}", parent=self)
-            self._step = 3
+            # Go back to ATAK setup step if we did both, or connect step if plugin-only
+            self._step = 4 if self._install_choice == "both" else 2
             self._render_step()
             return
         self._cleanup_temp_apks()
-        self._advance(5)
-
-    def _finish_and_launch_downloader(self) -> None:
-        """Start imagery pipeline (installer entry: skips standalone downloader intro/exit UI)."""
-        try:
-            self.progress.stop()
-            self.progress.pack_forget()
-        except Exception:
-            pass
-        self.after_idle(self._launch_downloader)
-
-    def _launch_downloader(self) -> None:
-        try:
-            subprocess.Popen([sys.executable, str(DOWNLOADER)])
-        except Exception as e:
-            self._focus_for_dialog()
-            messagebox.showerror(
-                APP_TITLE,
-                f"Failed to start imagery pipeline (installer entry):\n{e}",
-                parent=self,
-            )
-        self.destroy()
-
+        self._advance(6)
 
 def main() -> None:
     if tk is None or scrolledtext is None:

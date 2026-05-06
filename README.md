@@ -18,7 +18,7 @@ Source repository: `https://github.com/atakmaps/atak-imagery`
 
      ```bash
      cd ~/Downloads
-     unzip atak-imagery-v1.2.0-linux-install.zip
+     unzip atak-imagery-v1.3.0-linux-install.zip
      ls atak-imagery/install_linux.sh
      cd atak-imagery
      chmod +x install_linux.sh
@@ -55,20 +55,29 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.2.0` (tag **`v1.2.0`** on GitHub).
+**Linux / source release:** `v1.3.0` (tag **`v1.3.0`** on GitHub).
 
 **Windows:** A new Windows packaged build is **not** included in this cycle. **Use Windows release `2.8`** until a newer Windows installer is published. Source copies under `windows_build/` include the same startup behaviors when run with Python.
 
-Version **1.1** highlights:
+Version **1.3.0** highlights:
 
-- **Screen-aware Tk windows** (`scripts/tk_window_scaling.py`): main dialogs scale to fit small laptops and grow modestly on large displays (Device Installer, Imagery Downloader, SQLite builder, DTED downloader — Linux and `windows_build` copies).
-- **Optional in-app update check** (`scripts/git_update_check.py`): when running from a **git clone** (not a frozen EXE or zip-only tree), **ATAK Device Installer** and **ATAK Imagery Downloader** fetch `origin/main` in the background; after ~2s a “Checking for updates…” progress window may appear. If `main` has new commits, you get a dialog listing recent change subjects and may choose to **stash (if needed), checkout `main`, `git pull --ff-only`, and restart** the same entrypoint.
-- **Linux install zip on Releases:** download **`atak-imagery-v*-linux-install.zip`** from GitHub Assets (full tree under `atak-imagery/` for `install_linux.sh`; built with `python3 scripts/build_release.py`).
-- *(Prior v1.0.x behavior retained: DC handling, DTED push paths, `deploy.env.example`, tile plan cache tooling, etc.)*
+- **Device Installer — installer-only mode:** no longer launches the imagery downloader automatically. A new **install selection screen** lets you choose ATAK + Plugin, ATAK only, or Plugin only. A final completion screen confirms the install and reminds you to run the imagery downloader separately.
+- **Device Installer — signature mismatch recovery:** if the device has the plugin signed with a different certificate (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`), the installer automatically performs a full uninstall then reinstalls cleanly — no manual intervention required.
+- **Device Installer — ATAK setup bold note:** step 4 now shows a bold reminder to complete the ATAK setup before clicking Continue.
+- **Imagery Downloader — radius naming:** a name field on the “Select radius or state” screen lets you give each radius download a unique name, preventing subsequent builds from overwriting previous ones. The field is disabled unless radius mode is selected.
+- **Imagery Downloader — zoom cascade in radius mode:** selecting a zoom level now auto-selects all coarser zooms (same pyramid behavior as state mode).
+- **DTED — conditional download:** before downloading, the pipeline queries the device’s installed DTED manifest (`.dted_states.json`). States already on the device are skipped; only missing states are downloaded and pushed. The manifest is updated on the device after each successful push.
+- **Window stacking:** improved `ensure_window_stacking` reliability on Linux/X11 window managers.
 
 **Auto-update requirements:** **Git** on `PATH`, network to `origin`, and a clone with `origin` pointing at this repository. Release zips and PyInstaller bundles without `.git` skip the check silently.
 
 **Maintainer note (Windows / PyInstaller):** When packaging with a `.spec` that lists hidden imports explicitly, include **`tk_window_scaling`** and **`git_update_check`**.
+
+### Previous release (v1.2.0)
+
+- **Screen-aware Tk windows** (`scripts/tk_window_scaling.py`): main dialogs scale to fit small laptops and grow modestly on large displays.
+- **Optional in-app update check** (`scripts/git_update_check.py`): when running from a git clone, fetches `origin/main` in the background and offers to pull and restart if new commits exist.
+- **Linux install zip on Releases:** full tree under `atak-imagery/` for `install_linux.sh`; built with `python3 scripts/build_release.py`.
 
 ### Previous release (v1.0.0)
 

@@ -17,13 +17,15 @@ ATAK USGS Orthophoto Downloader (shared core, Windows)
 - Safe re-run: skips tiles that already exist
 
 Output structure:
-    <selected parent>/Imagery/State/zoom/x/y.jpg
+    <selected parent>/Imagery/<state or radius name>/zoom/x/y.jpg
+    Radius name is chosen on the download-scope screen; each name gets its own folder and SQLite file.
 """
 
 import importlib.util
 import json
 import math
 import multiprocessing
+import re
 import os
 import queue
 from concurrent.futures import FIRST_COMPLETED, CancelledError, ThreadPoolExecutor, wait
@@ -35,7 +37,7 @@ import time
 import traceback
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Set, Tuple, Optional
 
 import requests
 import tkinter as tk
@@ -130,6 +132,21 @@ RADIUS_REGION_FOLDER = _its.RADIUS_REGION_FOLDER
 compute_tiles_for_radius = _its.compute_tiles_for_radius
 square_lonlat_footprint_for_radius_miles = _its.square_lonlat_footprint_for_radius_miles
 state_names_intersecting_geodesic_circle = _its.state_names_intersecting_geodesic_circle
+
+
+def sanitize_radius_imagery_folder_name(raw: str) -> str:
+    """
+    Sanitize the user-entered radius name for Imagery/<name>/ tiles and for
+    ATAK_SQL_<name>.sqlite (same character rules as atak_imagery_sqlite_builder_finalbuild).
+    """
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", raw.strip())
+    if not cleaned or cleaned in (".", ".."):
+        raise ValueError(
+            "Enter a non-empty name using letters, numbers, spaces, or . _ -\n"
+            "(other characters become underscores)."
+        )
+    return cleaned
+
 
 _wb = Path(__file__).resolve().parent
 if str(_wb) not in sys.path:
@@ -659,6 +676,7 @@ class DownloadScopeDialog(tk.Tk):
         self.download_scope = "state"
         self.raw_imagery_path = ""
         self.local_dted_path = ""
+        self.radius_region_folder = ""
 
         self.update_idletasks()
         _scope_scale = scale_factor(self)
@@ -703,7 +721,37 @@ class DownloadScopeDialog(tk.Tk):
             value="radius",
             anchor="w",
             justify="left",
-        ).pack(anchor="w", pady=(4, _g2))
+        ).pack(anchor="w", pady=(4, 0))
+
+        radius_name_frame = tk.Frame(form_top)
+        radius_name_frame.pack(fill="x", pady=(6, _g2))
+        tk.Label(
+            radius_name_frame,
+            text=(
+                "Radius download name — folder under Imagery/ and base name for ATAK_SQL_<name>.sqlite "
+                "(required for radius; use a new name for each area so downloads do not overwrite):"
+            ),
+            font=("Arial", 10),
+            justify="left",
+            wraplength=_scope_wrap,
+            anchor="w",
+        ).pack(anchor="w")
+        self.radius_name_var = tk.StringVar(value="")
+        self.radius_name_entry = tk.Entry(radius_name_frame, textvariable=self.radius_name_var)
+        self.radius_name_entry.pack(anchor="w", fill="x", pady=(4, 0))
+        try:
+            self.radius_name_entry.configure(disabledforeground="gray55")
+        except tk.TclError:
+            pass
+
+        def _sync_radius_name_field(*_a: object) -> None:
+            if self.scope_var.get() == "radius":
+                self.radius_name_entry.configure(state="normal")
+            else:
+                self.radius_name_entry.configure(state="disabled")
+
+        self.scope_var.trace_add("write", _sync_radius_name_field)
+        _sync_radius_name_field()
 
         tk.Label(
             form_top,
@@ -856,6 +904,24 @@ class DownloadScopeDialog(tk.Tk):
 
     def submit(self) -> None:
         self.download_scope = self.scope_var.get()
+        if self.download_scope == "radius":
+            raw_name = self.radius_name_var.get().strip()
+            if not raw_name:
+                ensure_window_stacking(self)
+                messagebox.showwarning(
+                    APP_TITLE,
+                    "You must enter a name for your radius.",
+                    parent=self,
+                )
+                return
+            try:
+                self.radius_region_folder = sanitize_radius_imagery_folder_name(raw_name)
+            except ValueError as exc:
+                ensure_window_stacking(self)
+                messagebox.showwarning(APP_TITLE, str(exc), parent=self)
+                return
+        else:
+            self.radius_region_folder = ""
         self.raw_imagery_path = self.raw_var.get().strip()
         self.local_dted_path = self.dted_var.get().strip()
         self.accepted = True
@@ -1101,9 +1167,13 @@ class ZoomDialog(tk.Tk):
         download_scope: str = "state",
         radius_center: Optional[Tuple[float, float]] = None,
         radius_miles: Optional[float] = None,
+        radius_imagery_folder: Optional[str] = None,
         avg_tile_bytes_by_zoom: Optional[Dict[int, int]] = None,
     ) -> None:
         super().__init__()
+        # Hide until layout + radius tile counts finish; otherwise a blank Tk flashes for seconds
+        # (radius mode runs compute_tiles_for_radius synchronously for each zoom).
+        self.withdraw()
         self.title(f"{APP_TITLE} - Select Zoom Levels")
         self.resizable(True, True)
         self.configure(cursor="arrow")
@@ -1137,10 +1207,11 @@ class ZoomDialog(tk.Tk):
         note_wrap = scaled_int(940, _zs)
 
         if download_scope == "radius" and radius_center is not None and radius_miles is not None:
+            rfolder = radius_imagery_folder or RADIUS_REGION_FOLDER
             header = "Radius download — full tiles that intersect the circle:"
             sub = (
                 f"Center ({radius_center[0]:.5f}, {radius_center[1]:.5f}) decimal deg | "
-                f"radius {radius_miles:g} mi | folder Imagery/{RADIUS_REGION_FOLDER}/…"
+                f"radius {radius_miles:g} mi | folder Imagery/{rfolder}/…"
             )
         else:
             header = "Selected states to be installed:"
@@ -1186,9 +1257,9 @@ class ZoomDialog(tk.Tk):
         if download_scope == "radius":
             intro.insert(
                 "end",
-                "Radius mode: each zoom is independent — checking a zoom does not add every coarser zoom. "
-                "Very low zoom tiles span huge areas, so a full pyramid often makes the ATAK offline outline "
-                "look far wider than your circle even when the high-zoom data is tight.\n\n",
+                "Radius mode: checking a zoom also selects every coarser zoom (same pyramid as state mode). "
+                "Very low zoom tiles span huge areas, so the full pyramid can make the ATAK offline outline "
+                "look wider than your circle even when the high-zoom data is tight — uncheck coarser zooms if you want a tighter footprint.\n\n",
                 "note_body",
             )
         intro.insert("end", "NOTE:", "note_label")
@@ -1292,6 +1363,13 @@ class ZoomDialog(tk.Tk):
         self._probe_poll_after_id = self.after(50, self._start_usgs_probe_process)
         self.update_size_label()
 
+        try:
+            self.deiconify()
+            ensure_window_stacking(self)
+            self.update_idletasks()
+        except tk.TclError:
+            pass
+
     def destroy(self) -> None:  # type: ignore[override]
         aid = getattr(self, "_probe_poll_after_id", None)
         if aid is not None:
@@ -1388,8 +1466,8 @@ class ZoomDialog(tk.Tk):
         self.update_size_label()
 
     def _on_zoom_toggle(self, z: int) -> None:
-        """State mode: check z also checks every coarser zoom (10…z). Radius: no cascade."""
-        if self.download_scope != "radius" and self.vars[z].get():
+        """Checking a zoom also checks every coarser zoom (10…z) for state and radius."""
+        if self.vars[z].get():
             for zz in range(10, z + 1):
                 self.vars[zz].set(True)
         self.update_size_label()
@@ -1864,6 +1942,7 @@ def run_download(
     local_dted_root: Optional[Path] = None,
     radius_center: Optional[Tuple[float, float]] = None,
     radius_miles: Optional[float] = None,
+    radius_region_folder: Optional[str] = None,
 ) -> None:
     stats = {"downloaded": 0, "existing": 0, "failed": 0, "missing": 0}
     executor: Optional[ThreadPoolExecutor] = None
@@ -1885,11 +1964,12 @@ def run_download(
             log(f"Local DTED state zip tree (copy before network): {local_dted_root}")
 
     radius_mode = radius_center is not None and radius_miles is not None
+    radius_folder = (radius_region_folder or RADIUS_REGION_FOLDER) if radius_mode else ""
 
     try:
         log(
             f"run_download: states={selected_states!r} zooms={selected_zooms!r} mode={mode!r} "
-            f"radius_mode={radius_mode}"
+            f"radius_mode={radius_mode} radius_folder={radius_folder!r}"
         )
         progress.wait_if_paused()
 
@@ -1914,10 +1994,10 @@ def run_download(
                 f"Tile coverage: geodesic circle {miles:g} mi from ({lat:.5f}, {lon:.5f}); "
                 "include any tile the circle intersects"
             )
-            state_names = [RADIUS_REGION_FOLDER]
+            state_names = [radius_folder]
             try:
                 w, s, e, n = square_lonlat_footprint_for_radius_miles(lat, lon, miles)
-                fp_dir = output_root / RADIUS_REGION_FOLDER
+                fp_dir = output_root / radius_folder
                 fp_dir.mkdir(parents=True, exist_ok=True)
                 fp_path = fp_dir / ".radius_footprint.json"
                 fp_path.write_text(
@@ -1949,8 +2029,8 @@ def run_download(
                 for i, (x, y) in enumerate(tiles, start=1):
                     if i % 2048 == 0:
                         progress.wait_if_paused()
-                    out_path = output_root / RADIUS_REGION_FOLDER / str(z) / str(x) / f"{y}.jpg"
-                    plan.append((RADIUS_REGION_FOLDER, z, x, y, out_path))
+                    out_path = output_root / radius_folder / str(z) / str(x) / f"{y}.jpg"
+                    plan.append((radius_folder, z, x, y, out_path))
         else:
             progress.set_status("Loading state boundaries...")
             geojson_path = bundled_state_geojson_path()
@@ -2154,16 +2234,29 @@ def run_download(
             if not dted_state_list:
                 log("DTED: no state packages match this download region; skipping.")
             else:
-                dted_zip = dted_mod.run_dted_inline_for_states(
-                    dted_state_list,
-                    upload_dir,
-                    log_sink=log,
-                    progress=progress,
-                    local_state_zip_root=local_dted_root,
-                )
-                if dted_zip is not None:
-                    dted_mod.mark_standalone_dted_skip()
-                    dted_note = f"\n\nDTED archive ready:\n{dted_zip.name}"
+                # Check what's already on the device and skip states already installed.
+                progress.set_status("DTED: checking what is already installed on device…")
+                device_dted_states: Set[str] = dted_mod.query_device_installed_dted_states(log) or set()
+                states_needed = [s for s in dted_state_list if s not in device_dted_states]
+                states_skipped = [s for s in dted_state_list if s in device_dted_states]
+                if states_skipped:
+                    log(f"DTED: already on device — skipping: {', '.join(sorted(states_skipped))}")
+                if not states_needed:
+                    log("DTED: all required states already on device; skipping download.")
+                    dted_note = "\n\nDTED: all required elevation data already on device — skipped."
+                else:
+                    if states_skipped:
+                        log(f"DTED: downloading only missing states: {', '.join(sorted(states_needed))}")
+                    dted_zip = dted_mod.run_dted_inline_for_states(
+                        states_needed,
+                        upload_dir,
+                        log_sink=log,
+                        progress=progress,
+                        local_state_zip_root=local_dted_root,
+                    )
+                    if dted_zip is not None:
+                        dted_mod.mark_standalone_dted_skip()
+                        dted_note = f"\n\nDTED archive ready:\n{dted_zip.name}"
         except ImportError as exc:
             log(f"DTED: skipped (module not loadable: {exc}).")
         except DownloadCancelled:
@@ -2402,6 +2495,7 @@ def main() -> None:
                         download_scope="radius",
                         radius_center=(rd.center_lat, rd.center_lon),
                         radius_miles=rd.radius_miles,
+                        radius_imagery_folder=scope_dlg.radius_region_folder,
                         avg_tile_bytes_by_zoom=avg_tile_bytes_map,
                     )
                     zoom_dialog.mainloop()
@@ -2427,7 +2521,7 @@ def main() -> None:
                         f"Fixed-radius download:\n"
                         f"Center ({rd.center_lat:.5f}, {rd.center_lon:.5f}) decimal deg, "
                         f"radius {rd.radius_miles:g} mi\n"
-                        f"Imagery folder: {RADIUS_REGION_FOLDER}"
+                        f"Imagery folder: {scope_dlg.radius_region_folder}"
                     )
                     if not show_summary_confirm(
                         [],
@@ -2455,6 +2549,7 @@ def main() -> None:
                             "local_dted_root": dted_path,
                             "radius_center": (rd.center_lat, rd.center_lon),
                             "radius_miles": rd.radius_miles,
+                            "radius_region_folder": scope_dlg.radius_region_folder,
                         },
                         daemon=True,
                     )

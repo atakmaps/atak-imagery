@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import json
 import math
 import queue
 import re
@@ -8,13 +9,14 @@ import shutil
 import subprocess
 import sys
 import os
+import tempfile
 import threading
 import time
 import traceback
 import zipfile
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 import requests
 import tkinter as tk
@@ -117,6 +119,9 @@ def _session_allowed_atak_sql_filenames() -> Optional[set[str]]:
     return out
 
 
+_DEVICE_DTED_MANIFEST_FILENAME = ".dted_states.json"
+
+
 def _adb_executable() -> str:
     return shutil.which("adb") or "adb"
 
@@ -127,6 +132,83 @@ def _adb_base_cmd() -> List[str]:
     if serial:
         cmd.extend(["-s", serial])
     return cmd
+
+
+def query_device_installed_dted_states(log_fn: Optional[Callable[[str], None]] = None) -> Optional[Set[str]]:
+    """
+    Read the DTED state manifest from the connected device via ``adb shell cat``.
+
+    Returns a ``set`` of state names already installed, or ``None`` if the device
+    is not connected, the manifest doesn't exist yet, or it can't be parsed.
+    When ``None`` is returned the caller should assume all required states need
+    to be downloaded.
+    """
+    _log = log_fn or log
+    root = (os.environ.get("ATAK_DEVICE_FILES_ROOT") or "/sdcard/atak").strip() or "/sdcard/atak"
+    remote_manifest = f"{root.rstrip('/')}/DTED/{_DEVICE_DTED_MANIFEST_FILENAME}"
+    cmd = _adb_base_cmd() + ["shell", "cat", remote_manifest]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        if proc.returncode != 0:
+            _log("DTED device check: no manifest on device (first run or device not connected).")
+            return None
+        raw = proc.stdout.strip()
+        if not raw:
+            return None
+        data = json.loads(raw)
+        states: List[str] = data.get("states", [])
+        result: Set[str] = {s for s in states if isinstance(s, str) and s.strip()}
+        _log(f"DTED device check: manifest found — {len(result)} state(s) already installed: "
+             f"{', '.join(sorted(result)) if result else '(none)'}")
+        return result
+    except subprocess.TimeoutExpired:
+        _log("DTED device check: adb timed out querying manifest; will download all required states.")
+        return None
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        _log(f"DTED device check: manifest unreadable ({exc}); will download all required states.")
+        return None
+    except Exception as exc:
+        _log(f"DTED device check: could not query device ({exc}); will download all required states.")
+        return None
+
+
+def push_device_dted_manifest(all_installed_states: Set[str], log_fn: Optional[Callable[[str], None]] = None) -> None:
+    """
+    Write the merged DTED state manifest to the device via ``adb push``.
+    ``all_installed_states`` must be the *complete* set of states now on the device
+    (previously installed + newly pushed).  Errors are logged and silently swallowed.
+    """
+    _log = log_fn or log
+    root = (os.environ.get("ATAK_DEVICE_FILES_ROOT") or "/sdcard/atak").strip() or "/sdcard/atak"
+    remote_manifest = f"{root.rstrip('/')}/DTED/{_DEVICE_DTED_MANIFEST_FILENAME}"
+    payload = {
+        "schema_version": 1,
+        "states": sorted(all_installed_states),
+        "last_updated": datetime.now().isoformat(timespec="seconds"),
+    }
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".json",
+            prefix="atak_dted_manifest_",
+            delete=False,
+            encoding="utf-8",
+        ) as tf:
+            json.dump(payload, tf, indent=2)
+            tmp_path = tf.name
+        cmd = _adb_base_cmd() + ["push", tmp_path, remote_manifest]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if proc.returncode != 0:
+            _log(f"DTED manifest push failed (non-fatal): {(proc.stderr or proc.stdout or '').strip()}")
+        else:
+            _log(f"DTED device manifest updated: {len(all_installed_states)} state(s) recorded on device.")
+    except Exception as exc:
+        _log(f"DTED manifest push error (non-fatal): {exc}")
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
 
 
 def _find_atak_sqlite_files(upload_dir: Path) -> List[Path]:
@@ -160,8 +242,18 @@ def _find_atak_sqlite_files(upload_dir: Path) -> List[Path]:
     return sorted(by_folder[best_folder], key=lambda p: p.name.lower())
 
 
-def adb_push_pipeline_outputs(upload_dir: Path, final_dted_zip: Path) -> Tuple[bool, str]:
-    """Push imagery SQLite DB file(s) and DTED zip to the device (default /sdcard/atak/imagery and .../DTED)."""
+def adb_push_pipeline_outputs(
+    upload_dir: Path,
+    final_dted_zip: Path,
+    *,
+    states_in_zip: Optional[List[str]] = None,
+) -> Tuple[bool, str]:
+    """Push imagery SQLite DB file(s) and DTED zip to the device (default /sdcard/atak/imagery and .../DTED).
+
+    ``states_in_zip`` lists the DTED states contained in *this* push.  When provided,
+    the existing device manifest is read, merged with ``states_in_zip``, and the
+    updated manifest is pushed to the device after a successful transfer.
+    """
     sqlite_paths = _find_atak_sqlite_files(upload_dir)
     allowed_names = _session_allowed_atak_sql_filenames()
     if allowed_names is not None and sqlite_paths:
@@ -207,6 +299,24 @@ def adb_push_pipeline_outputs(upload_dir: Path, final_dted_zip: Path) -> Tuple[b
             return False, f"{err}\n\n" + "\n".join(log_lines)
 
     names = ", ".join(p.name for p in sqlite_paths)
+
+    # Update device manifest: combine states_in_zip (explicit) with sidecar file next to zip.
+    effective_states: List[str] = list(states_in_zip or [])
+    sidecar = final_dted_zip.with_suffix(".states.json")
+    if sidecar.is_file():
+        try:
+            sidecar_data = json.loads(sidecar.read_text(encoding="utf-8"))
+            sidecar_states: List[str] = sidecar_data.get("states", [])
+            for s in sidecar_states:
+                if s not in effective_states:
+                    effective_states.append(s)
+        except Exception:
+            pass
+    if effective_states:
+        existing = query_device_installed_dted_states() or set()
+        merged = existing | set(effective_states)
+        push_device_dted_manifest(merged)
+
     return True, (
         f"Pushed imagery DB file(s) to {remote_imagery}/: {names}\n"
         f"Pushed DTED archive to {remote_dted}/{final_dted_zip.name}"
@@ -1122,6 +1232,17 @@ def run_dted_inline_for_states(
         progress.set_status("DTED: building dted2.zip…")
         build_final_dted_zip(extract_root, final_zip_path, log_fn=log_sink, on_packed=on_packed)
         set_overall(base_b + _DTED_W_BUILD, f"{int((base_b + _DTED_W_BUILD) * 100)}% · finishing…")
+
+        # Write a sidecar listing which states are in this zip so the
+        # push step can update the device manifest.
+        sidecar_path = final_zip_path.with_suffix(".states.json")
+        try:
+            sidecar_path.write_text(
+                json.dumps({"states": sorted(selected_states)}, indent=2),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            log_sink(f"DTED: could not write states sidecar ({exc}); device manifest may be incomplete.")
 
         log_sink(f"DTED: complete -> {final_zip_path}")
         return final_zip_path

@@ -277,10 +277,22 @@ def report_sqlite(path: Path, *, include_union: bool) -> int:
     print(f"File: {path}")
     for line in lines:
         print(line)
-    fp_candidates = [
-        path.parent.parent / "Imagery" / RADIUS_REGION_FOLDER / ".radius_footprint.json",
-        path.parent / RADIUS_REGION_FOLDER / ".radius_footprint.json",
-    ]
+    fp_candidates: List[Path] = []
+    stem = path.stem
+    if stem.startswith("ATAK_SQL_") and len(stem) > len("ATAK_SQL_"):
+        folder_name = stem[len("ATAK_SQL_") :]
+        fp_candidates.extend(
+            [
+                path.parent.parent / "Imagery" / folder_name / ".radius_footprint.json",
+                path.parent / folder_name / ".radius_footprint.json",
+            ]
+        )
+    fp_candidates.extend(
+        [
+            path.parent.parent / "Imagery" / RADIUS_REGION_FOLDER / ".radius_footprint.json",
+            path.parent / RADIUS_REGION_FOLDER / ".radius_footprint.json",
+        ]
+    )
     fp = next((p for p in fp_candidates if p.is_file()), None)
     if fp is not None:
         try:
