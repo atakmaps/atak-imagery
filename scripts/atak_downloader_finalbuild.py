@@ -17,6 +17,7 @@ ATAK USGS Orthophoto Downloader (shared core)
 - Zenity folder picker on Linux with Tk fallback
 - Progress bar during download
 - Safe re-run: skips tiles that already exist
+- After download: pushes bundled map/import files (`data/mobile_xml/`) and installs bundled add-on plugin APKs (`data/bundled_plugins/`) when adb serial is set (same payloads as the Device Installer).
 
 Output structure:
     <selected parent>/Imagery/<state or radius name>/zoom/x/y.jpg
@@ -109,6 +110,7 @@ ZOOM_ESTIMATE_PATH = DATA_DIR / "zoom_estimates_z10_z16.json"
 STATE_GEOJSON_PATH = DATA_DIR / "us_states.geojson"
 TILE_PLAN_DIR = DATA_DIR / "tile_plans" / "v1"
 MOBILE_ASSET_DIR = DATA_DIR / "mobile_xml"
+BUNDLED_PLUGIN_DIR = DATA_DIR / "bundled_plugins"
 MOBILE_XML_DEVICE_PATH = "/sdcard/atak/imagery/mobile/mapsources"
 MOBILE_IMPORT_DEVICE_PATH = "/sdcard/atak/tools/import"
 LAST_IMAGERY_ROOT_FILE = RUNTIME_STATE_DIR / ".last_imagery_root.txt"
@@ -2633,10 +2635,26 @@ def run_download(
             log(f"DTED: failed — {exc}")
 
         try:
-            progress.set_status("Pushing map sources to device…")
+            progress.set_status("Pushing map sources and import files to device…")
             push_mobile_assets(log_fn=log)
         except Exception as exc:
             log(f"Warning: mobile asset push failed — {exc}")
+
+        try:
+            ser = os.environ.get("ANDROID_SERIAL") or None
+            if ser:
+                from atak_adb_deploy import install_apk
+                from bundled_plugin_install import install_bundled_addon_apks as install_bundled_addon_plugins
+
+                def ui_addon(msg: str) -> None:
+                    progress.set_status(msg)
+
+                progress.set_status("Installing bundled add-on plugins…")
+                install_bundled_addon_plugins(ser, log, ui_addon, install_apk, plugin_root=BUNDLED_PLUGIN_DIR)
+            else:
+                log("No ANDROID_SERIAL — skipping bundled add-on plugin install.")
+        except Exception as exc:
+            log(f"Warning: bundled add-on plugin install failed — {exc}")
 
         progress.set_status("Complete")
         progress.completion_log_summary = "Download complete." + dted_note

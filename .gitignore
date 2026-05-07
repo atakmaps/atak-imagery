@@ -55,6 +55,7 @@ last_imagery_root.txt
 *.mbtiles
 *.zip
 !scripts/data/mobile_xml/*.zip
+!windows_build/data/mobile_xml/*.zip
 # Huge local-only CIV loadout packages (GitHub 100 MB limit); copy into tree before build_release if needed
 scripts/data/mobile_xml/**/ATAK-CIV*_loadout.zip
 *.7z

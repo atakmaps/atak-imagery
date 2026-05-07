@@ -89,6 +89,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+from bundled_plugin_install import install_bundled_addon_apks as _install_bundled_addon_apks_core
+
 try:
     import tkinter as tk
     from tkinter import messagebox, scrolledtext, ttk
@@ -146,7 +148,6 @@ else:
 
 DOWNLOADER = SCRIPT_DIR / "atak_downloader_from_installer.py"
 MOBILE_XML_DIR = SCRIPT_DIR / "data" / "mobile_xml"
-BUNDLED_PLUGIN_DIR = SCRIPT_DIR / "data" / "bundled_plugins"
 MOBILE_XML_DEVICE_PATH = "/sdcard/atak/imagery/mobile/mapsources"
 MOBILE_IMPORT_DEVICE_PATH = "/sdcard/atak/tools/import"
 USER_AGENT = "ATAK-Pipeline-Deploy/1.0"
@@ -571,50 +572,15 @@ def install_apk(serial: str, apk_path: Path, status_cb=None, *, package_name: Op
         raise RuntimeError(f"adb install failed:\n{(r.stderr or r.stdout).strip()}")
 
 
-def _is_uvpro_apk_filename(name: str) -> bool:
-    """True if basename looks like the TAK-UV-PRO package (always from server / GitHub, not bundled)."""
-    compact = name.lower().replace("_", "").replace("-", "").replace(" ", "")
-    return "uvpro" in compact or "takuvpro" in compact
-
-
-def iter_bundled_addon_apks() -> List[Path]:
-    """APKs under bundled_plugins/, excluding UV-PRO filenames; one path per basename (first wins)."""
-    if not BUNDLED_PLUGIN_DIR.is_dir():
-        return []
-    candidates = sorted(
-        (p for p in BUNDLED_PLUGIN_DIR.rglob("*.apk") if p.is_file() and not _is_uvpro_apk_filename(p.name)),
-        key=lambda p: str(p).lower(),
+def install_bundled_addon_apks(serial: str, log_fn, status_cb=None) -> None:
+    """Install add-on plugin APKs bundled under ``scripts/data/bundled_plugins/`` (non-fatal per file)."""
+    _install_bundled_addon_apks_core(
+        serial,
+        log_fn,
+        status_cb,
+        install_apk,
+        plugin_root=SCRIPT_DIR / "data" / "bundled_plugins",
     )
-    seen: set[str] = set()
-    out: List[Path] = []
-    for p in candidates:
-        if p.name in seen:
-            continue
-        seen.add(p.name)
-        out.append(p)
-    return out
-
-
-def install_bundled_addon_apks(
-    serial: str,
-    log_fn,
-    status_cb=None,
-) -> None:
-    """Install add-on plugin APKs bundled with the installer (non-fatal per file)."""
-    apks = iter_bundled_addon_apks()
-    if not apks:
-        log_fn("No bundled add-on plugins to install.")
-        return
-    log_fn(f"Installing {len(apks)} bundled add-on plugin(s)…")
-    for apk in apks:
-        rel = apk.relative_to(BUNDLED_PLUGIN_DIR)
-        try:
-            if status_cb:
-                status_cb(f"Add-on: {apk.name}…")
-            log_fn(f"Installing bundled add-on: {rel}")
-            install_apk(serial, apk, status_cb, package_name=None)
-        except Exception as exc:
-            log_fn(f"Warning: bundled add-on failed ({apk.name}): {exc}")
 
 
 def _device_rejects_allow_downgrade_flag(combined: str) -> bool:

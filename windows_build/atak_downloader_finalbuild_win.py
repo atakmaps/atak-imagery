@@ -103,6 +103,10 @@ DATA_DIR = BUNDLED_SCRIPT_DIR / "data"
 ZOOM_ESTIMATE_PATH = DATA_DIR / "zoom_estimates_z10_z16.json"
 STATE_GEOJSON_PATH = DATA_DIR / "us_states.geojson"
 TILE_PLAN_DIR = DATA_DIR / "tile_plans" / "v1"
+MOBILE_ASSET_DIR = DATA_DIR / "mobile_xml"
+BUNDLED_PLUGIN_DIR = DATA_DIR / "bundled_plugins"
+MOBILE_XML_DEVICE_PATH = "/sdcard/atak/imagery/mobile/mapsources"
+MOBILE_IMPORT_DEVICE_PATH = "/sdcard/atak/tools/import"
 LAST_IMAGERY_ROOT_FILE = RUNTIME_STATE_DIR / ".last_imagery_root.txt"
 LAST_IMAGERY_SESSION_STATES_FILE = RUNTIME_STATE_DIR / ".last_imagery_session_states.txt"
 
@@ -161,6 +165,9 @@ else:
     _bd = str(BUNDLED_SCRIPT_DIR.resolve())
     if _bd not in sys.path:
         sys.path.insert(0, _bd)
+
+from atak_adb_deploy import install_apk
+from bundled_plugin_install import install_bundled_addon_apks as install_bundled_addon_plugins
 
 # -----------------------------
 # Logging
@@ -357,6 +364,40 @@ def check_device_ready_and_unlocked(serial: Optional[str]) -> Tuple[bool, str]:
     if "mDreamingLockscreen=true" in out:
         return False, "Unlock your phone (dismiss the lock screen) and try again."
     return True, ""
+
+
+def push_mobile_assets(log_fn=None) -> None:
+    """Push bundled mobile map/waypoint files to the device (additive — never deletes device files)."""
+    if not MOBILE_ASSET_DIR.is_dir():
+        return
+
+    serial: Optional[str] = os.environ.get("ANDROID_SERIAL") or None
+
+    xml_files = sorted(MOBILE_ASSET_DIR.rglob("*.xml"))
+    import_files = sorted(MOBILE_ASSET_DIR.rglob("*.kmz")) + sorted(MOBILE_ASSET_DIR.rglob("*.zip"))
+    dest_map: dict = {
+        MOBILE_XML_DEVICE_PATH: xml_files,
+        MOBILE_IMPORT_DEVICE_PATH: import_files,
+    }
+
+    total = sum(len(v) for v in dest_map.values())
+    if total == 0:
+        return
+
+    for device_path, files in dest_map.items():
+        if not files:
+            continue
+        _run_adb(["shell", "mkdir", "-p", device_path], serial=serial, timeout=30)
+        for f in files:
+            rel = f.relative_to(MOBILE_ASSET_DIR)
+            if log_fn:
+                log_fn(f"Pushing {rel} to device…")
+            r = _run_adb(["push", str(f), f"{device_path}/{f.name}"], serial=serial, timeout=120)
+            if r.returncode != 0 and log_fn:
+                log_fn(f"Warning: failed to push {f.name}: {r.stderr}")
+
+    if log_fn:
+        log_fn(f"Mobile assets pushed to device ({total} files).")
 
 
 def verify_adb_device_for_imagery_downloader(parent: tk.Tk) -> Tuple[bool, Optional[str], str]:
@@ -2372,6 +2413,26 @@ def run_download(
             raise
         except Exception as exc:
             log(f"DTED: failed — {exc}")
+
+        try:
+            progress.set_status("Pushing map sources and import files to device…")
+            push_mobile_assets(log_fn=log)
+        except Exception as exc:
+            log(f"Warning: mobile asset push failed — {exc}")
+
+        try:
+            ser = os.environ.get("ANDROID_SERIAL") or None
+            if ser:
+
+                def ui_addon(msg: str) -> None:
+                    progress.set_status(msg)
+
+                progress.set_status("Installing bundled add-on plugins…")
+                install_bundled_addon_plugins(ser, log, ui_addon, install_apk, plugin_root=BUNDLED_PLUGIN_DIR)
+            else:
+                log("No ANDROID_SERIAL — skipping bundled add-on plugin install.")
+        except Exception as exc:
+            log(f"Warning: bundled add-on plugin install failed — {exc}")
 
         progress.set_status("Complete")
         progress.completion_log_summary = "Download complete." + dted_note

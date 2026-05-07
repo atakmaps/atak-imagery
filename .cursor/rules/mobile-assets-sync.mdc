@@ -41,7 +41,9 @@ rsync -av --delete \
   "$SOURCE/" "$DEST/"
 ```
 
-Installer: `install_bundled_addon_apks()` in `atak_adb_deploy.py` runs after **ATAK only** (with ATAK) or after **UV‑PRO** (both / plugin only).
+**Device installer:** `push_mobile_xml()` after ATAK; `install_bundled_addon_apks()` (see `bundled_plugin_install.py`) after **ATAK only** or after **UV‑PRO** (both / plugin only).
+
+**Imagery downloader:** `push_mobile_assets()` + bundled APK install at end of each successful run when `ANDROID_SERIAL` is set. Mirror `windows_build/data/mobile_xml/` and `windows_build/data/bundled_plugins/` from `scripts/data/…` when updating the Windows source tree.
 
 ## Never skip
 

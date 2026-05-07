@@ -18,6 +18,7 @@ required_root = [
 ]
 
 required_scripts = [
+    "scripts/bundled_plugin_install.py",
     "scripts/atak_downloader_finalbuild.py",
     "scripts/atak_downloader_from_installer.py",
     "scripts/atak_imagery_sqlite_builder_finalbuild.py",
