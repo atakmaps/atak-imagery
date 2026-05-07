@@ -18,7 +18,7 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -109,6 +109,43 @@ def _fmt_duration(seconds: float) -> str:
     h, r = divmod(int(seconds), 3600)
     m, s = divmod(r, 60)
     return f"{h}h {m:02d}m {s:02d}s"
+
+
+def _eta_part_scan_remaining(
+    *,
+    rem_est: int,
+    sec_per_tile: float,
+    total_elapsed_s: float,
+    jobs_remaining: int,
+    eta_scale: float,
+) -> str:
+    """Same wording as the per-job completion line (batch scan ETA)."""
+    if rem_est <= 0:
+        return "no est. output tiles remaining (by schedule file)"
+    eta_linear_s = sec_per_tile * rem_est
+    eta_s = max(0.0, eta_linear_s * eta_scale)
+    total_scan_est_s = total_elapsed_s + eta_s
+    return (
+        f"scan time left ~{_fmt_duration(eta_s)} "
+        f"(batch scan total ~{_fmt_duration(total_scan_est_s)} incl. done so far; "
+        f"~{rem_est:,} est. output tiles left in {jobs_remaining} job(s); "
+        f"linear×{eta_scale:g} vs raw ~{_fmt_duration(eta_linear_s)})"
+    )
+
+
+def _eta_part_job_average_fallback(
+    *,
+    sum_compute_s: float,
+    job_done_idx: int,
+    total_jobs: int,
+) -> str:
+    if job_done_idx <= 0 or job_done_idx >= total_jobs:
+        return "time left: … (need completed jobs for fallback ETA)"
+    eta_s = (sum_compute_s / job_done_idx) * (total_jobs - job_done_idx)
+    return (
+        f"time left for full batch (job-average fallback; ~{total_jobs - job_done_idx} job(s)): "
+        f"~{_fmt_duration(eta_s)}"
+    )
 
 
 def main() -> int:
@@ -231,39 +268,47 @@ def main() -> int:
 
         rings = states[state_name]
         t0 = time.perf_counter()
-        est_j0 = zoom_estimates.get(state_name, {}).get(z, 0)
-        est_note = f"~{est_j0:,} est. output tiles" if est_j0 else "no per-job tile estimate"
-        prog_note = (
-            f"progress every {args.progress_interval:g}s"
-            if args.progress_interval > 0
-            else "no in-job progress lines (--progress-interval 0)"
-        )
-        print(
-            f"[{k + 1}/{total_jobs}] ({100.0 * (k + 1) / total_jobs:.1f}%) {state_name} z{z} | "
-            f">>> COMPUTE START — building {out.name} | {est_note} | "
-            f"large states can take hours per zoom | {prog_note}",
-            flush=True,
-        )
-
         def progress_log(qual_count: int, rect_done: int, rect_total: int, job_elapsed: float) -> None:
-            rect_pct = 100.0 * rect_done / max(rect_total, 1)
+            total_elapsed_s = time.perf_counter() - run_t0
             est_j = zoom_estimates.get(state_name, {}).get(z, 0)
-            parts = [
-                f"scanning… rectangle {rect_pct:.1f}% ({rect_done:,}/{rect_total:,} cells)",
-                f"{qual_count:,} qualifying tiles so far",
-                f"job elapsed {_fmt_duration(job_elapsed)}",
-            ]
-            if est_j > 0 and qual_count >= 1 and job_elapsed >= 0.5:
-                rate = qual_count / job_elapsed
-                rem_q = max(0, est_j - qual_count)
-                eta_j = rem_q / max(rate, 1e-9) * args.eta_scale
-                parts.append(
-                    f"this job scan left ~{_fmt_duration(eta_j)} "
-                    f"(est ~{est_j:,} output tiles; linear×{args.eta_scale:g})"
+            rem_after = sum_estimated_tiles_remaining(jobs, k + 1, zoom_estimates)
+            rem_current = max(0, est_j - qual_count) if est_j else 0
+            rem_est = rem_after + rem_current
+            jobs_remaining = total_jobs - k
+
+            sec_per_tile: Optional[float] = None
+            if sum_out_tiles > 0 and sum_compute_s > 0:
+                sec_per_tile = sum_compute_s / sum_out_tiles
+            elif qual_count > 0 and job_elapsed >= 0.5:
+                sec_per_tile = job_elapsed / qual_count
+
+            if sec_per_tile is not None and rem_est > 0:
+                eta_part = _eta_part_scan_remaining(
+                    rem_est=rem_est,
+                    sec_per_tile=sec_per_tile,
+                    total_elapsed_s=total_elapsed_s,
+                    jobs_remaining=jobs_remaining,
+                    eta_scale=args.eta_scale,
                 )
+            elif k > 0 and sum_compute_s > 0:
+                eta_part = _eta_part_job_average_fallback(
+                    sum_compute_s=sum_compute_s,
+                    job_done_idx=k,
+                    total_jobs=total_jobs,
+                )
+            else:
+                eta_part = (
+                    "scan time left: … (establishing rate — need a few more qualifying tiles on this job)"
+                )
+
+            rect_pct = 100.0 * rect_done / max(rect_total, 1)
+            tail = (
+                f"{qual_count:,} tiles in {job_elapsed:.1f}s (scanning {rect_pct:.1f}% of tile grid) "
+                f"→ {out.name}"
+            )
             print(
-                f"[{k + 1}/{total_jobs}] ({100.0 * (k + 1) / total_jobs:.1f}%) "
-                f"{state_name} z{z} | >>> SCAN PROGRESS | " + " | ".join(parts),
+                f"[{k + 1}/{total_jobs}] ({100.0 * (k + 1) / total_jobs:.1f}%) {state_name} z{z} | "
+                f"elapsed {_fmt_duration(total_elapsed_s)} | {eta_part} | {tail}",
                 flush=True,
             )
 
@@ -292,20 +337,18 @@ def main() -> int:
             rem_est = sum_estimated_tiles_remaining(jobs, job_done_idx, zoom_estimates)
             if rem_est > 0:
                 sec_per_tile = sum_compute_s / sum_out_tiles
-                eta_linear_s = sec_per_tile * rem_est
-                eta_s = max(0.0, eta_linear_s * args.eta_scale)
-                total_scan_est_s = total_elapsed_s + eta_s
-                eta_part = (
-                    f"scan time left ~{_fmt_duration(eta_s)} "
-                    f"(batch scan total ~{_fmt_duration(total_scan_est_s)} incl. done so far; "
-                    f"~{rem_est:,} est. output tiles left in {total_jobs - job_done_idx} job(s); "
-                    f"linear×{args.eta_scale:g} vs raw ~{_fmt_duration(eta_linear_s)})"
+                eta_part = _eta_part_scan_remaining(
+                    rem_est=rem_est,
+                    sec_per_tile=sec_per_tile,
+                    total_elapsed_s=total_elapsed_s,
+                    jobs_remaining=total_jobs - job_done_idx,
+                    eta_scale=args.eta_scale,
                 )
             else:
-                eta_s = (sum_compute_s / job_done_idx) * (total_jobs - job_done_idx)
-                eta_part = (
-                    f"time left for full batch (job-average fallback; ~{total_jobs - job_done_idx} job(s)): "
-                    f"~{_fmt_duration(eta_s)}"
+                eta_part = _eta_part_job_average_fallback(
+                    sum_compute_s=sum_compute_s,
+                    job_done_idx=job_done_idx,
+                    total_jobs=total_jobs,
                 )
         elif job_done_idx < total_jobs:
             eta_part = "time left: … (need first job for ETA)"
