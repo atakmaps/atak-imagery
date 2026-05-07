@@ -54,6 +54,7 @@ last_imagery_root.txt
 *.sqlite
 *.mbtiles
 *.zip
+!scripts/data/mobile_xml/*.zip
 *.7z
 *.tar
 *.gz
@@ -83,3 +84,5 @@ atak_pipeline_handoff*.md
 HANDOFF_AGENT.local.md
 # --- IDE / agent (local only) ---
 .cursor/
+!.cursor/rules/
+!.cursor/rules/**

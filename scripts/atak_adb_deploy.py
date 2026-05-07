@@ -140,6 +140,7 @@ else:
 DOWNLOADER = SCRIPT_DIR / "atak_downloader_from_installer.py"
 MOBILE_XML_DIR = SCRIPT_DIR / "data" / "mobile_xml"
 MOBILE_XML_DEVICE_PATH = "/sdcard/atak/imagery/mobile/mapsources"
+MOBILE_IMPORT_DEVICE_PATH = "/sdcard/atak/tools/import"
 USER_AGENT = "ATAK-Pipeline-Deploy/1.0"
 PROJECT_ROOT = SCRIPT_DIR.parent
 DEPLOY_ENV_PATH = PROJECT_ROOT / "deploy.env"
@@ -576,27 +577,44 @@ def _device_rejects_allow_downgrade_flag(combined: str) -> bool:
 
 
 def push_mobile_xml(serial: str, log_fn=None) -> None:
-    """Push bundled mobile map-source XML files to the device."""
-    xml_files = sorted(MOBILE_XML_DIR.glob("*.xml")) if MOBILE_XML_DIR.is_dir() else []
-    if not xml_files:
+    """Push bundled mobile map/waypoint files to the device.
+
+    Routing by extension (source: scripts/data/mobile_xml/ — keep in sync with
+    /home/paul/Documents/ATAK/Plugins/MapXML/ before every build):
+      .xml          → MOBILE_XML_DEVICE_PATH  (/sdcard/atak/imagery/mobile/mapsources)
+      .kmz / .zip   → MOBILE_IMPORT_DEVICE_PATH (/sdcard/atak/tools/import)
+    """
+    if not MOBILE_XML_DIR.is_dir():
         if log_fn:
-            log_fn("No mobile XML files found to push.")
+            log_fn("No mobile asset directory found; skipping.")
         return
 
-    mkdir_r = run_adb(["shell", "mkdir", "-p", MOBILE_XML_DEVICE_PATH], serial=serial, timeout=30)
-    if mkdir_r.returncode != 0:
-        if log_fn:
-            log_fn(f"Warning: could not create {MOBILE_XML_DEVICE_PATH}: {mkdir_r.stderr}")
+    dest_map: dict[str, list] = {
+        MOBILE_XML_DEVICE_PATH: sorted(MOBILE_XML_DIR.glob("*.xml")),
+        MOBILE_IMPORT_DEVICE_PATH: sorted(
+            f for ext in ("*.kmz", "*.zip") for f in MOBILE_XML_DIR.glob(ext)
+        ),
+    }
 
-    for xml in xml_files:
+    total = sum(len(v) for v in dest_map.values())
+    if total == 0:
         if log_fn:
-            log_fn(f"Pushing {xml.name} …")
-        r = run_adb(["push", str(xml), f"{MOBILE_XML_DEVICE_PATH}/{xml.name}"], serial=serial, timeout=60)
-        if r.returncode != 0 and log_fn:
-            log_fn(f"Warning: failed to push {xml.name}: {r.stderr}")
+            log_fn("No mobile assets found to push.")
+        return
+
+    for device_path, files in dest_map.items():
+        if not files:
+            continue
+        run_adb(["shell", "mkdir", "-p", device_path], serial=serial, timeout=30)
+        for f in files:
+            if log_fn:
+                log_fn(f"Pushing {f.name} …")
+            r = run_adb(["push", str(f), f"{device_path}/{f.name}"], serial=serial, timeout=120)
+            if r.returncode != 0 and log_fn:
+                log_fn(f"Warning: failed to push {f.name}: {r.stderr}")
 
     if log_fn:
-        log_fn(f"Mobile map sources installed ({len(xml_files)} files).")
+        log_fn(f"Mobile assets installed ({total} files).")
 
 
 def launch_atak(serial: str) -> None:

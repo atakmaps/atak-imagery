@@ -1,0 +1,29 @@
+---
+description: Sync mobile map/waypoint assets before every installer build
+alwaysApply: true
+---
+
+# Mobile Asset Sync — Required Before Every Build
+
+The canonical source for all files pushed to the device during ATAK install is:
+
+**`/home/paul/Documents/ATAK/Plugins/MapXML/`**
+
+Before any installer build or release, always:
+
+1. **Diff the source folder against the bundled data folder** (`scripts/data/mobile_xml/`):
+   - Files added to `Plugins/MapXML/` → copy into `scripts/data/mobile_xml/` and commit
+   - Files removed from `Plugins/MapXML/` → delete from `scripts/data/mobile_xml/` and commit
+
+2. **File routing** (handled automatically by `push_mobile_xml()` in `atak_adb_deploy.py`):
+   - `.xml` → `/sdcard/atak/imagery/mobile/mapsources`
+   - `.kmz` / `.zip` → `/sdcard/atak/tools/import`
+
+3. **Never skip this check** — stale bundled assets ship silently with the release binary.
+
+## Quick sync command
+
+```bash
+rsync -av --delete /home/paul/Documents/ATAK/Plugins/MapXML/ \
+  /home/paul/Documents/ATAK/pipeline/scripts/data/mobile_xml/
+```
