@@ -55,11 +55,15 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.3.10` (tag **`v1.3.10`** on GitHub).
+**Linux / source release:** `v1.3.11` (tag **`v1.3.11`** on GitHub).
 
 **Windows:** A new Windows packaged build is **not** included in this cycle. **Use Windows release `2.8`** until a newer Windows installer is published. Source copies under `windows_build/` include the same startup behaviors when run with Python.
 
-Version **1.3.10** highlights:
+Version **1.3.11** highlights:
+
+- **Device Installer — session log file:** the installer writes a timestamped log (and updates `LATEST_LOG.txt` in the same folder) so crashes after “Continue” can be diagnosed. Paths: `scripts/logs/` when run from source, or `~/.local/share/atak-pipeline/installer_logs/` when bundled. Stderr prints `Installer log: …` on startup.
+
+### Previous release (v1.3.10)
 
 - **Download-first workflow restored:** standalone imagery runs now skip upfront device verification, download imagery first, then prompt once to connect the device before the DTED/device check stage.
 - **DTED local-path browser restored:** the "Local Elevation Location" selector is back on the download scope screen so local state ZIP trees can be used before network fetches.

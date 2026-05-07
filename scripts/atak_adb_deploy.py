@@ -66,6 +66,7 @@ If adb reports INSTALL_FAILED_VERSION_DOWNGRADE (APK versionCode lower than the
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import subprocess
@@ -75,6 +76,7 @@ import threading
 import time
 import traceback
 import urllib.parse
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -140,6 +142,122 @@ USER_AGENT = "ATAK-Pipeline-Deploy/1.0"
 PROJECT_ROOT = SCRIPT_DIR.parent
 DEPLOY_ENV_PATH = PROJECT_ROOT / "deploy.env"
 
+_INSTALLER_LOG: Optional[Path] = None
+
+# Env keys we never log verbatim (presence only).
+_SENSITIVE_ENV_SUBSTR = ("TOKEN", "SECRET", "PASSWORD", "KEY", "CREDENTIAL")
+
+
+def installer_log_dir() -> Path:
+    """Writable log directory (PyInstaller bundle dir is often read-only)."""
+    if getattr(sys, "frozen", False):
+        d = Path.home() / ".local" / "share" / "atak-pipeline" / "installer_logs"
+    else:
+        d = SCRIPT_DIR / "logs"
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+    except OSError:
+        alt = Path.home() / ".local" / "share" / "atak-pipeline" / "installer_logs"
+        alt.mkdir(parents=True, exist_ok=True)
+        return alt
+
+
+def setup_installer_logging() -> Path:
+    """File + stderr logging for support; call once at process start."""
+    global _INSTALLER_LOG
+    log_dir = installer_log_dir()
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    _INSTALLER_LOG = log_dir / f"atak_installer_{ts}.log"
+
+    logger = logging.getLogger("atak_installer")
+    logger.setLevel(logging.DEBUG)
+    logger.handlers.clear()
+
+    fh = logging.FileHandler(_INSTALLER_LOG, encoding="utf-8")
+    fh.setLevel(logging.DEBUG)
+    sh = logging.StreamHandler(sys.stderr)
+    sh.setLevel(logging.INFO)
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
+    fh.setFormatter(fmt)
+    sh.setFormatter(fmt)
+    logger.addHandler(fh)
+    logger.addHandler(sh)
+
+    logger.info("Log file: %s", _INSTALLER_LOG)
+    try:
+        (log_dir / "LATEST_LOG.txt").write_text(str(_INSTALLER_LOG.resolve()) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+    return _INSTALLER_LOG
+
+
+def _install_exception_hooks() -> None:
+    logger = logging.getLogger("atak_installer")
+
+    def _main_hook(
+        exc_type: type[BaseException], exc_value: BaseException, exc_tb: Any
+    ) -> None:
+        if logger.handlers:
+            logger.critical("Uncaught exception (main thread)", exc_info=(exc_type, exc_value, exc_tb))
+        else:
+            traceback.print_exception(exc_type, exc_value, exc_tb, file=sys.stderr)
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = _main_hook
+
+    if hasattr(threading, "excepthook"):
+        _default_thread_hook = threading.excepthook
+
+        def _thread_hook(args: threading.ExceptHookArgs) -> None:
+            if logger.handlers:
+                logger.critical(
+                    "Uncaught exception in thread %r",
+                    args.thread.name,
+                    exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+                )
+            _default_thread_hook(args)
+
+        threading.excepthook = _thread_hook
+
+
+def log_startup_context() -> None:
+    logger = logging.getLogger("atak_installer")
+    ver_path = PROJECT_ROOT / "VERSION"
+    ver = ver_path.read_text(encoding="utf-8").strip() if ver_path.is_file() else "(unknown)"
+    logger.info("VERSION (%s): %s", ver_path, ver)
+    logger.info("Python: %s", sys.version.replace("\n", " "))
+    logger.info("Platform: %s", sys.platform)
+    logger.info("Frozen bundle: %s", getattr(sys, "frozen", False))
+    logger.info("CWD: %s", os.getcwd())
+    logger.info("Argv: %s", sys.argv)
+    logger.info("Script path: %s", Path(__file__).resolve())
+    logger.info("adb on PATH: %s", shutil.which("adb") or "(not found)")
+
+    env_keys = sorted(
+        {
+            "ATAK_DEPLOY_MANIFEST_URL",
+            "ATAK_CIV_APK_URL",
+            "ATAK_CIV_VERSION",
+            "ATAK_PLUGIN_GITHUB_REPO",
+            "ATAK_PLUGIN_APK",
+            "ATAK_PLUGIN_APK_URL",
+            "ATAK_PACKAGE_NAME",
+            "ANDROID_SERIAL",
+            "ATAK_DEPLOY_REPORT_URL",
+            "ATAK_DEPLOY_API_TOKEN",
+        }
+        | {k for k in os.environ if k.startswith("ATAK_")}
+    )
+    for k in env_keys:
+        raw = os.environ.get(k, "")
+        if any(s in k.upper() for s in _SENSITIVE_ENV_SUBSTR):
+            logger.info("Env %s: %s", k, "(set)" if raw.strip() else "(empty)")
+        elif len(raw) > 200:
+            logger.info("Env %s: %s… (%d chars)", k, raw[:200], len(raw))
+        else:
+            logger.info("Env %s: %s", k, raw if raw else "(empty)")
+
 
 def load_deploy_env_file() -> None:
     if not DEPLOY_ENV_PATH.is_file():
@@ -188,12 +306,18 @@ def ensure_gui_path_for_adb() -> None:
 
 
 def log(msg: str) -> None:
-    line = msg if msg.endswith("\n") else msg + "\n"
-    try:
-        sys.stderr.write(line)
-        sys.stderr.flush()
-    except Exception:
-        pass
+    text = msg.rstrip("\n")
+    lg = logging.getLogger("atak_installer")
+    if lg.handlers:
+        for part in text.splitlines() or [""]:
+            lg.info("%s", part)
+    else:
+        line = msg if msg.endswith("\n") else msg + "\n"
+        try:
+            sys.stderr.write(line)
+            sys.stderr.flush()
+        except Exception:
+            pass
 
 
 def env_optional(key: str, default: str = "") -> str:
@@ -610,6 +734,13 @@ def pick_serial(devices: List[str]) -> Optional[str]:
 
 
 class DeployWizard(tk.Tk):
+    def report_callback_exception(self, exc: BaseException, val: Optional[BaseException], tb: Any) -> None:
+        logging.getLogger("atak_installer").error(
+            "Tkinter callback exception",
+            exc_info=(exc, val, tb),
+        )
+        super().report_callback_exception(exc, val, tb)
+
     def __init__(self) -> None:
         super().__init__()
         self.title(APP_TITLE)
@@ -705,6 +836,7 @@ class DeployWizard(tk.Tk):
 
         self._step = 0
         self._render_step()
+        logging.getLogger("atak_installer").info("DeployWizard ready, initial step=%s", self._step)
 
     def _focus_for_dialog(self) -> None:
         if ensure_window_stacking is not None:
@@ -756,6 +888,7 @@ class DeployWizard(tk.Tk):
         )
 
     def _render_step(self) -> None:
+        logging.getLogger("atak_installer").info("_render_step step=%s choice=%s", self._step, self._install_choice)
         self.progress.stop()
         self.progress.pack_forget()
 
@@ -856,6 +989,7 @@ class DeployWizard(tk.Tk):
         pass
 
     def _advance(self, n: int) -> None:
+        logging.getLogger("atak_installer").info("_advance -> step %s", n)
         self._step = n
         self._render_step()
 
@@ -864,7 +998,14 @@ class DeployWizard(tk.Tk):
         self._advance(2)
 
     def _step_connect_check(self) -> None:
+        _lg = logging.getLogger("atak_installer")
         need_atak = self._install_choice in ("atak", "both")
+        _lg.info(
+            "_step_connect_check: choice=%s need_atak=%s atak_configured=%s",
+            self._install_choice,
+            need_atak,
+            self._atak_install_ready(),
+        )
         if need_atak and not self._atak_install_ready():
             self._focus_for_dialog()
             messagebox.showerror(
@@ -908,6 +1049,7 @@ class DeployWizard(tk.Tk):
 
         self.selected_serial = serial
         os.environ["ANDROID_SERIAL"] = serial
+        _lg.info("Device selected serial=%s (count=%s)", serial, len(devices))
         # Skip ATAK install steps when plugin-only
         if self._install_choice == "plugin":
             self._advance(5)
@@ -1085,14 +1227,24 @@ def main() -> None:
     if tk is None or scrolledtext is None:
         print("tkinter is required for this wizard.", file=sys.stderr)
         sys.exit(1)
+    log_path = setup_installer_logging()
+    _install_exception_hooks()
+    try:
+        print(f"Installer log: {log_path}", file=sys.stderr)
+        sys.stderr.flush()
+    except Exception:
+        pass
     if run_startup_git_update_check is not None:
         run_startup_git_update_check(app_title=APP_TITLE, script_path=Path(__file__).resolve())
     if run_startup_release_update_check is not None:
         run_startup_release_update_check(app_title=APP_TITLE, script_path=Path(__file__).resolve())
     ensure_gui_path_for_adb()
     load_deploy_env_file()
+    log_startup_context()
     w = DeployWizard()
+    logging.getLogger("atak_installer").info("Starting Tk mainloop")
     w.mainloop()
+    logging.getLogger("atak_installer").info("Tk mainloop ended normally")
 
 
 if __name__ == "__main__":
