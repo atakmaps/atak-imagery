@@ -1,29 +1,41 @@
 ---
-description: Sync mobile map/waypoint assets before every installer build
+description: Sync device addon files before every installer / imagery downloader build
 alwaysApply: true
 ---
 
-# Mobile Asset Sync — Required Before Every Build
+# Add-ons for build — required before every build
 
-The canonical source for all files pushed to the device during ATAK install is:
+The canonical **local** folder for add-ons (map XML, KMZ/ZIP imports, and future types) is:
 
-**`/home/paul/Documents/ATAK/Plugins/MapXML/`**
+**`/home/paul/Documents/ATAK/Plugins/Add Ons for Build/`**
 
-Before any installer build or release, always:
+It may contain **many kinds** of files. The installers only **push** these from the **bundled** copy (`scripts/data/mobile_xml/`):
 
-1. **Diff the source folder against the bundled data folder** (`scripts/data/mobile_xml/`):
-   - Files added to `Plugins/MapXML/` → copy into `scripts/data/mobile_xml/` and commit
-   - Files removed from `Plugins/MapXML/` → delete from `scripts/data/mobile_xml/` and commit
+| Extension | Role |
+|---|---|
+| `.xml` | Mobile map sources → `/sdcard/atak/imagery/mobile/mapsources` |
+| `.kmz` / `.zip` | Import queue → `/sdcard/atak/tools/import` |
 
-2. **File routing** (handled automatically by `push_mobile_xml()` in `atak_adb_deploy.py`):
-   - `.xml` → `/sdcard/atak/imagery/mobile/mapsources`
-   - `.kmz` / `.zip` → `/sdcard/atak/tools/import`
+Before any **installer** or **imagery downloader** build or release:
 
-3. **Never skip this check** — stale bundled assets ship silently with the release binary.
+1. **Sync pushable files** from Add Ons → `scripts/data/mobile_xml/` (see command below).
+2. **Commit** additions/removals so frozen builds ship current assets.
+3. **Never skip this** — stale `scripts/data/mobile_xml/` ships silently in binaries.
 
-## Quick sync command
+Routing is implemented by `push_mobile_xml()` in `atak_adb_deploy.py` and `push_mobile_assets()` in `atak_downloader_finalbuild.py` (recursive under `mobile_xml/`; device paths use **basename** only — avoid duplicate names across subfolders).
+
+## Sync command (mixed folder — only extensions we bundle for device push)
+
+Uses rsync so other addon types in the source tree are ignored for this step:
 
 ```bash
-rsync -av --delete /home/paul/Documents/ATAK/Plugins/MapXML/ \
-  /home/paul/Documents/ATAK/pipeline/scripts/data/mobile_xml/
+SOURCE="/home/paul/Documents/ATAK/Plugins/Add Ons for Build"
+DEST="/home/paul/Documents/ATAK/pipeline/scripts/data/mobile_xml"
+rsync -av --delete \
+  --include='*/' \
+  --include='*.xml' --include='*.kmz' --include='*.zip' \
+  --exclude='*' \
+  "$SOURCE/" "$DEST/"
 ```
+
+If a future addon type needs packaging, extend the installer logic **and** add an `--include` here.

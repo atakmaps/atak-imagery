@@ -579,8 +579,8 @@ def _device_rejects_allow_downgrade_flag(combined: str) -> bool:
 def push_mobile_xml(serial: str, log_fn=None) -> None:
     """Push bundled mobile map/waypoint files to the device.
 
-    Routing by extension (source: scripts/data/mobile_xml/ — keep in sync with
-    /home/paul/Documents/ATAK/Plugins/MapXML/ before every build):
+    Routing by extension (bundled: scripts/data/mobile_xml/ — rsync from
+    /home/paul/Documents/ATAK/Plugins/Add Ons for Build/ before every build; see HANDOFF):
       .xml          → MOBILE_XML_DEVICE_PATH  (/sdcard/atak/imagery/mobile/mapsources)
       .kmz / .zip   → MOBILE_IMPORT_DEVICE_PATH (/sdcard/atak/tools/import)
     """
@@ -589,11 +589,11 @@ def push_mobile_xml(serial: str, log_fn=None) -> None:
             log_fn("No mobile asset directory found; skipping.")
         return
 
+    xml_files = sorted(MOBILE_XML_DIR.rglob("*.xml"))
+    import_files = sorted(MOBILE_XML_DIR.rglob("*.kmz")) + sorted(MOBILE_XML_DIR.rglob("*.zip"))
     dest_map: dict[str, list] = {
-        MOBILE_XML_DEVICE_PATH: sorted(MOBILE_XML_DIR.glob("*.xml")),
-        MOBILE_IMPORT_DEVICE_PATH: sorted(
-            f for ext in ("*.kmz", "*.zip") for f in MOBILE_XML_DIR.glob(ext)
-        ),
+        MOBILE_XML_DEVICE_PATH: xml_files,
+        MOBILE_IMPORT_DEVICE_PATH: import_files,
     }
 
     total = sum(len(v) for v in dest_map.values())
@@ -607,8 +607,9 @@ def push_mobile_xml(serial: str, log_fn=None) -> None:
             continue
         run_adb(["shell", "mkdir", "-p", device_path], serial=serial, timeout=30)
         for f in files:
+            rel = f.relative_to(MOBILE_XML_DIR)
             if log_fn:
-                log_fn(f"Pushing {f.name} …")
+                log_fn(f"Pushing {rel} …")
             r = run_adb(["push", str(f), f"{device_path}/{f.name}"], serial=serial, timeout=120)
             if r.returncode != 0 and log_fn:
                 log_fn(f"Warning: failed to push {f.name}: {r.stderr}")
