@@ -138,6 +138,8 @@ else:
     SCRIPT_DIR = Path(__file__).resolve().parent
 
 DOWNLOADER = SCRIPT_DIR / "atak_downloader_from_installer.py"
+MOBILE_XML_DIR = SCRIPT_DIR / "data" / "mobile_xml"
+MOBILE_XML_DEVICE_PATH = "/sdcard/atak/imagery/mobile/mapsources"
 USER_AGENT = "ATAK-Pipeline-Deploy/1.0"
 PROJECT_ROOT = SCRIPT_DIR.parent
 DEPLOY_ENV_PATH = PROJECT_ROOT / "deploy.env"
@@ -571,6 +573,30 @@ def _device_rejects_allow_downgrade_flag(combined: str) -> bool:
         return True
     return False
 
+
+
+def push_mobile_xml(serial: str, log_fn=None) -> None:
+    """Push bundled mobile map-source XML files to the device."""
+    xml_files = sorted(MOBILE_XML_DIR.glob("*.xml")) if MOBILE_XML_DIR.is_dir() else []
+    if not xml_files:
+        if log_fn:
+            log_fn("No mobile XML files found to push.")
+        return
+
+    mkdir_r = run_adb(["shell", "mkdir", "-p", MOBILE_XML_DEVICE_PATH], serial=serial, timeout=30)
+    if mkdir_r.returncode != 0:
+        if log_fn:
+            log_fn(f"Warning: could not create {MOBILE_XML_DEVICE_PATH}: {mkdir_r.stderr}")
+
+    for xml in xml_files:
+        if log_fn:
+            log_fn(f"Pushing {xml.name} …")
+        r = run_adb(["push", str(xml), f"{MOBILE_XML_DEVICE_PATH}/{xml.name}"], serial=serial, timeout=60)
+        if r.returncode != 0 and log_fn:
+            log_fn(f"Warning: failed to push {xml.name}: {r.stderr}")
+
+    if log_fn:
+        log_fn(f"Mobile map sources installed ({len(xml_files)} files).")
 
 
 def launch_atak(serial: str) -> None:
@@ -1096,6 +1122,7 @@ class DeployWizard(tk.Tk):
 
                 self.after(0, self.progress.start, 8)
                 install_apk(self.selected_serial, apk_path, ui_install)
+                push_mobile_xml(self.selected_serial or "", log)
 
                 self.after(0, self.progress.stop)
                 if is_temp:
