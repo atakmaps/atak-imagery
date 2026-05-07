@@ -10,11 +10,20 @@ Examples:
   python3 scripts/build_tile_plan_cache.py
   python3 scripts/build_tile_plan_cache.py --states Arkansas,Texas
   python3 scripts/build_tile_plan_cache.py --zooms 14,15,16
+
+Legacy human lines + machine lines for remote grep (same style as older cloud batches):
+  tail -f ~/tile_plan_cache_full_us.log
+
+  ssh user@host 'tail -f ~/tile_plan_cache_full_us.log | grep --line-buffered -E "^>>> (ETA|COMPUTE START|CACHE SKIP)"'
+
+Run with line-buffered output when redirecting to a file:
+  PYTHONUNBUFFERED=1 python3 -u scripts/build_tile_plan_cache.py ... 2>&1 | tee ~/tile_plan_cache_full_us.log
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -30,6 +39,7 @@ from imagery_tile_selection import (  # noqa: E402
     crc32_file,
     save_tile_plan_cache,
     _compute_tiles_for_state,
+    _tile_plan_worker_count,
 )
 
 DATA_DIR = SCRIPT_DIR / "data"
@@ -193,14 +203,20 @@ def main() -> int:
     ap.add_argument(
         "--progress-interval",
         type=float,
-        default=30.0,
+        default=0.0,
         metavar="SEC",
         help=(
-            "While scanning tiles for one state×zoom, print a progress line every SEC seconds "
-            "(ETA for this job from zoom estimates). Use 0 to disable. Default: 30."
+            "Default 0: multi-process tile scan (uses all CPU cores on large bboxes). "
+            "Set to e.g. 30 for a heartbeat + ETA every SEC during each job — that mode is "
+            "single-core only (legacy cloud-style verbose logs)."
         ),
     )
     args = ap.parse_args()
+
+    try:
+        sys.stdout.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
+    except (AttributeError, OSError, ValueError):
+        pass
 
     if not args.geojson.is_file():
         print(f"Missing GeoJSON: {args.geojson}", file=sys.stderr)
@@ -247,12 +263,39 @@ def main() -> int:
         f"Output: {args.out_dir}\n",
         flush=True,
     )
+    if args.progress_interval > 0:
+        print(
+            f"Tile bbox scan: single-process with heartbeat every {args.progress_interval:g}s "
+            f"(verbose logs; multi-core is disabled in this mode). "
+            f"Omit --progress-interval or use 0 for default multi-core scans.\n",
+            flush=True,
+        )
+    else:
+        w = _tile_plan_worker_count()
+        if w > 0:
+            print(
+                f"Tile bbox scan: up to {w} parallel worker process(es). "
+                f"Set ATAK_TILE_PLAN_WORKERS to change.\n",
+                flush=True,
+            )
+        else:
+            print(
+                "Tile bbox scan: single process (ATAK_TILE_PLAN_WORKERS=0).\n",
+                flush=True,
+            )
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     run_t0 = time.perf_counter()
     sum_compute_s = 0.0
     sum_out_tiles = 0
+
+    print(
+        f">>> BATCH_START jobs={total_jobs} pid={os.getpid()} "
+        f"progress_interval={args.progress_interval:g}s "
+        f"tile_workers={_tile_plan_worker_count() if args.progress_interval <= 0 else 1}",
+        flush=True,
+    )
 
     for k, (state_name, z) in enumerate(jobs):
         out = args.out_dir / f"{state_name.replace('/', '_')}_z{z}.tiles.gz"
@@ -261,12 +304,14 @@ def main() -> int:
             pct = 100.0 * job_done_idx / total_jobs
             print(
                 f"[{job_done_idx}/{total_jobs}] ({pct:.1f}%) {state_name} z{z} | "
-                f"CACHE SKIP — file already on disk (no work): {out.name}",
+                f"skip existing → {out.name}",
                 flush=True,
             )
+            print(f">>> CACHE SKIP {state_name} z{z} → {out.name}", flush=True)
             continue
 
         rings = states[state_name]
+        print(f">>> COMPUTE START {state_name} z{z} → {out.name}", flush=True)
         t0 = time.perf_counter()
         def progress_log(qual_count: int, rect_done: int, rect_total: int, job_elapsed: float) -> None:
             total_elapsed_s = time.perf_counter() - run_t0
@@ -311,6 +356,7 @@ def main() -> int:
                 f"elapsed {_fmt_duration(total_elapsed_s)} | {eta_part} | {tail}",
                 flush=True,
             )
+            print(f">>> ETA {eta_part}", flush=True)
 
         if args.progress_interval > 0:
             tiles = _compute_tiles_for_state(
@@ -361,8 +407,10 @@ def main() -> int:
             f"{n_out:,} tiles in {elapsed_task:.1f}s → {out.name}",
             flush=True,
         )
+        print(f">>> ETA {eta_part}", flush=True)
 
     total_wall = time.perf_counter() - run_t0
+    print(f">>> BATCH_DONE {_fmt_duration(total_wall)} for {total_jobs} job(s).", flush=True)
     print(f"Done. {_fmt_duration(total_wall)} total for {total_jobs} cache file(s).", flush=True)
     return 0
 

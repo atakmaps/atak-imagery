@@ -10,14 +10,22 @@ Precomputed tile lists (per state, per zoom) live under ``data/tile_plans/v1/`` 
 runtime, ``build_tiles_for_state`` loads a cache when ``geojson_path`` and
 ``tile_plan_dir`` are set and the file matches the current boundary GeoJSON CRC
 and buffer distance.
+
+Large-state bbox scans (CPU-heavy) use multiple processes when the rectangle has
+at least ``_TILE_PLAN_PARALLEL_MIN_CELLS`` cells. Override worker count with
+``ATAK_TILE_PLAN_WORKERS`` (set to ``0`` to disable parallelism). Defaults to
+``os.cpu_count()`` (capped).
 """
 from __future__ import annotations
 
 import gzip
 import math
+import multiprocessing
+import os
 import struct
 import time
 import zlib
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
 
@@ -30,6 +38,10 @@ DEFAULT_BOUNDARY_BUFFER_M = STATE_BOUNDARY_BUFFER_MILES * METERS_PER_MILE
 RADIUS_REGION_FOLDER = "Radius"
 
 _SEGMENT_SAMPLES = 16
+
+# CPU-heavy: scan every cell in the state's Web Mercator bbox. Above this size, split
+# along X or Y (whichever is longer) so all cores stay busy even for tall-skinny rects.
+_TILE_PLAN_PARALLEL_MIN_CELLS = 12_000
 
 # Gzip tile list cache: magic, format, zoom, geojson_crc32, boundary_m (double), n, then n*(x,y) uint32 pairs.
 _TILE_PLAN_MAGIC = b"ATKP"
@@ -378,6 +390,55 @@ class TilePlanBuildResult(NamedTuple):
     from_cache: bool
 
 
+def _tile_plan_worker_count() -> int:
+    """Processes for bbox scan. Set ATAK_TILE_PLAN_WORKERS=0 to force single-process."""
+    raw = os.environ.get("ATAK_TILE_PLAN_WORKERS", "").strip()
+    if raw == "0":
+        return 0
+    if raw.isdigit() and int(raw) > 0:
+        return min(64, int(raw))
+    n = os.cpu_count() or 4
+    return max(2, min(32, n))
+
+
+def _split_axis_ranges(axis_start: int, axis_end: int, workers: int) -> List[Tuple[int, int]]:
+    span = axis_end - axis_start + 1
+    workers = max(1, min(workers, span))
+    out: List[Tuple[int, int]] = []
+    base, rem = divmod(span, workers)
+    pos = axis_start
+    for i in range(workers):
+        w = base + (1 if i < rem else 0)
+        if w <= 0:
+            break
+        lo, hi = pos, pos + w - 1
+        out.append((lo, hi))
+        pos = hi + 1
+    return out
+
+
+def _split_x_ranges(x_start: int, x_end: int, workers: int) -> List[Tuple[int, int]]:
+    return _split_axis_ranges(x_start, x_end, workers)
+
+
+def _split_y_ranges(y_start: int, y_end: int, workers: int) -> List[Tuple[int, int]]:
+    return _split_axis_ranges(y_start, y_end, workers)
+
+
+def _compute_tiles_rect_band(
+    args: Tuple[int, int, int, int, int, float, List[List[Tuple[float, float]]]],
+) -> List[Tuple[int, int]]:
+    """Picklable worker: qualifying (x, y) inside inclusive [x_lo,x_hi]×[y_lo,y_hi]."""
+    x_lo, x_hi, y_lo, y_hi, zoom, boundary_buffer_m, rings = args
+    tiles: List[Tuple[int, int]] = []
+    for x in range(x_lo, x_hi + 1):
+        for y in range(y_lo, y_hi + 1):
+            lon, lat = tile_center_lonlat(x, y, zoom)
+            if tile_qualifies(lon, lat, rings, boundary_buffer_m):
+                tiles.append((x, y))
+    return tiles
+
+
 def _compute_tiles_for_state(
     rings: List[List[Tuple[float, float]]],
     zoom: int,
@@ -401,11 +462,39 @@ def _compute_tiles_for_state(
     ny = y_end - y_start + 1
     rect_total = max(nx * ny, 1)
 
+    use_progress = progress_interval_s > 0 and progress_log is not None
+    workers = _tile_plan_worker_count()
+    if (
+        not use_progress
+        and workers > 0
+        and rect_total >= _TILE_PLAN_PARALLEL_MIN_CELLS
+    ):
+        nx = x_end - x_start + 1
+        ny = y_end - y_start + 1
+        if nx >= ny:
+            n_chunks = min(workers, nx)
+            bands = _split_x_ranges(x_start, x_end, n_chunks)
+            args_list = [
+                (xa, xb, y_start, y_end, zoom, boundary_buffer_m, rings) for xa, xb in bands
+            ]
+        else:
+            n_chunks = min(workers, ny)
+            bands = _split_y_ranges(y_start, y_end, n_chunks)
+            args_list = [
+                (x_start, x_end, ya, yb, zoom, boundary_buffer_m, rings) for ya, yb in bands
+            ]
+        ctx = multiprocessing.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=len(args_list), mp_context=ctx) as ex:
+            out_lists = list(ex.map(_compute_tiles_rect_band, args_list))
+        tiles_acc: List[Tuple[int, int]] = []
+        for part in out_lists:
+            tiles_acc.extend(part)
+        return tiles_acc
+
     tiles: List[Tuple[int, int]] = []
     rect_done = 0
     job_t0 = time.perf_counter()
     last_log_t = job_t0
-    use_progress = progress_interval_s > 0 and progress_log is not None
 
     for x in range(x_start, x_end + 1):
         for y in range(y_start, y_end + 1):
