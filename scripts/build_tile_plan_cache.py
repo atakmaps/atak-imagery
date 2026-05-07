@@ -156,11 +156,11 @@ def main() -> int:
     ap.add_argument(
         "--progress-interval",
         type=float,
-        default=60.0,
+        default=30.0,
         metavar="SEC",
         help=(
             "While scanning tiles for one state×zoom, print a progress line every SEC seconds "
-            "(ETA for this job from zoom estimates). Use 0 to disable. Default: 60."
+            "(ETA for this job from zoom estimates). Use 0 to disable. Default: 30."
         ),
     )
     args = ap.parse_args()
@@ -224,13 +224,26 @@ def main() -> int:
             pct = 100.0 * job_done_idx / total_jobs
             print(
                 f"[{job_done_idx}/{total_jobs}] ({pct:.1f}%) {state_name} z{z} | "
-                f"skip existing → {out.name}",
+                f"CACHE SKIP — file already on disk (no work): {out.name}",
                 flush=True,
             )
             continue
 
         rings = states[state_name]
         t0 = time.perf_counter()
+        est_j0 = zoom_estimates.get(state_name, {}).get(z, 0)
+        est_note = f"~{est_j0:,} est. output tiles" if est_j0 else "no per-job tile estimate"
+        prog_note = (
+            f"progress every {args.progress_interval:g}s"
+            if args.progress_interval > 0
+            else "no in-job progress lines (--progress-interval 0)"
+        )
+        print(
+            f"[{k + 1}/{total_jobs}] ({100.0 * (k + 1) / total_jobs:.1f}%) {state_name} z{z} | "
+            f">>> COMPUTE START — building {out.name} | {est_note} | "
+            f"large states can take hours per zoom | {prog_note}",
+            flush=True,
+        )
 
         def progress_log(qual_count: int, rect_done: int, rect_total: int, job_elapsed: float) -> None:
             rect_pct = 100.0 * rect_done / max(rect_total, 1)
@@ -250,7 +263,7 @@ def main() -> int:
                 )
             print(
                 f"[{k + 1}/{total_jobs}] ({100.0 * (k + 1) / total_jobs:.1f}%) "
-                f"{state_name} z{z} (in progress) | " + " | ".join(parts),
+                f"{state_name} z{z} | >>> SCAN PROGRESS | " + " | ".join(parts),
                 flush=True,
             )
 
