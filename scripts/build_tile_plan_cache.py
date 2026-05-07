@@ -153,6 +153,16 @@ def main() -> int:
         action="store_true",
         help="Skip a job when its output .tiles.gz already exists (resume after moving output dir).",
     )
+    ap.add_argument(
+        "--progress-interval",
+        type=float,
+        default=60.0,
+        metavar="SEC",
+        help=(
+            "While scanning tiles for one state×zoom, print a progress line every SEC seconds "
+            "(ETA for this job from zoom estimates). Use 0 to disable. Default: 60."
+        ),
+    )
     args = ap.parse_args()
 
     if not args.geojson.is_file():
@@ -221,7 +231,39 @@ def main() -> int:
 
         rings = states[state_name]
         t0 = time.perf_counter()
-        tiles = _compute_tiles_for_state(rings, z, buf)
+
+        def progress_log(qual_count: int, rect_done: int, rect_total: int, job_elapsed: float) -> None:
+            rect_pct = 100.0 * rect_done / max(rect_total, 1)
+            est_j = zoom_estimates.get(state_name, {}).get(z, 0)
+            parts = [
+                f"scanning… rectangle {rect_pct:.1f}% ({rect_done:,}/{rect_total:,} cells)",
+                f"{qual_count:,} qualifying tiles so far",
+                f"job elapsed {_fmt_duration(job_elapsed)}",
+            ]
+            if est_j > 0 and qual_count >= 1 and job_elapsed >= 0.5:
+                rate = qual_count / job_elapsed
+                rem_q = max(0, est_j - qual_count)
+                eta_j = rem_q / max(rate, 1e-9) * args.eta_scale
+                parts.append(
+                    f"this job scan left ~{_fmt_duration(eta_j)} "
+                    f"(est ~{est_j:,} output tiles; linear×{args.eta_scale:g})"
+                )
+            print(
+                f"[{k + 1}/{total_jobs}] ({100.0 * (k + 1) / total_jobs:.1f}%) "
+                f"{state_name} z{z} (in progress) | " + " | ".join(parts),
+                flush=True,
+            )
+
+        if args.progress_interval > 0:
+            tiles = _compute_tiles_for_state(
+                rings,
+                z,
+                buf,
+                progress_interval_s=args.progress_interval,
+                progress_log=progress_log,
+            )
+        else:
+            tiles = _compute_tiles_for_state(rings, z, buf)
         elapsed_task = time.perf_counter() - t0
         sum_compute_s += elapsed_task
         n_out = len(tiles)

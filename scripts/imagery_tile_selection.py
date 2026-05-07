@@ -16,9 +16,10 @@ from __future__ import annotations
 import gzip
 import math
 import struct
+import time
 import zlib
 from pathlib import Path
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
 
 # Miles beyond the GeoJSON boundary to keep imagery for (edge tiles + visibility).
 STATE_BOUNDARY_BUFFER_MILES = 3.0
@@ -381,6 +382,9 @@ def _compute_tiles_for_state(
     rings: List[List[Tuple[float, float]]],
     zoom: int,
     boundary_buffer_m: float,
+    *,
+    progress_interval_s: float = 0.0,
+    progress_log: Optional[Callable[[int, int, int, float], None]] = None,
 ) -> List[Tuple[int, int]]:
     min_lon, min_lat, max_lon, max_lat = bbox_for_rings(rings)
     min_lon, min_lat, max_lon, max_lat = expand_bbox_by_buffer_m(
@@ -393,12 +397,27 @@ def _compute_tiles_for_state(
     x_start, x_end = sorted((min_x, max_x))
     y_start, y_end = sorted((min_y, max_y))
 
+    nx = x_end - x_start + 1
+    ny = y_end - y_start + 1
+    rect_total = max(nx * ny, 1)
+
     tiles: List[Tuple[int, int]] = []
+    rect_done = 0
+    job_t0 = time.perf_counter()
+    last_log_t = job_t0
+    use_progress = progress_interval_s > 0 and progress_log is not None
+
     for x in range(x_start, x_end + 1):
         for y in range(y_start, y_end + 1):
+            rect_done += 1
             lon, lat = tile_center_lonlat(x, y, zoom)
             if tile_qualifies(lon, lat, rings, boundary_buffer_m):
                 tiles.append((x, y))
+            if use_progress:
+                now = time.perf_counter()
+                if now - last_log_t >= progress_interval_s:
+                    progress_log(len(tiles), rect_done, rect_total, now - job_t0)
+                    last_log_t = now
     return tiles
 
 
