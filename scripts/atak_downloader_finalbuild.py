@@ -36,8 +36,11 @@ import threading
 import time
 import warnings
 
-# os._exit() is used on cancel/completion to avoid hanging threads; suppress the
-# benign "leaked semaphore" noise that Python's resource tracker emits on hard exit.
+# Suppress the benign "leaked semaphore" warning from Python's resource_tracker
+# subprocess on hard exit (os._exit). The env var propagates to child processes;
+# warnings.filterwarnings covers the main process.
+import os as _os
+_os.environ.setdefault("PYTHONWARNINGS", "ignore::UserWarning:multiprocessing.resource_tracker")
 warnings.filterwarnings(
     "ignore",
     message="resource_tracker.*leaked semaphore",
@@ -459,6 +462,16 @@ DOWNLOADER_NEXT_SQLITE_DIALOG_TEXT = (
     "Click Next to continue."
 )
 
+CONNECT_DEVICE_BEFORE_DTED_TEXT = (
+    "Imagery Download Complete.\n\n"
+    "Please connect your device now and ensure you have USB debugging on. "
+    "Then select USB for File Transfer.\n\n"
+    "If you do not get this notification: Swipe down from top, expand the Android "
+    "System Notification, tap 'Charging this device via USB' before you select USB "
+    "File Transfer.\n\n"
+    "Click OK when your device is connected and ready."
+)
+
 
 def show_downloader_session_exit_dialog(parent: tk.Tk, body: Optional[str] = None) -> None:
     """After imagery (and optional inline DTED), prompt user before launching the SQLite builder."""
@@ -822,6 +835,50 @@ class DownloadScopeDialog(tk.Tk):
 
         tk.Button(raw_row, text="Browse…", command=browse_raw).grid(row=0, column=1, sticky="e")
 
+        tk.Label(
+            scroll_inner,
+            text="Local Elevation Location",
+            font=("Arial", 11, "bold"),
+        ).pack(anchor="w", pady=(_g2, 4))
+        _add_wrapped(
+            scroll_inner,
+            text="If you have elevation data (DTED) on a local disk, choose the path below.",
+            justify="left",
+            wraplength=_scope_wrap,
+            anchor="w",
+        ).pack(anchor="w", pady=(0, 4))
+        _add_wrapped(
+            scroll_inner,
+            text="Note: This data must be stored in this format: State name/State name.zip",
+            justify="left",
+            wraplength=_scope_wrap,
+            anchor="w",
+        ).pack(anchor="w", pady=(0, 6))
+        _add_wrapped(
+            scroll_inner,
+            text=(
+                "Any required elevation not present on the local disk will be downloaded. "
+                "Leave blank if you do not have the elevation data required to build your selection."
+            ),
+            justify="left",
+            wraplength=_scope_wrap,
+            anchor="w",
+        ).pack(anchor="w", pady=(0, 12))
+
+        dted_row = tk.Frame(scroll_inner)
+        dted_row.pack(fill="x", pady=(0, 0))
+        dted_row.grid_columnconfigure(0, weight=1)
+        self.dted_var = tk.StringVar(value="")
+        tk.Entry(dted_row, textvariable=self.dted_var).grid(row=0, column=0, sticky="ew", padx=(0, 8))
+
+        def browse_dted() -> None:
+            initial = Path(self.dted_var.get().strip() or str(Path.home()))
+            folder = pick_directory("Local DTED state zips (optional)", initial, self)
+            if folder:
+                self.dted_var.set(folder)
+
+        tk.Button(dted_row, text="Browse…", command=browse_dted).grid(row=0, column=1, sticky="e")
+
         apply_resizable_window(self, 740, 780, (560, 300))
 
         self.bind("<Configure>", lambda e: _sync_scroll_wrap())
@@ -851,7 +908,7 @@ class DownloadScopeDialog(tk.Tk):
         else:
             self.radius_region_folder = ""
         self.raw_imagery_path = self.raw_var.get().strip()
-        self.local_dted_path = ""
+        self.local_dted_path = self.dted_var.get().strip()
         self.accepted = True
         self.destroy()
 
@@ -1535,6 +1592,8 @@ class ProgressWindow(tk.Tk):
         self.completion_message = None
         self.completion_log_summary = None
         self.error_message = None
+        self.device_ready_prompt: Optional[str] = None
+        self.device_ready_event: Optional[threading.Event] = None
 
     def append_log(self, line: str) -> None:
         self.text.insert("end", line)
@@ -1993,6 +2052,7 @@ def run_download(
     radius_center: Optional[Tuple[float, float]] = None,
     radius_miles: Optional[float] = None,
     radius_region_folder: Optional[str] = None,
+    preloaded_states: Optional[Dict[str, List[List[Tuple[float, float]]]]] = None,
 ) -> None:
     stats = {"downloaded": 0, "existing": 0, "failed": 0, "missing": 0}
     executor: Optional[ThreadPoolExecutor] = None
@@ -2081,9 +2141,17 @@ def run_download(
                     out_path = output_root / radius_folder / str(z) / str(x) / f"{y}.jpg"
                     plan.append((radius_folder, z, x, y, out_path))
         else:
-            progress.set_status("Loading state boundaries...")
-            geojson_path = bundled_state_geojson_path()
-            states = load_states(geojson_path)
+            # State boundaries are pre-loaded on the main thread before this
+            # thread starts, avoiding a large allocation burst from the
+            # background thread that can trigger the cyclic GC at the wrong time.
+            if preloaded_states is not None:
+                states = preloaded_states
+                geojson_path = STATE_GEOJSON_PATH
+                log(f"Using pre-loaded state boundaries ({len(states)} states)")
+            else:
+                progress.set_status("Loading state boundaries...")
+                geojson_path = bundled_state_geojson_path()
+                states = load_states(geojson_path)
 
             state_names = []
             for state_name in selected_states:
@@ -2347,7 +2415,6 @@ def run_download(
         try:
             from atak_dted_downloader import (
                 mark_standalone_dted_skip,
-                push_device_dted_manifest,
                 query_device_installed_dted_states,
                 run_dted_inline_for_states,
             )
@@ -2358,8 +2425,18 @@ def run_download(
                 # Mark that DTED is handled inline so the SQLite builder won't
                 # launch the standalone DTED downloader afterward.
                 mark_standalone_dted_skip()
+                # Download-first workflow: imagery is already complete. Now prompt
+                # for device connection before deciding whether DTED is needed.
+                progress.set_status("Imagery complete — waiting for device connection for DTED check…")
+                progress.device_ready_event = threading.Event()
+                progress.device_ready_prompt = CONNECT_DEVICE_BEFORE_DTED_TEXT
+                while True:
+                    progress.wait_if_paused()
+                    evt = progress.device_ready_event
+                    if evt is None or evt.is_set():
+                        break
+                    time.sleep(0.1)
 
-                # Check what's already on the device and skip states already installed.
                 progress.set_status("DTED: checking what is already installed on device…")
                 device_dted_states: Set[str] = query_device_installed_dted_states(log) or set()
                 states_needed = [s for s in dted_state_list if s not in device_dted_states]
@@ -2426,6 +2503,15 @@ def pump_gui_logs(window: ProgressWindow) -> None:
                 pass
             os._exit(0)
 
+        if getattr(window, "device_ready_prompt", None):
+            prompt_text = window.device_ready_prompt
+            evt = getattr(window, "device_ready_event", None)
+            window.device_ready_prompt = None
+            ensure_window_stacking(window)
+            messagebox.showinfo(APP_TITLE, prompt_text, parent=window)
+            if evt is not None:
+                evt.set()
+
         if getattr(window, "completion_message", None):
             msg = window.completion_message
             window.completion_message = None
@@ -2479,9 +2565,7 @@ def main() -> None:
     if is_launched_from_device_installer():
         log("Launched from Device Installer — skipping standalone USB/adb intro.")
     else:
-        if not show_downloader_intro_and_verify_device():
-            log("Exited at device verification prompt.")
-            return
+        log("Standalone launch — skipping upfront device check (device connected after download).")
 
     while True:
         scope_dlg = DownloadScopeDialog()
@@ -2585,6 +2669,11 @@ def main() -> None:
                         log("Cancelled at output folder prompt.")
                         return
 
+                    # Pre-load state boundaries on the main thread to avoid a
+                    # large GC-triggering allocation burst in the download thread.
+                    _geo = bundled_state_geojson_path()
+                    _preloaded = load_states(_geo)
+
                     progress = ProgressWindow(LOGGER.log_file)
                     pump_gui_logs(progress)
                     worker = threading.Thread(
@@ -2601,6 +2690,7 @@ def main() -> None:
                             "local_dted_root": dted_path,
                             "radius_center": None,
                             "radius_miles": None,
+                            "preloaded_states": _preloaded,
                         },
                         daemon=True,
                     )

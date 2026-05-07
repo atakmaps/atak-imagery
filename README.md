@@ -55,11 +55,18 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.3.9` (tag **`v1.3.9`** on GitHub).
+**Linux / source release:** `v1.3.10` (tag **`v1.3.10`** on GitHub).
 
 **Windows:** A new Windows packaged build is **not** included in this cycle. **Use Windows release `2.8`** until a newer Windows installer is published. Source copies under `windows_build/` include the same startup behaviors when run with Python.
 
-Version **1.3.9** highlights:
+Version **1.3.10** highlights:
+
+- **Download-first workflow restored:** standalone imagery runs now skip upfront device verification, download imagery first, then prompt once to connect the device before the DTED/device check stage.
+- **DTED local-path browser restored:** the "Local Elevation Location" selector is back on the download scope screen so local state ZIP trees can be used before network fetches.
+- **State-name URL fix for DTED server paths:** multi-word state names now map to underscore server slugs (for example `North_Dakota`) so valid server files are found.
+- **Stability fix for Linux Tk crash:** state boundary GeoJSON loading is preloaded on the main thread before worker startup to avoid the `Tcl_AsyncDelete` crash path seen during state-mode downloads.
+
+### Previous release (v1.3.9)
 
 - **Cancel works immediately during DTED download:** pressing Cancel now responds within one 256 KB chunk instead of waiting for the entire state ZIP to finish. The cancel signal is checked on every chunk in `download_file`; the partial `.part` file is cleaned up automatically.
 - **Suppress benign semaphore warning:** the `resource_tracker: leaked semaphore` warning that appeared on exit after a cancel is now suppressed — it was harmless noise from the hard-exit path.

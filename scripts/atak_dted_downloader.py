@@ -730,8 +730,14 @@ def derive_package_folder_name(package_name: str) -> str:
     return f"atak_{clean_name(package_name)}"
 
 
+def server_state_slug(state_name: str) -> str:
+    """Map human state name to DTED server folder/file naming."""
+    return re.sub(r"\s+", "_", state_name.strip())
+
+
 def state_url(state_name: str) -> str:
-    return f"{BASE_URL}/{state_name}/{state_name}.zip"
+    slug = server_state_slug(state_name)
+    return f"{BASE_URL}/{slug}/{slug}.zip"
 
 
 def ask_output_parent() -> str:
