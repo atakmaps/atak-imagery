@@ -11,10 +11,16 @@ Examples:
   python3 scripts/build_tile_plan_cache.py --states Arkansas,Texas
   python3 scripts/build_tile_plan_cache.py --zooms 14,15,16
 
-Legacy human lines + machine lines for remote grep (same style as older cloud batches):
+Live progress (default): ``>>> PROGRESS`` lines every few seconds with **real bbox scan
+fraction**, **this-job ETA**, and **full-batch (all states×zooms) ETA**:
+
+  PYTHONUNBUFFERED=1 python3 -u scripts/build_tile_plan_cache.py 2>&1 | grep --line-buffered '>>> PROGRESS'
+
+Other machine-parsable lines:
+
   tail -f ~/tile_plan_cache_full_us.log
 
-  ssh user@host 'tail -f ~/tile_plan_cache_full_us.log | grep --line-buffered -E "^>>> (ETA|COMPUTE START|CACHE SKIP)"'
+  ssh user@host 'tail -f ~/tile_plan_cache_full_us.log | grep --line-buffered -E "^>>> (PROGRESS|ETA|COMPUTE START|CACHE SKIP)"'
 
 Run with line-buffered output when redirecting to a file:
   PYTHONUNBUFFERED=1 python3 -u scripts/build_tile_plan_cache.py ... 2>&1 | tee ~/tile_plan_cache_full_us.log
@@ -28,7 +34,12 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, TextIO, Tuple
+
+try:
+    import fcntl  # type: ignore[attr-defined]
+except ImportError:  # pragma: no cover - non-POSIX hosts
+    fcntl = None  # type: ignore[assignment]
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -159,6 +170,97 @@ def _eta_part_job_average_fallback(
     )
 
 
+def print_real_progress_line(
+    *,
+    job_index_0: int,
+    total_jobs: int,
+    state_name: str,
+    z: int,
+    out_name: str,
+    cells_done: int,
+    rect_total: int,
+    qual_tiles: int,
+    job_elapsed_s: float,
+    batch_elapsed_s: float,
+    jobs: List[Tuple[str, int]],
+    zoom_estimates: Dict[str, Dict[int, int]],
+    sum_out_tiles: int,
+    sum_compute_s: float,
+    eta_scale: float,
+) -> None:
+    """Emit one line: actual bbox scan progress + ETAs for this job and the full batch."""
+    est_j = int(zoom_estimates.get(state_name, {}).get(z, 0) or 0)
+    rem_after = sum_estimated_tiles_remaining(jobs, job_index_0 + 1, zoom_estimates)
+    rem_out = rem_after + (max(0, est_j - qual_tiles) if est_j else 0)
+
+    bbox_pct = 100.0 * cells_done / max(rect_total, 1)
+    job_left_s: Optional[float] = None
+    if cells_done >= 2_000 and job_elapsed_s >= 1.0:
+        rem_cells = max(0, rect_total - cells_done)
+        rate = cells_done / job_elapsed_s
+        if rate > 0:
+            job_left_s = rem_cells / rate
+
+    sec_per_tile: Optional[float] = None
+    if sum_out_tiles > 0 and sum_compute_s > 1e-6:
+        sec_per_tile = sum_compute_s / sum_out_tiles
+    elif qual_tiles >= 1_000 and job_elapsed_s >= 1.0:
+        sec_per_tile = job_elapsed_s / qual_tiles
+
+    batch_left_s: Optional[float] = None
+    if sec_per_tile is not None and rem_out > 0:
+        batch_left_s = rem_out * sec_per_tile * eta_scale
+
+    job_left_txt = _fmt_duration(job_left_s) if job_left_s is not None else "…"
+    batch_left_txt = _fmt_duration(batch_left_s) if batch_left_s is not None else "…"
+
+    est_tile_txt = f"{est_j:,}" if est_j else "—"
+    line = (
+        f">>> PROGRESS [{job_index_0 + 1}/{total_jobs}] {state_name} z{z} → {out_name} | "
+        f"bbox {bbox_pct:.1f}% ({cells_done:,}/{rect_total:,} cells) | "
+        f"out {qual_tiles:,}/{est_tile_txt} est tiles | "
+        f"this job left ~{job_left_txt} | "
+        f"full batch left ~{batch_left_txt} | "
+        f"batch elapsed {_fmt_duration(batch_elapsed_s)}"
+    )
+    print(line, flush=True)
+
+
+def _try_acquire_build_lock(lock_path: Path) -> Tuple[Optional[TextIO], Optional[str]]:
+    """Best-effort process lock; returns (handle, err). Keep handle open for lock lifetime."""
+    if fcntl is None:
+        return None, None
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = lock_path.open("a+", encoding="utf-8")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        fh.seek(0)
+        holder = fh.read().strip().splitlines()
+        holder_pid = holder[0] if holder else "unknown"
+        fh.close()
+        return None, (
+            f"Another tile-plan build appears to be running (lock: {lock_path}, pid: {holder_pid}). "
+            "Use --allow-concurrent to bypass."
+        )
+    fh.seek(0)
+    fh.truncate()
+    fh.write(f"{os.getpid()}\n")
+    fh.flush()
+    return fh, None
+
+
+def _release_build_lock(lock_fh: Optional[TextIO]) -> None:
+    if lock_fh is None:
+        return
+    if fcntl is not None:
+        try:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+    lock_fh.close()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Build tile plan .tiles.gz caches for imagery downloader.")
     ap.add_argument(
@@ -192,6 +294,27 @@ def main() -> int:
         help=f"Output directory (default: {TILE_PLAN_DIR})",
     )
     ap.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Override ATAK_TILE_PLAN_WORKERS for this run: 0=single-process scan, "
+            "N>0=use N worker processes for large bbox scans."
+        ),
+    )
+    ap.add_argument(
+        "--allow-concurrent",
+        action="store_true",
+        help="Allow multiple build_tile_plan_cache.py processes at once (unsafe for shared hosts).",
+    )
+    ap.add_argument(
+        "--lock-file",
+        type=Path,
+        default=None,
+        help="Optional lock file path (default: <out-dir>/.build_tile_plan_cache.lock).",
+    )
+    ap.add_argument(
         "--eta-scale",
         type=float,
         default=0.58,
@@ -218,7 +341,29 @@ def main() -> int:
             "single-core only (legacy cloud-style verbose logs)."
         ),
     )
+    ap.add_argument(
+        "--progress-line-interval",
+        type=float,
+        default=2.0,
+        metavar="SEC",
+        help=(
+            "Emit a >>> PROGRESS line every SEC with real bbox cell counts and batch ETAs "
+            "(multi-core safe). Use 0 to disable. Default 2."
+        ),
+    )
+    ap.add_argument(
+        "--no-progress-line",
+        action="store_true",
+        help="Disable >>> PROGRESS lines; use a coarse 30s heartbeat on long parallel jobs instead.",
+    )
     args = ap.parse_args()
+    if args.no_progress_line:
+        args.progress_line_interval = 0.0
+    if args.workers is not None and args.workers < 0:
+        print("--workers must be >= 0", file=sys.stderr)
+        return 1
+    if args.workers is not None:
+        os.environ["ATAK_TILE_PLAN_WORKERS"] = str(args.workers)
 
     try:
         sys.stdout.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
@@ -277,9 +422,8 @@ def main() -> int:
     )
     if args.progress_interval > 0:
         print(
-            f"Tile bbox scan: single-process with heartbeat every {args.progress_interval:g}s "
-            f"(verbose logs; multi-core is disabled in this mode). "
-            f"Omit --progress-interval or use 0 for default multi-core scans.\n",
+            f"Tile bbox scan: single-process with legacy heartbeat every {args.progress_interval:g}s "
+            f"(multi-core is disabled in this mode).\n",
             flush=True,
         )
     else:
@@ -295,58 +439,118 @@ def main() -> int:
                 "Tile bbox scan: single process (ATAK_TILE_PLAN_WORKERS=0).\n",
                 flush=True,
             )
+    if args.progress_line_interval > 0:
+        print(
+            f"Progress lines: >>> PROGRESS every {args.progress_line_interval:g}s "
+            f"(bbox cells + this-job + full-batch ETA). "
+            f"Disable with --no-progress-line or --progress-line-interval 0.\n",
+            flush=True,
+        )
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
+    lock_fh: Optional[TextIO] = None
+    if not args.allow_concurrent:
+        lock_path = args.lock_file or (args.out_dir / ".build_tile_plan_cache.lock")
+        lock_fh, lock_err = _try_acquire_build_lock(lock_path)
+        if lock_err is not None:
+            print(lock_err, file=sys.stderr)
+            return 2
 
     run_t0 = time.perf_counter()
     sum_compute_s = 0.0
     sum_out_tiles = 0
+    try:
+        print(
+            f">>> BATCH_START jobs={total_jobs} pid={os.getpid()} "
+            f"progress_interval={args.progress_interval:g}s "
+            f"progress_line_interval={args.progress_line_interval:g}s "
+            f"tile_workers={_tile_plan_worker_count() if args.progress_interval <= 0 else 1}",
+            flush=True,
+        )
 
-    print(
-        f">>> BATCH_START jobs={total_jobs} pid={os.getpid()} "
-        f"progress_interval={args.progress_interval:g}s "
-        f"tile_workers={_tile_plan_worker_count() if args.progress_interval <= 0 else 1}",
-        flush=True,
-    )
+        for k, (state_name, z) in enumerate(jobs):
+            out = args.out_dir / f"{state_name.replace('/', '_')}_z{z}.tiles.gz"
+            if args.skip_existing and out.is_file():
+                job_done_idx = k + 1
+                pct = 100.0 * job_done_idx / total_jobs
+                print(
+                    f"[{job_done_idx}/{total_jobs}] ({pct:.1f}%) {state_name} z{z} | "
+                    f"skip existing → {out.name}",
+                    flush=True,
+                )
+                print(f">>> CACHE SKIP {state_name} z{z} → {out.name}", flush=True)
+                continue
 
-    for k, (state_name, z) in enumerate(jobs):
-        out = args.out_dir / f"{state_name.replace('/', '_')}_z{z}.tiles.gz"
-        if args.skip_existing and out.is_file():
-            job_done_idx = k + 1
-            pct = 100.0 * job_done_idx / total_jobs
-            print(
-                f"[{job_done_idx}/{total_jobs}] ({pct:.1f}%) {state_name} z{z} | "
-                f"skip existing → {out.name}",
-                flush=True,
-            )
-            print(f">>> CACHE SKIP {state_name} z{z} → {out.name}", flush=True)
-            continue
+            rings = states[state_name]
+            print(f">>> COMPUTE START {state_name} z{z} → {out.name}", flush=True)
+            t0 = time.perf_counter()
 
-        rings = states[state_name]
-        print(f">>> COMPUTE START {state_name} z{z} → {out.name}", flush=True)
-        t0 = time.perf_counter()
+            use_progress_line = args.progress_line_interval > 0
+            use_legacy_progress = args.progress_interval > 0
 
-        # ── Timer thread: fires every progress_interval_s (or 30s default) ──────
-        # Works for both parallel and single-core modes. Uses only batch-level rate
-        # (tiles/s from jobs already done) so it works even when no bands have
-        # finished yet in a parallel run.
-        _stop_timer = threading.Event()
-        interval_s = args.progress_interval if args.progress_interval > 0 else 30.0
+            # Coarse heartbeat when >>> PROGRESS lines are off (parallel runs had no bbox visibility).
+            _stop_timer = threading.Event()
+            timer_thread: Optional[threading.Thread] = None
+            if not use_progress_line:
+                interval_s = args.progress_interval if args.progress_interval > 0 else 30.0
 
-        def _eta_timer(
-            _sn: str = state_name, _z: int = z,
-            _stop: threading.Event = _stop_timer,
-        ) -> None:
-            est_j = zoom_estimates.get(_sn, {}).get(_z, 0)
-            while not _stop.wait(timeout=interval_s):
-                job_elapsed = time.perf_counter() - t0
+                def _eta_timer(
+                    _sn: str = state_name,
+                    _z: int = z,
+                    _stop: threading.Event = _stop_timer,
+                ) -> None:
+                    est_j = zoom_estimates.get(_sn, {}).get(_z, 0)
+                    while not _stop.wait(timeout=interval_s):
+                        job_elapsed = time.perf_counter() - t0
+                        total_elapsed_s = time.perf_counter() - run_t0
+                        rem_after = sum_estimated_tiles_remaining(jobs, k + 1, zoom_estimates)
+                        rem_est = rem_after + est_j  # conservative: assume 0 done in current job
+
+                        sec_per_tile: Optional[float] = None
+                        if sum_out_tiles > 0 and sum_compute_s > 0:
+                            sec_per_tile = sum_compute_s / sum_out_tiles
+
+                        if sec_per_tile is not None and rem_est > 0:
+                            eta_part = _eta_part_scan_remaining(
+                                rem_est=rem_est,
+                                sec_per_tile=sec_per_tile,
+                                total_elapsed_s=total_elapsed_s,
+                                jobs_remaining=total_jobs - k,
+                                eta_scale=args.eta_scale,
+                            )
+                        elif k > 0 and sum_compute_s > 0:
+                            eta_part = _eta_part_job_average_fallback(
+                                sum_compute_s=sum_compute_s,
+                                job_done_idx=k,
+                                total_jobs=total_jobs,
+                            )
+                        else:
+                            eta_part = "scan time left: … (establishing rate — first job in batch)"
+
+                        print(
+                            f"[{k + 1}/{total_jobs}] ({100.0 * (k + 1) / total_jobs:.1f}%) "
+                            f"{_sn} z{_z} | elapsed {_fmt_duration(total_elapsed_s)} | "
+                            f"{eta_part} | {job_elapsed:.0f}s elapsed on this job → {out.name}",
+                            flush=True,
+                        )
+                        print(f">>> ETA {eta_part}", flush=True)
+
+                timer_thread = threading.Thread(target=_eta_timer, daemon=True)
+                timer_thread.start()
+
+            def progress_log(qual_count: int, rect_done: int, rect_total: int, job_elapsed: float) -> None:
+                """Single-process mode: called every progress_interval_s by the scanner."""
                 total_elapsed_s = time.perf_counter() - run_t0
+                est_j = zoom_estimates.get(state_name, {}).get(z, 0)
                 rem_after = sum_estimated_tiles_remaining(jobs, k + 1, zoom_estimates)
-                rem_est = rem_after + est_j  # conservative: assume 0 done in current job
+                rem_current = max(0, est_j - qual_count) if est_j else 0
+                rem_est = rem_after + rem_current
 
                 sec_per_tile: Optional[float] = None
                 if sum_out_tiles > 0 and sum_compute_s > 0:
                     sec_per_tile = sum_compute_s / sum_out_tiles
+                elif qual_count > 0 and job_elapsed >= 0.5:
+                    sec_per_tile = job_elapsed / qual_count
 
                 if sec_per_tile is not None and rem_est > 0:
                     eta_part = _eta_part_scan_remaining(
@@ -363,118 +567,103 @@ def main() -> int:
                         total_jobs=total_jobs,
                     )
                 else:
-                    eta_part = "scan time left: … (establishing rate — first job in batch)"
+                    eta_part = "scan time left: … (establishing rate)"
 
+                rect_pct = 100.0 * rect_done / max(rect_total, 1)
+                tail = (
+                    f"{qual_count:,} tiles in {job_elapsed:.1f}s "
+                    f"(scanning {rect_pct:.1f}% of tile grid) → {out.name}"
+                )
                 print(
                     f"[{k + 1}/{total_jobs}] ({100.0 * (k + 1) / total_jobs:.1f}%) "
-                    f"{_sn} z{_z} | elapsed {_fmt_duration(total_elapsed_s)} | "
-                    f"{eta_part} | {job_elapsed:.0f}s elapsed on this job → {out.name}",
+                    f"{state_name} z{z} | elapsed {_fmt_duration(total_elapsed_s)} | "
+                    f"{eta_part} | {tail}",
                     flush=True,
                 )
-                print(f">>> ETA {eta_part}", flush=True)
 
-        timer_thread = threading.Thread(target=_eta_timer, daemon=True)
-        timer_thread.start()
-
-        def progress_log(qual_count: int, rect_done: int, rect_total: int, job_elapsed: float) -> None:
-            """Single-process mode: called every progress_interval_s by the scanner."""
-            total_elapsed_s = time.perf_counter() - run_t0
-            est_j = zoom_estimates.get(state_name, {}).get(z, 0)
-            rem_after = sum_estimated_tiles_remaining(jobs, k + 1, zoom_estimates)
-            rem_current = max(0, est_j - qual_count) if est_j else 0
-            rem_est = rem_after + rem_current
-
-            sec_per_tile: Optional[float] = None
-            if sum_out_tiles > 0 and sum_compute_s > 0:
-                sec_per_tile = sum_compute_s / sum_out_tiles
-            elif qual_count > 0 and job_elapsed >= 0.5:
-                sec_per_tile = job_elapsed / qual_count
-
-            if sec_per_tile is not None and rem_est > 0:
-                eta_part = _eta_part_scan_remaining(
-                    rem_est=rem_est,
-                    sec_per_tile=sec_per_tile,
-                    total_elapsed_s=total_elapsed_s,
-                    jobs_remaining=total_jobs - k,
+            def scan_cb(cells_done: int, rect_total: int, qual: int, job_el: float) -> None:
+                print_real_progress_line(
+                    job_index_0=k,
+                    total_jobs=total_jobs,
+                    state_name=state_name,
+                    z=z,
+                    out_name=out.name,
+                    cells_done=cells_done,
+                    rect_total=rect_total,
+                    qual_tiles=qual,
+                    job_elapsed_s=job_el,
+                    batch_elapsed_s=time.perf_counter() - run_t0,
+                    jobs=jobs,
+                    zoom_estimates=zoom_estimates,
+                    sum_out_tiles=sum_out_tiles,
+                    sum_compute_s=sum_compute_s,
                     eta_scale=args.eta_scale,
                 )
-            elif k > 0 and sum_compute_s > 0:
-                eta_part = _eta_part_job_average_fallback(
-                    sum_compute_s=sum_compute_s,
-                    job_done_idx=k,
-                    total_jobs=total_jobs,
-                )
-            else:
-                eta_part = "scan time left: … (establishing rate)"
 
-            rect_pct = 100.0 * rect_done / max(rect_total, 1)
-            tail = (
-                f"{qual_count:,} tiles in {job_elapsed:.1f}s "
-                f"(scanning {rect_pct:.1f}% of tile grid) → {out.name}"
+            tiles = _compute_tiles_for_state(
+                rings,
+                z,
+                buf,
+                progress_interval_s=(
+                    args.progress_interval if use_legacy_progress and not use_progress_line else 0.0
+                ),
+                progress_log=(
+                    progress_log if use_legacy_progress and not use_progress_line else None
+                ),
+                scan_progress_interval_s=float(args.progress_line_interval),
+                scan_progress_callback=scan_cb if use_progress_line else None,
             )
+
+            _stop_timer.set()
+            if timer_thread is not None:
+                timer_thread.join(timeout=2)
+            elapsed_task = time.perf_counter() - t0
+            sum_compute_s += elapsed_task
+            n_out = len(tiles)
+            sum_out_tiles += n_out
+
+            save_tile_plan_cache(out, z, buf, crc, tiles)
+
+            total_elapsed_s = time.perf_counter() - run_t0
+            job_done_idx = k + 1
+            pct = 100.0 * job_done_idx / total_jobs
+
+            if job_done_idx < total_jobs and sum_out_tiles > 0 and sum_compute_s > 0:
+                rem_est = sum_estimated_tiles_remaining(jobs, job_done_idx, zoom_estimates)
+                if rem_est > 0:
+                    sec_per_tile = sum_compute_s / sum_out_tiles
+                    eta_part = _eta_part_scan_remaining(
+                        rem_est=rem_est,
+                        sec_per_tile=sec_per_tile,
+                        total_elapsed_s=total_elapsed_s,
+                        jobs_remaining=total_jobs - job_done_idx,
+                        eta_scale=args.eta_scale,
+                    )
+                else:
+                    eta_part = _eta_part_job_average_fallback(
+                        sum_compute_s=sum_compute_s,
+                        job_done_idx=job_done_idx,
+                        total_jobs=total_jobs,
+                    )
+            elif job_done_idx < total_jobs:
+                eta_part = "time left: … (need first job for ETA)"
+            else:
+                eta_part = "entire batch complete"
+
             print(
-                f"[{k + 1}/{total_jobs}] ({100.0 * (k + 1) / total_jobs:.1f}%) "
-                f"{state_name} z{z} | elapsed {_fmt_duration(total_elapsed_s)} | "
-                f"{eta_part} | {tail}",
+                f"[{job_done_idx}/{total_jobs}] ({pct:.1f}%) {state_name} z{z} | "
+                f"elapsed {_fmt_duration(total_elapsed_s)} | {eta_part} | "
+                f"{n_out:,} tiles in {elapsed_task:.1f}s → {out.name}",
                 flush=True,
             )
+            print(f">>> ETA {eta_part}", flush=True)
 
-        if args.progress_interval > 0:
-            tiles = _compute_tiles_for_state(
-                rings, z, buf,
-                progress_interval_s=args.progress_interval,
-                progress_log=progress_log,
-            )
-        else:
-            tiles = _compute_tiles_for_state(rings, z, buf)
-
-        _stop_timer.set()
-        timer_thread.join(timeout=2)
-        elapsed_task = time.perf_counter() - t0
-        sum_compute_s += elapsed_task
-        n_out = len(tiles)
-        sum_out_tiles += n_out
-
-        save_tile_plan_cache(out, z, buf, crc, tiles)
-
-        total_elapsed_s = time.perf_counter() - run_t0
-        job_done_idx = k + 1
-        pct = 100.0 * job_done_idx / total_jobs
-
-        if job_done_idx < total_jobs and sum_out_tiles > 0 and sum_compute_s > 0:
-            rem_est = sum_estimated_tiles_remaining(jobs, job_done_idx, zoom_estimates)
-            if rem_est > 0:
-                sec_per_tile = sum_compute_s / sum_out_tiles
-                eta_part = _eta_part_scan_remaining(
-                    rem_est=rem_est,
-                    sec_per_tile=sec_per_tile,
-                    total_elapsed_s=total_elapsed_s,
-                    jobs_remaining=total_jobs - job_done_idx,
-                    eta_scale=args.eta_scale,
-                )
-            else:
-                eta_part = _eta_part_job_average_fallback(
-                    sum_compute_s=sum_compute_s,
-                    job_done_idx=job_done_idx,
-                    total_jobs=total_jobs,
-                )
-        elif job_done_idx < total_jobs:
-            eta_part = "time left: … (need first job for ETA)"
-        else:
-            eta_part = "entire batch complete"
-
-        print(
-            f"[{job_done_idx}/{total_jobs}] ({pct:.1f}%) {state_name} z{z} | "
-            f"elapsed {_fmt_duration(total_elapsed_s)} | {eta_part} | "
-            f"{n_out:,} tiles in {elapsed_task:.1f}s → {out.name}",
-            flush=True,
-        )
-        print(f">>> ETA {eta_part}", flush=True)
-
-    total_wall = time.perf_counter() - run_t0
-    print(f">>> BATCH_DONE {_fmt_duration(total_wall)} for {total_jobs} job(s).", flush=True)
-    print(f"Done. {_fmt_duration(total_wall)} total for {total_jobs} cache file(s).", flush=True)
-    return 0
+        total_wall = time.perf_counter() - run_t0
+        print(f">>> BATCH_DONE {_fmt_duration(total_wall)} for {total_jobs} job(s).", flush=True)
+        print(f"Done. {_fmt_duration(total_wall)} total for {total_jobs} cache file(s).", flush=True)
+        return 0
+    finally:
+        _release_build_lock(lock_fh)
 
 
 if __name__ == "__main__":

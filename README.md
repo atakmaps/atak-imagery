@@ -55,14 +55,19 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.3.13` (tag **`v1.3.13`** on GitHub).
+**Linux / source release:** `v1.3.14` (tag **`v1.3.14`** on GitHub).
 
 **Windows:** A new Windows packaged build is **not** included in this cycle. **Use Windows release `2.8`** until a newer Windows installer is published. Source copies under `windows_build/` include the same startup behaviors when run with Python.
 
-Version **1.3.13** highlights:
+Version **1.3.14** highlights:
+
+- **Add-ons refresh workflow hardening:** the downloader now uses the same checked add-ons routine (close ATAK, verify device, detect missing items, confirm install list) for both **refresh-only** and **maps + refresh** flows.
+- **Maps + refresh execution order:** when both options are selected, add-ons refresh runs first. A completion dialog confirms device work is done before imagery starts.
+- **KMZ/ZIP delivery path update:** `.kmz` and `.zip` add-ons are now copied to **`/sdcard/Download`** for manual ATAK import; the pipeline no longer unzips KML bundles automatically.
+
+### Previous release (v1.3.13)
 
 - **Imagery Downloader — same add-ons as the device installer:** after a successful download (and DTED stage), the downloader **pushes** everything under `scripts/data/mobile_xml/` (map XML, KMZ, import ZIPs) and **installs** bundled add-on APKs from `scripts/data/bundled_plugins/` when `ANDROID_SERIAL` is set — matching the installer bundles. **TAK‑UV‑PRO** is still not bundled; it is only installed via the Device Installer flow.
-
 ### Previous release (v1.3.12)
 
 - **Device Installer — bundled add-on plugins:** extra ATAK plugin APKs under `scripts/data/bundled_plugins/` are installed over adb after the appropriate step (**ATAK only** → after ATAK + map assets; **ATAK + UV‑PRO** or **plugin only** → after TAK‑UV‑PRO). **TAK‑UV‑PRO** is never bundled; it still comes only from GitHub Releases / manifest / `deploy.env` so devices always pick up the latest published build.

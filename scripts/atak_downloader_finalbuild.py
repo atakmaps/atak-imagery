@@ -62,6 +62,7 @@ from git_update_check import run_startup_git_update_check, run_startup_release_u
 from tk_window_scaling import (
     apply_fixed_size_window,
     apply_resizable_window,
+    cancel_all_scheduled_after,
     ensure_window_stacking,
     pack_vertical_scroll_area,
     pack_vertical_scroll_area_when_needed,
@@ -113,6 +114,7 @@ MOBILE_ASSET_DIR = DATA_DIR / "mobile_xml"
 BUNDLED_PLUGIN_DIR = DATA_DIR / "bundled_plugins"
 MOBILE_XML_DEVICE_PATH = "/sdcard/atak/imagery/mobile/mapsources"
 MOBILE_IMPORT_DEVICE_PATH = "/sdcard/atak/tools/import"
+MOBILE_OVERLAY_DEVICE_PATH = "/sdcard/Download"
 LAST_IMAGERY_ROOT_FILE = RUNTIME_STATE_DIR / ".last_imagery_root.txt"
 # Written after each successful imagery download: state folder names (for SQLite builder filter).
 LAST_IMAGERY_SESSION_STATES_FILE = RUNTIME_STATE_DIR / ".last_imagery_session_states.txt"
@@ -125,6 +127,14 @@ from imagery_tile_selection import (  # noqa: E402
     lonlat_to_tile,
     square_lonlat_footprint_for_radius_miles,
     state_names_intersecting_geodesic_circle,
+)
+
+# Load on the main thread only: first-importing ``atak_adb_deploy`` from the download worker
+# pulls in tkinter on a background thread and can abort with Tcl_AsyncDelete on Linux/X11.
+from atak_adb_deploy import install_apk  # noqa: E402
+from bundled_plugin_install import (  # noqa: E402
+    install_bundled_addon_apks as install_bundled_addon_plugins,
+    iter_bundled_addon_apks,
 )
 
 
@@ -202,6 +212,9 @@ def install_excepthook() -> None:
         log("FATAL: Unhandled exception")
         tb = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
         log(tb)
+        # Never call Tk from a background thread — causes Tcl_AsyncDelete / abort.
+        if threading.current_thread() is not threading.main_thread():
+            return
         try:
             messagebox.showerror(APP_TITLE, f"Unhandled exception.\n\nLog file:\n{LOGGER.log_file}")
         except Exception:
@@ -210,6 +223,26 @@ def install_excepthook() -> None:
 
 
 install_excepthook()
+
+
+def _await_cancel_scheduled_after_on_main(progress: Any, *, timeout: float = 30.0) -> None:
+    """Run :func:`cancel_all_scheduled_after` on the Tk thread (called from worker threads).
+
+    ``ensure_window_stacking`` schedules ``after`` nudges on the progress window; overlapping
+    those with worker-driven updates after adb work has been observed to trigger
+    ``Tcl_AsyncDelete: async handler deleted by the wrong thread`` on Linux.
+    """
+    if threading.current_thread() is threading.main_thread():
+        cancel_all_scheduled_after(progress)
+        return
+    done = threading.Event()
+    progress._sync_cancel_after_done = done
+    if not done.wait(timeout=timeout):
+        log(
+            f"Warning: timed out after {timeout:.0f}s waiting for main-thread Tk cleanup; "
+            "continuing anyway."
+        )
+
 
 # -----------------------------
 # Android / adb (aligned with atak_adb_deploy device step)
@@ -346,44 +379,205 @@ def check_device_ready_and_unlocked(serial: Optional[str]) -> Tuple[bool, str]:
     return True, ""
 
 
-def push_mobile_assets(log_fn=None) -> None:
-    """Push bundled mobile map/waypoint files to the device (additive — never deletes device files).
+def _atak_package_name() -> str:
+    return (os.environ.get("ATAK_PACKAGE_NAME") or "com.atakmap.app.civ").strip() or "com.atakmap.app.civ"
 
-    Routing by extension (scripts/data/mobile_xml/ — rsync from
-    /home/paul/Documents/ATAK/Plugins/Add Ons for Build/ before every build; see HANDOFF):
-      .xml        → MOBILE_XML_DEVICE_PATH  (/sdcard/atak/imagery/mobile/mapsources)
-      .kmz / .zip → MOBILE_IMPORT_DEVICE_PATH (/sdcard/atak/tools/import)
-    """
+
+def _shell_single_quote(value: str) -> str:
+    return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+def _mobile_asset_targets() -> List[Tuple[Path, str]]:
+    xml_files = sorted(MOBILE_ASSET_DIR.rglob("*.xml"))
+    kmz_files = sorted(MOBILE_ASSET_DIR.rglob("*.kmz"))
+    zip_files = sorted(MOBILE_ASSET_DIR.rglob("*.zip"))
+    out: List[Tuple[Path, str]] = []
+    out.extend((f, MOBILE_XML_DEVICE_PATH) for f in xml_files)
+    # Put KMZ/ZIP in Download for manual ATAK import.
+    out.extend((f, MOBILE_OVERLAY_DEVICE_PATH) for f in kmz_files)
+    out.extend((f, MOBILE_OVERLAY_DEVICE_PATH) for f in zip_files)
+    return out
+
+
+def _format_asset_label_for_display(src: Path, device_dir: str) -> str:
+    try:
+        rel = src.relative_to(MOBILE_ASSET_DIR)
+        return f"{rel} -> {device_dir}"
+    except ValueError:
+        if device_dir == MOBILE_OVERLAY_DEVICE_PATH:
+            return f"{src.name} (from ZIP contents) -> {device_dir}"
+        return f"{src.name} -> {device_dir}"
+
+
+def _adb_device_file_exists(serial: str, device_path: str) -> bool:
+    # Avoid ``sh -c`` probes here: Android shell argument handling can vary by build.
+    # ``adb shell ls <file>`` is a reliable existence check.
+    r = _run_adb(["shell", "ls", device_path], serial=serial, timeout=20)
+    if r.returncode != 0:
+        return False
+    out = (r.stdout or "").strip()
+    if not out:
+        return False
+    return "No such file" not in out
+
+
+def _installed_plugin_package_names(serial: str) -> Set[str]:
+    r = _run_adb(["shell", "pm", "list", "packages"], serial=serial, timeout=30)
+    if r.returncode != 0:
+        return set()
+    out: Set[str] = set()
+    for line in (r.stdout or "").splitlines():
+        text = line.strip()
+        if text.startswith("package:"):
+            out.add(text[len("package:") :].strip())
+    return out
+
+
+def _extract_apk_package_name(apk_path: Path) -> Optional[str]:
+    aapt = shutil.which("aapt")
+    if aapt:
+        r = subprocess.run([aapt, "dump", "badging", str(apk_path)], capture_output=True, text=True, timeout=20)
+        if r.returncode == 0:
+            m = re.search(r"package:\s+name='([^']+)'", r.stdout or "")
+            if m:
+                return m.group(1).strip() or None
+
+    apkanalyzer = shutil.which("apkanalyzer")
+    if apkanalyzer:
+        r = subprocess.run(
+            [apkanalyzer, "manifest", "application-id", str(apk_path)],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        if r.returncode == 0:
+            pkg = (r.stdout or "").strip()
+            if pkg:
+                return pkg
+    return None
+
+
+def _build_missing_addons_plan(
+    serial: str,
+) -> Tuple[List[Tuple[Path, str]], List[Path], List[str]]:
+    missing_assets: List[Tuple[Path, str]] = []
+    missing_plugins: List[Path] = []
+    display_items: List[str] = []
+
+    for src, device_dir in _mobile_asset_targets():
+        device_path = f"{device_dir}/{src.name}"
+        if not _adb_device_file_exists(serial, device_path):
+            missing_assets.append((src, device_dir))
+            display_items.append(f"Add-on file: {_format_asset_label_for_display(src, device_dir)}")
+
+    installed_pkgs = _installed_plugin_package_names(serial)
+    for apk in iter_bundled_addon_apks(BUNDLED_PLUGIN_DIR):
+        package_name = _extract_apk_package_name(apk)
+        rel = apk.relative_to(BUNDLED_PLUGIN_DIR)
+        if package_name:
+            if package_name not in installed_pkgs:
+                missing_plugins.append(apk)
+                display_items.append(f"Plugin APK: {rel} ({package_name})")
+        else:
+            missing_plugins.append(apk)
+            display_items.append(f"Plugin APK: {rel} (package check unavailable; will install)")
+
+    return missing_assets, missing_plugins, display_items
+
+
+def _force_stop_atak(serial: str, log_fn: Callable[[str], None]) -> None:
+    pkg = _atak_package_name()
+    r = _run_adb(["shell", "am", "force-stop", pkg], serial=serial, timeout=25)
+    if r.returncode == 0:
+        log_fn(f"Closed ATAK before add-ons refresh ({pkg}).")
+    else:
+        stderr = (r.stderr or r.stdout or "").strip()
+        log_fn(f"Warning: could not force-stop ATAK ({pkg}): {stderr or 'unknown error'}")
+
+
+def _restart_atak(serial: str, log_fn: Callable[[str], None]) -> None:
+    pkg = _atak_package_name()
+    r = _run_adb(
+        ["shell", "monkey", "-p", pkg, "-c", "android.intent.category.LAUNCHER", "1"],
+        serial=serial,
+        timeout=60,
+    )
+    if r.returncode != 0:
+        stderr = (r.stderr or r.stdout or "").strip()
+        log_fn(f"Warning: failed to restart ATAK ({pkg}): {stderr or 'unknown error'}")
+
+
+def push_mobile_assets(
+    log_fn=None, *, selected_targets: Optional[List[Tuple[Path, str]]] = None
+) -> None:
+    """Push bundled mobile add-on files to the device (additive — never deletes device files)."""
     if not MOBILE_ASSET_DIR.is_dir():
         return
 
     serial: Optional[str] = os.environ.get("ANDROID_SERIAL") or None
-
-    xml_files = sorted(MOBILE_ASSET_DIR.rglob("*.xml"))
-    import_files = sorted(MOBILE_ASSET_DIR.rglob("*.kmz")) + sorted(MOBILE_ASSET_DIR.rglob("*.zip"))
-    dest_map: dict = {
-        MOBILE_XML_DEVICE_PATH: xml_files,
-        MOBILE_IMPORT_DEVICE_PATH: import_files,
-    }
-
-    total = sum(len(v) for v in dest_map.values())
+    targets = selected_targets if selected_targets is not None else _mobile_asset_targets()
+    total = len(targets)
     if total == 0:
         return
 
-    for device_path, files in dest_map.items():
-        if not files:
-            continue
-        _run_adb(["shell", "mkdir", "-p", device_path], serial=serial, timeout=30)
-        for f in files:
-            rel = f.relative_to(MOBILE_ASSET_DIR)
-            if log_fn:
-                log_fn(f"Pushing {rel} to device…")
-            r = _run_adb(["push", str(f), f"{device_path}/{f.name}"], serial=serial, timeout=120)
-            if r.returncode != 0 and log_fn:
-                log_fn(f"Warning: failed to push {f.name}: {r.stderr}")
+    dirs: Set[str] = {device_dir for _, device_dir in targets}
+    for device_dir in sorted(dirs):
+        _run_adb(["shell", "mkdir", "-p", device_dir], serial=serial, timeout=30)
+
+    for src, device_dir in targets:
+        try:
+            rel = src.relative_to(MOBILE_ASSET_DIR)
+        except ValueError:
+            rel = Path(src.name)
+        if log_fn:
+            log_fn(f"Pushing {rel} to {device_dir}…")
+        r = _run_adb(["push", str(src), f"{device_dir}/{src.name}"], serial=serial, timeout=120)
+        if r.returncode != 0 and log_fn:
+            log_fn(f"Warning: failed to push {src.name}: {r.stderr}")
 
     if log_fn:
-        log_fn(f"Mobile assets pushed to device ({total} files).")
+        log_fn(f"Mobile assets pushed to device ({total} file copies).")
+
+
+def _install_selected_plugin_apks(
+    serial: str, plugin_apks: List[Path], progress: Any, log_sink: Callable[[str], None]
+) -> None:
+    if not plugin_apks:
+        log_sink("No bundled add-on plugins need install.")
+        return
+    log_sink(f"Installing {len(plugin_apks)} missing bundled add-on plugin(s)…")
+    for apk in plugin_apks:
+        rel = apk.relative_to(BUNDLED_PLUGIN_DIR)
+        progress.set_status(f"Add-on: {apk.name}…")
+        log_sink(f"Installing bundled add-on: {rel}")
+        install_apk(serial, apk, progress.set_status, package_name=None)
+
+
+def _deploy_selected_addons_to_device(
+    progress: Any,
+    log_sink: Callable[[str], None],
+    serial: str,
+    *,
+    missing_assets: List[Tuple[Path, str]],
+    missing_plugins: List[Path],
+) -> None:
+    # Start with plugin installs first, then push map/import files.
+    try:
+        progress.set_status("Installing bundled add-on plugins…")
+        _install_selected_plugin_apks(serial, missing_plugins, progress, log_sink)
+    except Exception as exc:
+        log_sink(f"Warning: bundled add-on plugin install failed — {exc}")
+
+    if missing_assets:
+        try:
+            progress.set_status("Pushing map sources and import files to device…")
+            push_mobile_assets(log_fn=log_sink, selected_targets=missing_assets)
+        except Exception as exc:
+            log_sink(f"Warning: mobile asset push failed — {exc}")
+    else:
+        log_sink("No mobile XML/KMZ/ZIP files need push.")
+
+    _await_cancel_scheduled_after_on_main(progress)
 
 
 def verify_adb_device_for_imagery_downloader(parent: tk.Tk) -> Tuple[bool, Optional[str], str]:
@@ -501,11 +695,105 @@ def show_downloader_intro_and_verify_device() -> bool:
     return bool(proceed["ok"])
 
 
+def show_downloader_welcome() -> Tuple[bool, bool]:
+    """Return (do_maps, do_addons). User must pick at least one; Quit returns (False, False)."""
+    root = tk.Tk()
+    root.title(APP_TITLE)
+    root.configure(cursor="arrow")
+    root.update_idletasks()
+    s = scale_factor(root)
+    state: Dict[str, Any] = {"maps": True, "addons": True, "accepted": False}
+
+    tk.Label(root, text="Welcome", font=("TkDefaultFont", 12, "bold")).pack(anchor="w", padx=16, pady=(16, 6))
+    intro_lbl = tk.Label(
+        root,
+        text="Choose what to run. You can select both options.",
+        justify="left",
+        wraplength=scaled_int(560, s),
+    )
+    intro_lbl.pack(anchor="w", padx=16, pady=(0, 8))
+
+    var_maps = tk.BooleanVar(value=True)
+    var_addons = tk.BooleanVar(value=True)
+
+    def sync_state() -> None:
+        state["maps"] = bool(var_maps.get())
+        state["addons"] = bool(var_addons.get())
+
+    tk.Checkbutton(
+        root,
+        text="Download and install maps",
+        variable=var_maps,
+        command=sync_state,
+    ).pack(anchor="w", padx=16, pady=4)
+    tk.Checkbutton(
+        root,
+        text="Refresh plugins and add-ons",
+        variable=var_addons,
+        command=sync_state,
+    ).pack(anchor="w", padx=16, pady=4)
+
+    btn_row = tk.Frame(root)
+    btn_row.pack(pady=16)
+
+    def on_quit() -> None:
+        state["accepted"] = False
+        root.destroy()
+
+    def on_continue() -> None:
+        sync_state()
+        if not state["maps"] and not state["addons"]:
+            ensure_window_stacking(root)
+            messagebox.showwarning(
+                APP_TITLE,
+                "Select at least one: map download, add-ons refresh, or both.",
+                parent=root,
+            )
+            return
+        state["accepted"] = True
+        root.destroy()
+
+    tk.Button(btn_row, text="Continue", width=12, command=on_continue).pack(side="left", padx=6)
+    tk.Button(btn_row, text="Quit", width=12, command=on_quit).pack(side="left", padx=6)
+
+    apply_resizable_window(root, 520, 400, (400, 280))
+
+    def _sync_wrap(_evt: Optional[object] = None) -> None:
+        root.update_idletasks()
+        try:
+            rw = int(root.winfo_width())
+        except tk.TclError:
+            return
+        if rw < 64:
+            return
+        intro_lbl.configure(wraplength=max(120, min(scaled_int(560, s), rw - 48)))
+
+    root.bind("<Configure>", lambda e: _sync_wrap())
+    refit_toplevel_geometry(root, 520, 400)
+    _sync_wrap()
+
+    root.protocol("WM_DELETE_WINDOW", on_quit)
+    root.mainloop()
+    if not state["accepted"]:
+        return False, False
+    return bool(state["maps"]), bool(state["addons"])
+
+
 DOWNLOADER_NEXT_SQLITE_DIALOG_TEXT = (
     "Imagery successfully downloaded.\n\n"
     "Next will be to build the data for install on your device.\n\n"
     "Click Next to continue."
 )
+
+ADDONS_REFRESH_COMPLETE_TEXT = (
+    "ATAK will now restart.\n\n"
+    "The plugins were installed but not loaded.\n\n"
+    "Please go into Plugins and load whichever of the newly installed plugins you desire.\n\n"
+    "If you loaded any overlays (.KML, .KMZ, etc) You need to select \"Import\" from ATAK "
+    "and import the files from your /Download folder."
+)
+
+ADDONS_DEVICE_CURRENT_TEXT = "Your device is current."
 
 CONNECT_DEVICE_BEFORE_DTED_TEXT = (
     "Imagery Download Complete.\n\n"
@@ -516,6 +804,246 @@ CONNECT_DEVICE_BEFORE_DTED_TEXT = (
     "File Transfer.\n\n"
     "Click OK when your device is connected and ready."
 )
+
+CONNECT_DEVICE_FOR_ADDONS_TEXT = (
+    "This build includes map sources / import files (XML, KMZ, ZIP) and/or bundled ATAK plugins "
+    "for your device.\n\n"
+    "Connect your phone with USB debugging on and USB mode set to File Transfer.\n\n"
+    "Click OK when the correct device is connected."
+)
+
+ADDONS_PRE_DOWNLOAD_DONE_TEXT = (
+    "Plug ins/Addons installation complete.  You may now disconnect your device."
+)
+
+
+def bundled_addons_available() -> bool:
+    """True if we ship files under data/mobile_xml or data/bundled_plugins to deploy over adb."""
+    if MOBILE_ASSET_DIR.is_dir():
+        if (
+            any(MOBILE_ASSET_DIR.rglob("*.xml"))
+            or any(MOBILE_ASSET_DIR.rglob("*.kmz"))
+            or any(MOBILE_ASSET_DIR.rglob("*.zip"))
+        ):
+            return True
+    if BUNDLED_PLUGIN_DIR.is_dir():
+        if iter_bundled_addon_apks(BUNDLED_PLUGIN_DIR):
+            return True
+    return False
+
+
+def _wait_for_device_ready_dialog(progress: Any, prompt_text: str) -> None:
+    if threading.current_thread() is threading.main_thread():
+        ensure_window_stacking(progress)
+        messagebox.showinfo(APP_TITLE, prompt_text, parent=progress)
+        cancel_all_scheduled_after(progress)
+        return
+    progress.device_ready_event = threading.Event()
+    progress.device_ready_prompt = prompt_text
+    while True:
+        progress.wait_if_paused()
+        evt = progress.device_ready_event
+        if evt is None or evt.is_set():
+            break
+        time.sleep(0.1)
+
+
+def _show_addons_install_plan_dialog(parent: tk.Misc, title: str, items: List[str]) -> bool:
+    decision = {"ok": False}
+    dlg = tk.Toplevel(parent)
+    dlg.title(title)
+    dlg.configure(cursor="arrow")
+    dlg.transient(parent)
+    dlg.grab_set()
+    dlg.resizable(True, True)
+    dlg.geometry("760x520")
+    dlg.minsize(620, 420)
+    scale = scale_factor(dlg)
+    wrap_w = scaled_int(700, scale)
+
+    tk.Label(
+        dlg,
+        text="Install missing add-ons",
+        font=("TkDefaultFont", 12, "bold"),
+        justify="left",
+    ).pack(anchor="w", padx=18, pady=(14, 6))
+    tk.Label(
+        dlg,
+        text="The following items are missing and will be installed:",
+        justify="left",
+        wraplength=wrap_w,
+    ).pack(anchor="w", padx=18, pady=(0, 8))
+
+    frame = tk.Frame(dlg, padx=18, pady=0)
+    frame.pack(fill="both", expand=True)
+    text = tk.Text(frame, wrap="word", height=14)
+    scroll = tk.Scrollbar(frame, command=text.yview)
+    text.configure(yscrollcommand=scroll.set)
+    text.pack(side="left", fill="both", expand=True)
+    scroll.pack(side="right", fill="y")
+
+    text.insert("1.0", "\n".join(f"{i + 1}. {item}" for i, item in enumerate(items)))
+    text.configure(state="disabled")
+
+    btn_row = tk.Frame(dlg, padx=18, pady=14)
+    btn_row.pack(fill="x")
+
+    def _close(ok: bool) -> None:
+        decision["ok"] = ok
+        cancel_all_scheduled_after(dlg)
+        dlg.destroy()
+
+    tk.Button(btn_row, text="OK", width=12, command=lambda: _close(True)).pack(side="left")
+    tk.Button(btn_row, text="Cancel", width=12, command=lambda: _close(False)).pack(side="left", padx=(10, 0))
+    dlg.protocol("WM_DELETE_WINDOW", lambda: _close(False))
+
+    dlg.lift(parent)
+    dlg.focus_set()
+    parent.wait_window(dlg)
+    return bool(decision["ok"])
+
+
+def _ask_ok_cancel(progress: Any, title: str, items: List[str]) -> bool:
+    if threading.current_thread() is threading.main_thread():
+        return _show_addons_install_plan_dialog(progress, title, items)
+
+    progress.confirm_result = False
+    evt = threading.Event()
+    progress.confirm_event = evt
+    progress.confirm_prompt = (title, items)
+    while True:
+        progress.wait_if_paused()
+        if evt.is_set():
+            break
+        time.sleep(0.1)
+    return bool(progress.confirm_result)
+
+
+def _resolve_adb_serial_for_push() -> Tuple[str, List[str]]:
+    devs = list_usb_devices()
+    env_ser = (os.environ.get("ANDROID_SERIAL") or "").strip()
+    if env_ser:
+        return env_ser, devs
+    if len(devs) == 1:
+        os.environ["ANDROID_SERIAL"] = devs[0]
+        return devs[0], devs
+    return "", devs
+
+
+def deploy_bundled_addons_to_device(progress: Any, log_sink: Callable[[str], None]) -> None:
+    """Push data/mobile_xml assets and install data/bundled_plugins APKs when adb target is available."""
+    if not bundled_addons_available():
+        log_sink("No bundled map/import or plugin add-ons in this install — skipping device push.")
+        return
+    ser_resolved, devs = _resolve_adb_serial_for_push()
+    if not ser_resolved:
+        progress.set_status("Connect device for map add-ons and plugins…")
+        log_sink("Bundled map/import files or plugins are present — waiting for USB device…")
+        _wait_for_device_ready_dialog(progress, CONNECT_DEVICE_FOR_ADDONS_TEXT)
+        ser_resolved, devs = _resolve_adb_serial_for_push()
+    if not ser_resolved:
+        if len(devs) > 1:
+            log_sink(
+                "Multiple adb devices — set ANDROID_SERIAL to the target id (see \"adb devices\"). "
+                "Map ZIP/KMZ/XML and bundled plugins were not installed."
+            )
+        else:
+            log_sink(
+                "No adb device in the \"device\" state after OK — map add-ons and bundled plugins "
+                "were not installed. Enable USB debugging, accept the RSA prompt, then re-run this step "
+                "or copy files manually."
+            )
+        return
+    try:
+        progress.set_status("Pushing map sources and import files to device…")
+        push_mobile_assets(log_fn=log_sink)
+    except Exception as exc:
+        log_sink(f"Warning: mobile asset push failed — {exc}")
+    _await_cancel_scheduled_after_on_main(progress)
+    try:
+
+        def ui_addon(msg: str) -> None:
+            progress.set_status(msg)
+
+        progress.set_status("Installing bundled add-on plugins…")
+        install_bundled_addon_plugins(
+            ser_resolved, log_sink, ui_addon, install_apk, plugin_root=BUNDLED_PLUGIN_DIR
+        )
+    except Exception as exc:
+        log_sink(f"Warning: bundled add-on plugin install failed — {exc}")
+
+
+def _refresh_addons_only_for_device(
+    progress: Any, log_sink: Callable[[str], None], *, addons_only: bool = True
+) -> None:
+    ser_resolved, devs = _resolve_adb_serial_for_push()
+    if not ser_resolved:
+        progress.set_status("Connect device for map add-ons and plugins…")
+        log_sink("Bundled map/import files or plugins are present — waiting for USB device…")
+        _wait_for_device_ready_dialog(progress, CONNECT_DEVICE_FOR_ADDONS_TEXT)
+        ser_resolved, devs = _resolve_adb_serial_for_push()
+    if not ser_resolved:
+        if len(devs) > 1:
+            progress.error_message = (
+                "Multiple adb devices are connected.\n\n"
+                "Set ANDROID_SERIAL to the target device id from \"adb devices\" and re-run."
+            )
+        else:
+            progress.error_message = (
+                "No adb device in the \"device\" state after confirmation.\n\n"
+                "Enable USB debugging, accept the RSA prompt, and re-run."
+            )
+        return
+
+    _force_stop_atak(ser_resolved, log_sink)
+    progress.set_status("Checking existing add-ons on device…")
+    missing_assets, missing_plugins, missing_display = _build_missing_addons_plan(ser_resolved)
+    if not missing_display:
+        log_sink("Device already has all required add-ons.")
+        if addons_only:
+            progress.completion_log_summary = "Add-ons refresh skipped — device already current."
+            progress.completion_message = ADDONS_DEVICE_CURRENT_TEXT
+            progress.skip_sqlite_builder_after_session = True
+        return
+
+    if not _ask_ok_cancel(progress, APP_TITLE, missing_display):
+        log_sink("Add-ons refresh cancelled by user before install.")
+        progress.user_cancelled = True
+        return
+
+    _deploy_selected_addons_to_device(
+        progress,
+        log_sink,
+        ser_resolved,
+        missing_assets=missing_assets,
+        missing_plugins=missing_plugins,
+    )
+    if addons_only:
+        progress.completion_log_summary = "Add-ons refresh complete."
+        progress.completion_message = ADDONS_REFRESH_COMPLETE_TEXT
+        progress.skip_sqlite_builder_after_session = True
+        progress.restart_atak_serial = ser_resolved
+
+
+def run_refresh_addons_only(progress: Any) -> None:
+    try:
+        log("Add-ons refresh mode — skipping map download.")
+        progress.wait_if_paused()
+        if not bundled_addons_available():
+            progress.error_message = (
+                "No bundled add-ons found under data/mobile_xml or data/bundled_plugins "
+                "in this install."
+            )
+            return
+        _refresh_addons_only_for_device(progress, log)
+        if getattr(progress, "user_cancelled", False) or getattr(progress, "error_message", None):
+            return
+        progress.set_status("Complete")
+    except Exception as e:
+        tb = traceback.format_exc()
+        log(f"ERROR: {e}")
+        log(tb)
+        progress.error_message = f"Error:\n{e}\n\nLog file:\n{LOGGER.log_file}"
 
 
 def show_downloader_session_exit_dialog(parent: tk.Tk, body: Optional[str] = None) -> None:
@@ -542,6 +1070,9 @@ def show_downloader_session_exit_dialog(parent: tk.Tk, body: Optional[str] = Non
     dlg.protocol("WM_DELETE_WINDOW", on_next)
     tk.Button(dlg, text="Next", width=12, command=on_next).pack(pady=(0, 20))
     parent.wait_window(dlg)
+    # ensure_window_stacking() schedules after() pulses on parent; clear them before
+    # the download worker continues touching the UI via pending status updates.
+    cancel_all_scheduled_after(parent)
 
 # -----------------------------
 # Helpers
@@ -1649,8 +2180,13 @@ class ProgressWindow(tk.Tk):
         self.completion_message = None
         self.completion_log_summary = None
         self.error_message = None
+        self.skip_sqlite_builder_after_session = False
         self.device_ready_prompt: Optional[str] = None
         self.device_ready_event: Optional[threading.Event] = None
+        self.confirm_prompt: Optional[Tuple[str, List[str]]] = None
+        self.confirm_event: Optional[threading.Event] = None
+        self.confirm_result: bool = False
+        self.restart_atak_serial: Optional[str] = None
 
     def append_log(self, line: str) -> None:
         self.text.insert("end", line)
@@ -1787,15 +2323,21 @@ class ProgressWindow(tk.Tk):
     def set_progress(self, completed: int, total: int) -> None:
         if not self._on_gui_thread():
             with self._ui_lock:
+                self._pending_progress_fraction = None
                 self._pending_progress = (completed, total)
             return
+        with self._ui_lock:
+            self._pending_progress_fraction = None
         self._set_progress_ui(completed, total)
 
     def set_progress_fraction(self, frac: float, counter_detail: Optional[str] = None) -> None:
         if not self._on_gui_thread():
             with self._ui_lock:
+                self._pending_progress = None
                 self._pending_progress_fraction = (frac, counter_detail)
             return
+        with self._ui_lock:
+            self._pending_progress = None
         self._set_progress_fraction_ui(frac, counter_detail)
 
     def set_status(self, text: str) -> None:
@@ -2218,6 +2760,7 @@ def run_download(
     radius_miles: Optional[float] = None,
     radius_region_folder: Optional[str] = None,
     preloaded_states: Optional[Dict[str, List[List[Tuple[float, float]]]]] = None,
+    refresh_addons_after: bool = True,
 ) -> None:
     stats = {"downloaded": 0, "existing": 0, "failed": 0, "missing": 0}
     executor: Optional[ThreadPoolExecutor] = None
@@ -2294,12 +2837,24 @@ def run_download(
                 log(f"Wrote radius footprint for SQLite metadata: {fp_path}")
             except (OSError, ValueError) as exc:
                 log(f"WARNING: could not write radius footprint file: {exc}")
+            planning_total = max(len(selected_zooms), 1)
+            progress.set_speed_eta(0.0, None)
+            progress.set_progress_fraction(
+                0.0,
+                f"Planning 0 / {planning_total} — radius coverage",
+            )
             progress.set_status("Building radius tile download plan…")
+            planning_step = 0
             for z in selected_zooms:
                 progress.wait_if_paused()
                 progress.set_status(f"Tile plan: radius zoom {z}…")
                 tiles = compute_tiles_for_radius(lat, lon, miles, z)
                 log(f"Tile plan (radius): {len(tiles):,} tiles for zoom {z}")
+                planning_step += 1
+                progress.set_progress_fraction(
+                    planning_step / planning_total,
+                    f"Planned {planning_step} / {planning_total} — radius z{z} ({len(tiles):,} tiles)",
+                )
                 for i, (x, y) in enumerate(tiles, start=1):
                     if i % 2048 == 0:
                         progress.wait_if_paused()
@@ -2347,7 +2902,14 @@ def run_download(
             )
             log(f"Selected states: {', '.join(state_names)}")
 
+            planning_total = max(len(state_names) * len(selected_zooms), 1)
+            progress.set_speed_eta(0.0, None)
+            progress.set_progress_fraction(
+                0.0,
+                f"Planning 0 / {planning_total} — tile coverage scan",
+            )
             progress.set_status("Building tile download plan…")
+            planning_step = 0
             for state_name in state_names:
                 progress.wait_if_paused()
                 rings = states[state_name]
@@ -2369,6 +2931,11 @@ def run_download(
                         )
                     else:
                         log(f"Tile plan (computed): {len(tiles):,} tiles for {state_name}, zoom {z}")
+                    planning_step += 1
+                    progress.set_progress_fraction(
+                        planning_step / planning_total,
+                        f"Planned {planning_step} / {planning_total} — {state_name} z{z} ({len(tiles):,} tiles)",
+                    )
                     for i, (x, y) in enumerate(tiles, start=1):
                         if i % 2048 == 0:
                             progress.wait_if_paused()
@@ -2407,6 +2974,8 @@ def run_download(
 
         total = len(plan)
         log(f"Total tile candidates: {total}")
+        log(f"Tile plan complete — download phase: {total:,} tiles.")
+        progress.set_speed_eta(0.0, None)
         progress.set_progress(0, total)
         progress.set_status("Starting download...")
 
@@ -2634,44 +3203,12 @@ def run_download(
         except Exception as exc:
             log(f"DTED: failed — {exc}")
 
-        devs = list_usb_devices()
-        env_ser = (os.environ.get("ANDROID_SERIAL") or "").strip()
-        if env_ser:
-            ser_resolved = env_ser
-        elif len(devs) == 1:
-            ser_resolved = devs[0]
-            os.environ["ANDROID_SERIAL"] = ser_resolved
-        else:
-            ser_resolved = ""
-            if len(devs) > 1:
-                log(
-                    "Multiple adb devices connected — set ANDROID_SERIAL (or use the USB intro) "
-                    "so map files and bundled plugins go to the correct device."
-                )
-
-        try:
-            if ser_resolved:
-                progress.set_status("Pushing map sources and import files to device…")
-                push_mobile_assets(log_fn=log)
-            elif not devs:
-                log("No adb device — skipping map/import push and bundled plugin install.")
-        except Exception as exc:
-            log(f"Warning: mobile asset push failed — {exc}")
-
-        try:
-            if ser_resolved:
-                from atak_adb_deploy import install_apk
-                from bundled_plugin_install import install_bundled_addon_apks as install_bundled_addon_plugins
-
-                def ui_addon(msg: str) -> None:
-                    progress.set_status(msg)
-
-                progress.set_status("Installing bundled add-on plugins…")
-                install_bundled_addon_plugins(
-                    ser_resolved, log, ui_addon, install_apk, plugin_root=BUNDLED_PLUGIN_DIR
-                )
-        except Exception as exc:
-            log(f"Warning: bundled add-on plugin install failed — {exc}")
+        if refresh_addons_after:
+            _refresh_addons_only_for_device(progress, log, addons_only=False)
+            if getattr(progress, "user_cancelled", False):
+                raise DownloadCancelled()
+            if getattr(progress, "error_message", None):
+                return
 
         progress.set_status("Complete")
         progress.completion_log_summary = "Download complete." + dted_note
@@ -2689,6 +3226,17 @@ def run_download(
         progress.error_message = f"Error:\n{e}\n\nLog file:\n{LOGGER.log_file}"
 
 
+def _cancel_after_and_destroy(window: tk.Misc) -> None:
+    try:
+        cancel_all_scheduled_after(window)
+    except Exception:
+        pass
+    try:
+        window.destroy()
+    except Exception:
+        pass
+
+
 def pump_gui_logs(window: ProgressWindow) -> None:
     try:
         while True:
@@ -2698,15 +3246,21 @@ def pump_gui_logs(window: ProgressWindow) -> None:
     except queue.Empty:
         pass
 
+    sync_done = getattr(window, "_sync_cancel_after_done", None)
+    if sync_done is not None:
+        window._sync_cancel_after_done = None
+        try:
+            cancel_all_scheduled_after(window)
+        except Exception:
+            pass
+        sync_done.set()
+
     window._flush_pending_ui()
 
     if not getattr(window, "closed", False):
         if getattr(window, "user_cancelled", False):
             window.closed = True
-            try:
-                window.destroy()
-            except Exception:
-                pass
+            _cancel_after_and_destroy(window)
             os._exit(0)
 
         if getattr(window, "device_ready_prompt", None):
@@ -2715,8 +3269,21 @@ def pump_gui_logs(window: ProgressWindow) -> None:
             window.device_ready_prompt = None
             ensure_window_stacking(window)
             messagebox.showinfo(APP_TITLE, prompt_text, parent=window)
+            cancel_all_scheduled_after(window)
             if evt is not None:
                 evt.set()
+
+        if getattr(window, "confirm_prompt", None):
+            title, items = window.confirm_prompt
+            evt = getattr(window, "confirm_event", None)
+            window.confirm_prompt = None
+            # Clear any parent-window stacking timers before opening another modal.
+            cancel_all_scheduled_after(window)
+            window.confirm_result = _show_addons_install_plan_dialog(window, title, items)
+            cancel_all_scheduled_after(window)
+            if evt is not None:
+                evt.set()
+            window.confirm_event = None
 
         if getattr(window, "completion_message", None):
             msg = window.completion_message
@@ -2725,10 +3292,24 @@ def pump_gui_logs(window: ProgressWindow) -> None:
             if summary is not None:
                 window.completion_log_summary = None
                 log(summary.replace("\n\n", " | "))
-            show_downloader_session_exit_dialog(window, body=msg)
+            skip_sqlite = getattr(window, "skip_sqlite_builder_after_session", False)
+            window.skip_sqlite_builder_after_session = False
+            if skip_sqlite:
+                ensure_window_stacking(window)
+                messagebox.showinfo(APP_TITLE, msg, parent=window)
+                cancel_all_scheduled_after(window)
+                restart_serial = getattr(window, "restart_atak_serial", None)
+                window.restart_atak_serial = None
+                if restart_serial:
+                    _restart_atak(restart_serial, log)
+            else:
+                show_downloader_session_exit_dialog(window, body=msg)
             try:
                 window.closed = True
-                window.destroy()
+                _cancel_after_and_destroy(window)
+
+                if skip_sqlite:
+                    os._exit(0)
 
                 if getattr(sys, "frozen", False):
                     if hasattr(sys, "_MEIPASS"):
@@ -2746,6 +3327,7 @@ def pump_gui_logs(window: ProgressWindow) -> None:
                 messagebox.showerror(
                     APP_TITLE, f"Failed to launch SQLite builder:\n{exc}", parent=window
                 )
+                cancel_all_scheduled_after(window)
                 sys.exit(1)
 
         if getattr(window, "error_message", None):
@@ -2753,8 +3335,9 @@ def pump_gui_logs(window: ProgressWindow) -> None:
             window.error_message = None
             ensure_window_stacking(window)
             messagebox.showerror(APP_TITLE, msg, parent=window)
+            cancel_all_scheduled_after(window)
             window.closed = True
-            window.destroy()
+            _cancel_after_and_destroy(window)
             return
 
         window.after(150, pump_gui_logs, window)
@@ -2768,10 +3351,64 @@ def main() -> None:
     zoom_estimates = zoom_payload["states"]
     avg_tile_bytes_map = avg_tile_bytes_by_zoom(zoom_payload)
 
-    if is_launched_from_device_installer():
-        log("Launched from Device Installer — skipping standalone USB/adb intro.")
+    do_maps, do_addons = show_downloader_welcome()
+    if not do_maps and not do_addons:
+        log("Cancelled at welcome.")
+        return
+
+    from_installer = is_launched_from_device_installer()
+    if do_maps:
+        if from_installer:
+            log("Launched from Device Installer — skipping standalone USB/adb intro.")
+        elif do_addons:
+            log(
+                "Maps + add-ons selected — skipping upfront device-connect intro. "
+                "Device check/prompt will run before add-ons push after download."
+            )
+        else:
+            if not show_downloader_intro_and_verify_device():
+                log("Exited at device verification prompt.")
+                return
     else:
-        log("Standalone launch — skipping upfront device check (device connected after download).")
+        if from_installer:
+            log("Add-ons refresh only — skipping map download (launched from Device Installer).")
+        else:
+            if not show_downloader_intro_and_verify_device():
+                log("Exited at device verification prompt.")
+                return
+
+    if not do_maps:
+        progress = ProgressWindow(LOGGER.log_file)
+        pump_gui_logs(progress)
+        # Run add-ons-only on the Tk main thread to avoid Tcl async-handler crashes
+        # observed with background-thread + modal/UI interactions on Linux/X11.
+        run_refresh_addons_only(progress)
+        # Some add-ons steps intentionally cancel pending ``after`` callbacks for
+        # Tk stability; re-arm the GUI pump so completion/exit handlers still run.
+        if not getattr(progress, "closed", False):
+            pump_gui_logs(progress)
+        progress.mainloop()
+        return
+
+    if do_maps and do_addons:
+        log("Maps + add-ons selected — running add-ons refresh routine before imagery workflow.")
+        preflight = ProgressWindow(LOGGER.log_file)
+        try:
+            _refresh_addons_only_for_device(preflight, log, addons_only=False)
+            if getattr(preflight, "user_cancelled", False) or getattr(preflight, "error_message", None):
+                if getattr(preflight, "error_message", None):
+                    ensure_window_stacking(preflight)
+                    messagebox.showerror(APP_TITLE, preflight.error_message, parent=preflight)
+                log("Exited during add-ons preflight.")
+                return
+            ensure_window_stacking(preflight)
+            messagebox.showinfo(APP_TITLE, ADDONS_PRE_DOWNLOAD_DONE_TEXT, parent=preflight)
+            cancel_all_scheduled_after(preflight)
+        finally:
+            try:
+                _cancel_after_and_destroy(preflight)
+            except Exception:
+                pass
 
     while True:
         scope_dlg = DownloadScopeDialog()
@@ -2897,6 +3534,7 @@ def main() -> None:
                             "radius_center": None,
                             "radius_miles": None,
                             "preloaded_states": _preloaded,
+                            "refresh_addons_after": do_addons,
                         },
                         daemon=True,
                     )
@@ -2981,6 +3619,7 @@ def main() -> None:
                             "radius_center": (rd.center_lat, rd.center_lon),
                             "radius_miles": rd.radius_miles,
                             "radius_region_folder": scope_dlg.radius_region_folder,
+                            "refresh_addons_after": do_addons,
                         },
                         daemon=True,
                     )

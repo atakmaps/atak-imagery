@@ -382,13 +382,23 @@ class TilePlanBuildResult(NamedTuple):
     from_cache: bool
 
 
+def _available_cpu_count() -> int:
+    try:
+        affinity = os.sched_getaffinity(0)  # type: ignore[attr-defined]
+        if affinity:
+            return len(affinity)
+    except (AttributeError, OSError):
+        pass
+    return os.cpu_count() or 4
+
+
 def _tile_plan_worker_count() -> int:
     raw = os.environ.get("ATAK_TILE_PLAN_WORKERS", "").strip()
     if raw == "0":
         return 0
     if raw.isdigit() and int(raw) > 0:
         return min(64, int(raw))
-    n = os.cpu_count() or 4
+    n = _available_cpu_count()
     return max(2, min(32, n))
 
 

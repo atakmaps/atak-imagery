@@ -304,3 +304,23 @@ def ensure_window_stacking(
                 pass
 
     _pulse()
+
+
+def cancel_all_scheduled_after(w: tk.Misc) -> None:
+    """Cancel every pending ``after`` timer on this Tk interpreter.
+
+    Windows :func:`ensure_window_stacking` schedules many short ``after`` pulses; destroying
+    the parent window while those are still pending can trigger
+    ``Tcl_AsyncDelete: async handler deleted by the wrong thread``.
+    """
+    try:
+        raw = w.tk.call("after", "info")
+    except tk.TclError:
+        return
+    if not raw:
+        return
+    for aid in w.tk.splitlist(raw):
+        try:
+            w.after_cancel(aid)
+        except (tk.TclError, ValueError):
+            pass

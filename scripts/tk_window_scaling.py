@@ -308,3 +308,23 @@ def ensure_window_stacking(
                 pass
 
     _nudge()
+
+
+def cancel_all_scheduled_after(w: tk.Misc) -> None:
+    """Cancel every pending ``after`` timer on this Tk interpreter.
+
+    Call before destroying a toplevel that used :func:`ensure_window_stacking` or other
+    ``after``-scheduled work; otherwise Linux/X11 may abort with
+    ``Tcl_AsyncDelete: async handler deleted by the wrong thread``.
+    """
+    try:
+        raw = w.tk.call("after", "info")
+    except tk.TclError:
+        return
+    if not raw:
+        return
+    for aid in w.tk.splitlist(raw):
+        try:
+            w.after_cancel(aid)
+        except (tk.TclError, ValueError):
+            pass
