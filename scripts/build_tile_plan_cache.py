@@ -313,6 +313,42 @@ def main() -> int:
         rings = states[state_name]
         print(f">>> COMPUTE START {state_name} z{z} → {out.name}", flush=True)
         t0 = time.perf_counter()
+
+        def parallel_band_done(
+            bands_done: int, bands_total: int, tiles_so_far: int, job_elapsed: float,
+            _sn: str = state_name, _z: int = z,
+        ) -> None:
+            total_elapsed_s = time.perf_counter() - run_t0
+            est_j = zoom_estimates.get(_sn, {}).get(_z, 0)
+            rem_after = sum_estimated_tiles_remaining(jobs, k + 1, zoom_estimates)
+            tiles_est_this_job = max(est_j, tiles_so_far)
+            frac_done = bands_done / max(bands_total, 1)
+            tiles_est_remaining_this = max(0, int(tiles_est_this_job * (1 - frac_done)))
+            rem_est = rem_after + tiles_est_remaining_this
+            sec_per_tile: Optional[float] = None
+            if tiles_so_far > 0 and job_elapsed > 0:
+                sec_per_tile = job_elapsed / max(tiles_so_far / frac_done, 1)
+            elif sum_out_tiles > 0 and sum_compute_s > 0:
+                sec_per_tile = sum_compute_s / sum_out_tiles
+            if sec_per_tile is not None and rem_est > 0:
+                eta_part = _eta_part_scan_remaining(
+                    rem_est=rem_est,
+                    sec_per_tile=sec_per_tile,
+                    total_elapsed_s=total_elapsed_s,
+                    jobs_remaining=total_jobs - k,
+                    eta_scale=args.eta_scale,
+                )
+            else:
+                eta_part = "scan time left: … (establishing rate)"
+            print(
+                f"[{k + 1}/{total_jobs}] ({100.0 * (k + 1) / total_jobs:.1f}%) {_sn} z{_z} | "
+                f"elapsed {_fmt_duration(total_elapsed_s)} | {eta_part} | "
+                f"band {bands_done}/{bands_total} ({frac_done * 100:.0f}%) "
+                f"{tiles_so_far:,} tiles in {job_elapsed:.1f}s → {out.name}",
+                flush=True,
+            )
+            print(f">>> ETA {eta_part}", flush=True)
+
         def progress_log(qual_count: int, rect_done: int, rect_total: int, job_elapsed: float) -> None:
             total_elapsed_s = time.perf_counter() - run_t0
             est_j = zoom_estimates.get(state_name, {}).get(z, 0)
@@ -367,7 +403,12 @@ def main() -> int:
                 progress_log=progress_log,
             )
         else:
-            tiles = _compute_tiles_for_state(rings, z, buf)
+            tiles = _compute_tiles_for_state(
+                rings,
+                z,
+                buf,
+                parallel_band_done=parallel_band_done,
+            )
         elapsed_task = time.perf_counter() - t0
         sum_compute_s += elapsed_task
         n_out = len(tiles)

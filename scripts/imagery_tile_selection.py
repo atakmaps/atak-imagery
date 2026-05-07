@@ -25,7 +25,7 @@ import os
 import struct
 import time
 import zlib
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from pathlib import Path
 from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
 
@@ -446,7 +446,12 @@ def _compute_tiles_for_state(
     *,
     progress_interval_s: float = 0.0,
     progress_log: Optional[Callable[[int, int, int, float], None]] = None,
+    parallel_band_done: Optional[Callable[[int, int, int, float], None]] = None,
 ) -> List[Tuple[int, int]]:
+    """
+    parallel_band_done(bands_done, bands_total, tiles_so_far, elapsed_s): called from the
+    main process after each worker band finishes, enabling ETA updates during parallel scans.
+    """
     min_lon, min_lat, max_lon, max_lat = bbox_for_rings(rings)
     min_lon, min_lat, max_lon, max_lat = expand_bbox_by_buffer_m(
         min_lon, min_lat, max_lon, max_lat, boundary_buffer_m
@@ -469,8 +474,6 @@ def _compute_tiles_for_state(
         and workers > 0
         and rect_total >= _TILE_PLAN_PARALLEL_MIN_CELLS
     ):
-        nx = x_end - x_start + 1
-        ny = y_end - y_start + 1
         if nx >= ny:
             n_chunks = min(workers, nx)
             bands = _split_x_ranges(x_start, x_end, n_chunks)
@@ -483,12 +486,29 @@ def _compute_tiles_for_state(
             args_list = [
                 (x_start, x_end, ya, yb, zoom, boundary_buffer_m, rings) for ya, yb in bands
             ]
+        n_bands = len(args_list)
+        job_t0 = time.perf_counter()
         ctx = multiprocessing.get_context("spawn")
-        with ProcessPoolExecutor(max_workers=len(args_list), mp_context=ctx) as ex:
-            out_lists = list(ex.map(_compute_tiles_rect_band, args_list))
         tiles_acc: List[Tuple[int, int]] = []
-        for part in out_lists:
-            tiles_acc.extend(part)
+        with ProcessPoolExecutor(max_workers=n_bands, mp_context=ctx) as ex:
+            futures = {ex.submit(_compute_tiles_rect_band, a): i for i, a in enumerate(args_list)}
+            results: List[Optional[List[Tuple[int, int]]]] = [None] * n_bands
+            bands_done = 0
+            pending = set(futures)
+            while pending:
+                done, pending = wait(pending, timeout=30.0, return_when=FIRST_COMPLETED)
+                for fut in done:
+                    idx = futures[fut]
+                    results[idx] = fut.result()
+                    bands_done += 1
+                if parallel_band_done is not None:
+                    tiles_so_far = sum(len(r) for r in results if r is not None)
+                    parallel_band_done(
+                        bands_done, n_bands, tiles_so_far, time.perf_counter() - job_t0
+                    )
+        for part in results:
+            if part:
+                tiles_acc.extend(part)
         return tiles_acc
 
     tiles: List[Tuple[int, int]] = []
