@@ -165,7 +165,13 @@ def main() -> int:
         "--states",
         type=str,
         default="",
-        help="Comma-separated state names (default: all in GeoJSON). Example: Arkansas,Texas",
+        help="Comma-separated state names to include (default: all). Example: Arkansas,Texas",
+    )
+    ap.add_argument(
+        "--exclude-states",
+        type=str,
+        default="",
+        help="Comma-separated state names to skip entirely. Example: Alaska,Hawaii",
     )
     ap.add_argument(
         "--zooms",
@@ -236,6 +242,11 @@ def main() -> int:
             print(f"Unknown state names: {sorted(missing)}", file=sys.stderr)
             return 1
         states = {k: v for k, v in states.items() if k in wanted}
+
+    if args.exclude_states.strip():
+        excluded = {s.strip() for s in args.exclude_states.split(",") if s.strip()}
+        print(f"Excluding states: {sorted(excluded)}", flush=True)
+        states = {k: v for k, v in states.items() if k not in excluded}
 
     crc = crc32_file(args.geojson)
     buf = DEFAULT_BOUNDARY_BUFFER_M
