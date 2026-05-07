@@ -37,6 +37,7 @@ Thumbs.db
 logs/
 reports/
 scripts/logs/
+scripts/.overlay_extract_cache/
 *.log
 .last_imagery_root.txt
 .last_imagery_session_states.txt
