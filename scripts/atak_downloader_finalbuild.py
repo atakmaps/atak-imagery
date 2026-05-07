@@ -2634,15 +2634,32 @@ def run_download(
         except Exception as exc:
             log(f"DTED: failed — {exc}")
 
+        devs = list_usb_devices()
+        env_ser = (os.environ.get("ANDROID_SERIAL") or "").strip()
+        if env_ser:
+            ser_resolved = env_ser
+        elif len(devs) == 1:
+            ser_resolved = devs[0]
+            os.environ["ANDROID_SERIAL"] = ser_resolved
+        else:
+            ser_resolved = ""
+            if len(devs) > 1:
+                log(
+                    "Multiple adb devices connected — set ANDROID_SERIAL (or use the USB intro) "
+                    "so map files and bundled plugins go to the correct device."
+                )
+
         try:
-            progress.set_status("Pushing map sources and import files to device…")
-            push_mobile_assets(log_fn=log)
+            if ser_resolved:
+                progress.set_status("Pushing map sources and import files to device…")
+                push_mobile_assets(log_fn=log)
+            elif not devs:
+                log("No adb device — skipping map/import push and bundled plugin install.")
         except Exception as exc:
             log(f"Warning: mobile asset push failed — {exc}")
 
         try:
-            ser = os.environ.get("ANDROID_SERIAL") or None
-            if ser:
+            if ser_resolved:
                 from atak_adb_deploy import install_apk
                 from bundled_plugin_install import install_bundled_addon_apks as install_bundled_addon_plugins
 
@@ -2650,9 +2667,9 @@ def run_download(
                     progress.set_status(msg)
 
                 progress.set_status("Installing bundled add-on plugins…")
-                install_bundled_addon_plugins(ser, log, ui_addon, install_apk, plugin_root=BUNDLED_PLUGIN_DIR)
-            else:
-                log("No ANDROID_SERIAL — skipping bundled add-on plugin install.")
+                install_bundled_addon_plugins(
+                    ser_resolved, log, ui_addon, install_apk, plugin_root=BUNDLED_PLUGIN_DIR
+                )
         except Exception as exc:
             log(f"Warning: bundled add-on plugin install failed — {exc}")
 
