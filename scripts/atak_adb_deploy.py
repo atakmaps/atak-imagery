@@ -572,27 +572,6 @@ def _device_rejects_allow_downgrade_flag(combined: str) -> bool:
     return False
 
 
-def pin_shortcut_to_home(serial: str, log_fn=None) -> None:
-    """Request that the launcher pin an ATAK shortcut on the home screen.
-
-    Uses ACTION_INSTALL_SHORTCUT (works on most launchers including Samsung and stock Android).
-    Silently ignored on launchers that don't support it.
-    """
-    pkg = atak_package_name()
-    cmd = (
-        "am broadcast -a com.android.launcher.action.INSTALL_SHORTCUT "
-        f"--es duplicate false "
-        f"--es name 'ATAK' "
-        f"--es packageName '{pkg}' "
-        f"--es className 'com.atakmap.app.ATAKActivity'"
-    )
-    r = run_adb(["shell", cmd], serial=serial, timeout=30)
-    if log_fn:
-        if r.returncode == 0:
-            log_fn("Home screen shortcut requested.")
-        else:
-            log_fn(f"Home screen shortcut broadcast failed (may not be supported by this launcher): {r.stderr}")
-
 
 def launch_atak(serial: str) -> None:
     pkg = atak_package_name()
@@ -1117,7 +1096,7 @@ class DeployWizard(tk.Tk):
 
                 self.after(0, self.progress.start, 8)
                 install_apk(self.selected_serial, apk_path, ui_install)
-                pin_shortcut_to_home(self.selected_serial or "", log)
+
                 self.after(0, self.progress.stop)
                 if is_temp:
                     try:
