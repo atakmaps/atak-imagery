@@ -5,28 +5,13 @@ alwaysApply: true
 
 # Add-ons for build — required before every build
 
-The canonical **local** folder for add-ons (map XML, KMZ/ZIP imports, and future types) is:
+The canonical **local** folder for add-ons is:
 
 **`/home/paul/Documents/ATAK/Plugins/Add Ons for Build/`**
 
-It may contain **many kinds** of files. The installers only **push** these from the **bundled** copy (`scripts/data/mobile_xml/`):
+## 1) Map / import bundle → `scripts/data/mobile_xml/`
 
-| Extension | Role |
-|---|---|
-| `.xml` | Mobile map sources → `/sdcard/atak/imagery/mobile/mapsources` |
-| `.kmz` / `.zip` | Import queue → `/sdcard/atak/tools/import` |
-
-Before any **installer** or **imagery downloader** build or release:
-
-1. **Sync pushable files** from Add Ons → `scripts/data/mobile_xml/` (see command below).
-2. **Commit** additions/removals so frozen builds ship current assets.
-3. **Never skip this** — stale `scripts/data/mobile_xml/` ships silently in binaries.
-
-Routing is implemented by `push_mobile_xml()` in `atak_adb_deploy.py` and `push_mobile_assets()` in `atak_downloader_finalbuild.py` (recursive under `mobile_xml/`; device paths use **basename** only — avoid duplicate names across subfolders).
-
-## Sync command (mixed folder — only extensions we bundle for device push)
-
-Uses rsync so other addon types in the source tree are ignored for this step:
+Pushable types for the installers (XML map sources, KMZ, small ZIP imports):
 
 ```bash
 SOURCE="/home/paul/Documents/ATAK/Plugins/Add Ons for Build"
@@ -38,4 +23,26 @@ rsync -av --delete \
   "$SOURCE/" "$DEST/"
 ```
 
-If a future addon type needs packaging, extend the installer logic **and** add an `--include` here.
+**Do not commit** multi‑GB CIV loadout zips — they are **gitignored** (`ATAK-CIV*_loadout.zip`). Copy them into `scripts/data/mobile_xml/…` **on the machine that runs `build_release.py`** if the published zip must include them.
+
+## 2) Extra plugin APKs → `scripts/data/bundled_plugins/`
+
+All `*.apk` **except** TAK‑UV‑PRO (filename contains `uvpro` / `uv-pro`, case-insensitive) — UV‑PRO always comes from GitHub / manifest / env.
+
+```bash
+SOURCE="/home/paul/Documents/ATAK/Plugins/Add Ons for Build"
+DEST="/home/paul/Documents/ATAK/pipeline/scripts/data/bundled_plugins"
+mkdir -p "$DEST"
+rsync -av --delete \
+  --include='*/' \
+  --include='*.apk' \
+  --exclude='*[Uu][Vv][Pp][Rr][Oo]*' \
+  --exclude='*' \
+  "$SOURCE/" "$DEST/"
+```
+
+Installer: `install_bundled_addon_apks()` in `atak_adb_deploy.py` runs after **ATAK only** (with ATAK) or after **UV‑PRO** (both / plugin only).
+
+## Never skip
+
+Stale `scripts/data/mobile_xml/` or `bundled_plugins/` ships silently in release binaries.

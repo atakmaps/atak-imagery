@@ -55,11 +55,17 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.3.11` (tag **`v1.3.11`** on GitHub).
+**Linux / source release:** `v1.3.12` (tag **`v1.3.12`** on GitHub).
 
 **Windows:** A new Windows packaged build is **not** included in this cycle. **Use Windows release `2.8`** until a newer Windows installer is published. Source copies under `windows_build/` include the same startup behaviors when run with Python.
 
-Version **1.3.11** highlights:
+Version **1.3.12** highlights:
+
+- **Device Installer — bundled add-on plugins:** extra ATAK plugin APKs under `scripts/data/bundled_plugins/` are installed over adb after the appropriate step (**ATAK only** → after ATAK + map assets; **ATAK + UV‑PRO** or **plugin only** → after TAK‑UV‑PRO). **TAK‑UV‑PRO** is never bundled; it still comes only from GitHub Releases / manifest / `deploy.env` so devices always pick up the latest published build.
+- **Map / import add-ons:** `scripts/data/mobile_xml/` continues to ship map-source XML, KMZ, and import ZIPs (synced from your local “Add Ons for Build” folder before release). Subfolders are supported; device push uses each file’s basename.
+- **Large CIV loadout zips:** multi‑gigabyte `ATAK-CIV*_loadout.zip` files are **gitignored**; copy them into `scripts/data/mobile_xml/` on the machine that runs `scripts/build_release.py` if the published Linux install zip must include them.
+
+### Previous release (v1.3.11)
 
 - **Device Installer — session log file:** the installer writes a timestamped log (and updates `LATEST_LOG.txt` in the same folder) so crashes after “Continue” can be diagnosed. Paths: `scripts/logs/` when run from source, or `~/.local/share/atak-pipeline/installer_logs/` when bundled. Stderr prints `Installer log: …` on startup.
 

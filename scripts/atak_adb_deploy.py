@@ -51,6 +51,13 @@ Configuration (environment variables — in ``deploy.env`` at the project root):
   Alternatively, add optional plugin_apk_url to the manifest JSON (lowest priority
   among network/manifest sources after the above).
 
+  **Bundled add-on plugins:** ``scripts/data/bundled_plugins/`` may contain additional
+  ``.apk`` files (shipped inside the release zip / PyInstaller bundle). They are installed
+  over adb after the appropriate step. **TAK-UV-PRO** is never taken from this folder —
+  it always comes from GitHub Releases / manifest / env so you always get the latest.
+  Sync ``bundled_plugins`` from ``…/Plugins/Add Ons for Build/`` before building (see
+  project handoff / Cursor rule).
+
   ATAK_PACKAGE_NAME — ATAK applicationId to install/launch (default
     com.atakmap.app.civ).
 
@@ -139,6 +146,7 @@ else:
 
 DOWNLOADER = SCRIPT_DIR / "atak_downloader_from_installer.py"
 MOBILE_XML_DIR = SCRIPT_DIR / "data" / "mobile_xml"
+BUNDLED_PLUGIN_DIR = SCRIPT_DIR / "data" / "bundled_plugins"
 MOBILE_XML_DEVICE_PATH = "/sdcard/atak/imagery/mobile/mapsources"
 MOBILE_IMPORT_DEVICE_PATH = "/sdcard/atak/tools/import"
 USER_AGENT = "ATAK-Pipeline-Deploy/1.0"
@@ -563,6 +571,52 @@ def install_apk(serial: str, apk_path: Path, status_cb=None, *, package_name: Op
         raise RuntimeError(f"adb install failed:\n{(r.stderr or r.stdout).strip()}")
 
 
+def _is_uvpro_apk_filename(name: str) -> bool:
+    """True if basename looks like the TAK-UV-PRO package (always from server / GitHub, not bundled)."""
+    compact = name.lower().replace("_", "").replace("-", "").replace(" ", "")
+    return "uvpro" in compact or "takuvpro" in compact
+
+
+def iter_bundled_addon_apks() -> List[Path]:
+    """APKs under bundled_plugins/, excluding UV-PRO filenames; one path per basename (first wins)."""
+    if not BUNDLED_PLUGIN_DIR.is_dir():
+        return []
+    candidates = sorted(
+        (p for p in BUNDLED_PLUGIN_DIR.rglob("*.apk") if p.is_file() and not _is_uvpro_apk_filename(p.name)),
+        key=lambda p: str(p).lower(),
+    )
+    seen: set[str] = set()
+    out: List[Path] = []
+    for p in candidates:
+        if p.name in seen:
+            continue
+        seen.add(p.name)
+        out.append(p)
+    return out
+
+
+def install_bundled_addon_apks(
+    serial: str,
+    log_fn,
+    status_cb=None,
+) -> None:
+    """Install add-on plugin APKs bundled with the installer (non-fatal per file)."""
+    apks = iter_bundled_addon_apks()
+    if not apks:
+        log_fn("No bundled add-on plugins to install.")
+        return
+    log_fn(f"Installing {len(apks)} bundled add-on plugin(s)…")
+    for apk in apks:
+        rel = apk.relative_to(BUNDLED_PLUGIN_DIR)
+        try:
+            if status_cb:
+                status_cb(f"Add-on: {apk.name}…")
+            log_fn(f"Installing bundled add-on: {rel}")
+            install_apk(serial, apk, status_cb, package_name=None)
+        except Exception as exc:
+            log_fn(f"Warning: bundled add-on failed ({apk.name}): {exc}")
+
+
 def _device_rejects_allow_downgrade_flag(combined: str) -> bool:
     """True if device's ``pm install`` failed because ``--allow-downgrade`` is unsupported."""
     if not combined:
@@ -979,7 +1033,12 @@ class DeployWizard(tk.Tk):
         elif self._step == 5:
             self._show_body_label()
             self.step_label.configure(text="Installing plugin")
-            self.body.configure(text="Installing the TAK-UV-PRO plugin on your device.")
+            self.body.configure(
+                text=(
+                    "Installing the TAK-UV-PRO plugin from your configured download source, "
+                    "then any bundled add-on plugins shipped with this installer."
+                )
+            )
             self.progress.pack(fill="x", pady=(8, 0), before=self.status)
             self.btn_primary.configure(state="disabled", text="Working…")
             self._begin_install_plugin()
@@ -1142,6 +1201,8 @@ class DeployWizard(tk.Tk):
                 self.after(0, self.progress.start, 8)
                 install_apk(self.selected_serial, apk_path, ui_install)
                 push_mobile_xml(self.selected_serial or "", log)
+                if self._install_choice == "atak":
+                    install_bundled_addon_apks(self.selected_serial or "", log, ui_install)
 
                 self.after(0, self.progress.stop)
                 if is_temp:
@@ -1216,6 +1277,9 @@ class DeployWizard(tk.Tk):
                     ui_install,
                     package_name=DEFAULT_PLUGIN_PACKAGE,
                 )
+                if self._install_choice in ("both", "plugin"):
+                    install_bundled_addon_apks(ser, log, ui_install)
+
                 self.after(0, self.progress.stop)
 
                 if self.report_url:

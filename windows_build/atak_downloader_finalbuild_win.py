@@ -78,8 +78,8 @@ USER_AGENT = "ATAK-Ortho-Downloader/1.1"
 USGS_MAPSERVER_BASE_URL = "https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer"
 DTED_SERVER_BASE_URL = "http://31.220.30.74/dted"
 OFFLINE_MISSING_DATA_MSG = "Internet unreachable to download missing data."
-# Parallel tile fetches (thread pool + throughput probe burst). Match Linux script.
-MAX_DOWNLOAD_WORKERS = 24
+# Parallel HTTP tile fetches. Match Linux: scale with CPU count (cap 48).
+MAX_DOWNLOAD_WORKERS = min(48, max(8, (os.cpu_count() or 4) * 4))
 
 
 def _shutdown_executor_pool(executor: ThreadPoolExecutor) -> None:
@@ -1559,6 +1559,17 @@ class ProgressWindow(tk.Tk):
         self.bar = self.canvas.create_rectangle(0, 0, 0, 24, fill="#4a90e2", width=0)
         self.bar_text = self.canvas.create_text(5, 12, anchor="w", text="0%")
 
+        self._ui_lock = threading.Lock()
+        self._pending_progress: Optional[Tuple[int, int]] = None
+        self._pending_status: Optional[str] = None
+        self._pending_stats: Optional[Dict[str, int]] = None
+        self._pending_progress_fraction: Optional[Tuple[float, Optional[str]]] = None
+        self._progress_canvas_mode = "none"
+        self._progress_canvas_count: Tuple[int, int] = (0, 1)
+        self._progress_canvas_frac: float = 0.0
+        self._progress_canvas_bar_lbl: str = "0%"
+        self.canvas.bind("<Configure>", self._on_progress_canvas_configure)
+
         stats = tk.Frame(self, padx=10)
         stats.pack(fill="x", pady=(6, 6))
 
@@ -1604,40 +1615,138 @@ class ProgressWindow(tk.Tk):
         self.text.see("end")
         self.update_idletasks()
 
-    def set_progress(self, completed: int, total: int) -> None:
-        total = max(total, 1)
-        pct = int((completed / total) * 100)
-        self.counter_var.set(f"{completed} / {total}")
-        width = max(self.canvas.winfo_width(), 1)
-        fill_w = int(width * (completed / total))
+    def _on_gui_thread(self) -> bool:
+        return threading.current_thread() is threading.main_thread()
+
+    def _flush_pending_ui(self) -> None:
+        """Apply progress/status updates posted from the download worker (Tk is main-thread only)."""
+        if getattr(self, "closed", False):
+            return
+        with self._ui_lock:
+            pp = self._pending_progress
+            ps = self._pending_status
+            pst = self._pending_stats.copy() if self._pending_stats else None
+            pf = self._pending_progress_fraction
+        if pp is not None:
+            self._set_progress_ui(*pp)
+        if ps is not None:
+            self._set_status_ui(ps)
+        if pst is not None:
+            for k, v in pst.items():
+                self._set_stat_ui(k, v)
+        if pf is not None:
+            self._set_progress_fraction_ui(*pf)
+
+    def _draw_progress_bar(self, frac: float, bar_label: str) -> None:
+        frac = max(0.0, min(1.0, float(frac)))
+        width = max(int(self.canvas.winfo_width()), 1)
+        fill_w = int(width * frac)
+        if frac > 0 and fill_w < 2:
+            fill_w = min(2, width)
         self.canvas.coords(self.bar, 0, 0, fill_w, 24)
         self.canvas.coords(self.bar_text, 8, 12)
-        self.canvas.itemconfig(self.bar_text, text=f"{pct}%")
+        self.canvas.itemconfig(self.bar_text, text=bar_label)
+        self.update_idletasks()
 
-    def set_progress_fraction(self, frac: float, counter_detail: Optional[str] = None) -> None:
+    def _on_progress_canvas_configure(self, event: tk.Event) -> None:
+        if event.widget != self.canvas:
+            return
+        mode = self._progress_canvas_mode
+        if mode == "count":
+            c, t = self._progress_canvas_count
+            total = max(t, 1)
+            frac = c / total
+            pct_f = 100.0 * frac
+            if pct_f >= 10:
+                bar_lbl = f"{pct_f:.1f}%"
+            elif pct_f >= 1:
+                bar_lbl = f"{pct_f:.2f}%"
+            else:
+                bar_lbl = f"{pct_f:.3f}%"
+            self._draw_progress_bar(frac, bar_lbl)
+        elif mode == "fraction":
+            self._draw_progress_bar(self._progress_canvas_frac, self._progress_canvas_bar_lbl)
+
+    def _format_tile_counter(self, completed: int, total: int) -> str:
+        total = max(total, 1)
+        pct_f = 100.0 * completed / total
+        if total >= 100_000:
+            dec = 4
+        elif total >= 10_000:
+            dec = 3
+        else:
+            dec = 2
+        return f"{completed:,} / {total:,} tiles ({pct_f:.{dec}f}%)"
+
+    def _set_progress_ui(self, completed: int, total: int) -> None:
+        total = max(total, 1)
+        frac = completed / total
+        self._progress_canvas_mode = "count"
+        self._progress_canvas_count = (completed, total)
+        pct_f = 100.0 * frac
+        if pct_f >= 10:
+            bar_lbl = f"{pct_f:.1f}%"
+        elif pct_f >= 1:
+            bar_lbl = f"{pct_f:.2f}%"
+        else:
+            bar_lbl = f"{pct_f:.3f}%"
+        self.counter_var.set(self._format_tile_counter(completed, total))
+        self._draw_progress_bar(frac, bar_lbl)
+
+    def _set_progress_fraction_ui(self, frac: float, counter_detail: Optional[str] = None) -> None:
         frac = max(0.0, min(1.0, float(frac)))
-        pct = int(frac * 100)
+        self._progress_canvas_mode = "fraction"
+        self._progress_canvas_frac = frac
+        pct_f = frac * 100
+        bar_lbl = f"{pct_f:.3f}%" if pct_f < 1 else f"{pct_f:.2f}%"
+        self._progress_canvas_bar_lbl = bar_lbl
         if counter_detail is not None:
             self.counter_var.set(counter_detail)
         else:
-            self.counter_var.set(f"{pct}%")
-        self.update_idletasks()
-        width = max(int(self.canvas.winfo_width()), 1)
-        fill_w = int(width * frac)
-        self.canvas.coords(self.bar, 0, 0, fill_w, 24)
-        self.canvas.coords(self.bar_text, 8, 12)
-        self.canvas.itemconfig(self.bar_text, text=f"{pct}%")
+            dec = 4 if pct_f < 1 else 2
+            self.counter_var.set(f"{pct_f:.{dec}f}%")
+        self._draw_progress_bar(frac, bar_lbl)
 
-    def set_status(self, text: str) -> None:
+    def _set_status_ui(self, text: str) -> None:
         if text != self._PAUSED_STATUS_TEXT:
             self._last_activity_status = text
         self.status_var.set(text)
         self.update_idletasks()
 
-    def set_stat(self, key: str, value: int) -> None:
+    def _set_stat_ui(self, key: str, value: int) -> None:
         label = key.capitalize()
         self.stats_vars[key].set(f"{label}: {value}")
         self.update_idletasks()
+
+    def set_progress(self, completed: int, total: int) -> None:
+        if not self._on_gui_thread():
+            with self._ui_lock:
+                self._pending_progress = (completed, total)
+            return
+        self._set_progress_ui(completed, total)
+
+    def set_progress_fraction(self, frac: float, counter_detail: Optional[str] = None) -> None:
+        if not self._on_gui_thread():
+            with self._ui_lock:
+                self._pending_progress_fraction = (frac, counter_detail)
+            return
+        self._set_progress_fraction_ui(frac, counter_detail)
+
+    def set_status(self, text: str) -> None:
+        if not self._on_gui_thread():
+            with self._ui_lock:
+                self._pending_status = text
+            return
+        self._set_status_ui(text)
+
+    def set_stat(self, key: str, value: int) -> None:
+        if not self._on_gui_thread():
+            with self._ui_lock:
+                if self._pending_stats is None:
+                    self._pending_stats = {}
+                self._pending_stats[key] = value
+            return
+        self._set_stat_ui(key, value)
 
     def _on_pause_toggle(self) -> None:
         with self._ctl_lock:
@@ -2287,6 +2396,8 @@ def pump_gui_logs(window: ProgressWindow) -> None:
                 window.append_log(line)
     except queue.Empty:
         pass
+
+    window._flush_pending_ui()
 
     if not getattr(window, "closed", False):
         if getattr(window, "user_cancelled", False):
