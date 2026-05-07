@@ -25,6 +25,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -314,48 +315,63 @@ def main() -> int:
         print(f">>> COMPUTE START {state_name} z{z} → {out.name}", flush=True)
         t0 = time.perf_counter()
 
-        def parallel_band_done(
-            bands_done: int, bands_total: int, tiles_so_far: int, job_elapsed: float,
+        # ── Timer thread: fires every progress_interval_s (or 30s default) ──────
+        # Works for both parallel and single-core modes. Uses only batch-level rate
+        # (tiles/s from jobs already done) so it works even when no bands have
+        # finished yet in a parallel run.
+        _stop_timer = threading.Event()
+        interval_s = args.progress_interval if args.progress_interval > 0 else 30.0
+
+        def _eta_timer(
             _sn: str = state_name, _z: int = z,
+            _stop: threading.Event = _stop_timer,
         ) -> None:
-            total_elapsed_s = time.perf_counter() - run_t0
             est_j = zoom_estimates.get(_sn, {}).get(_z, 0)
-            rem_after = sum_estimated_tiles_remaining(jobs, k + 1, zoom_estimates)
-            tiles_est_this_job = max(est_j, tiles_so_far)
-            frac_done = bands_done / max(bands_total, 1)
-            tiles_est_remaining_this = max(0, int(tiles_est_this_job * (1 - frac_done)))
-            rem_est = rem_after + tiles_est_remaining_this
-            sec_per_tile: Optional[float] = None
-            if tiles_so_far > 0 and job_elapsed > 0:
-                sec_per_tile = job_elapsed / max(tiles_so_far / frac_done, 1)
-            elif sum_out_tiles > 0 and sum_compute_s > 0:
-                sec_per_tile = sum_compute_s / sum_out_tiles
-            if sec_per_tile is not None and rem_est > 0:
-                eta_part = _eta_part_scan_remaining(
-                    rem_est=rem_est,
-                    sec_per_tile=sec_per_tile,
-                    total_elapsed_s=total_elapsed_s,
-                    jobs_remaining=total_jobs - k,
-                    eta_scale=args.eta_scale,
+            while not _stop.wait(timeout=interval_s):
+                job_elapsed = time.perf_counter() - t0
+                total_elapsed_s = time.perf_counter() - run_t0
+                rem_after = sum_estimated_tiles_remaining(jobs, k + 1, zoom_estimates)
+                rem_est = rem_after + est_j  # conservative: assume 0 done in current job
+
+                sec_per_tile: Optional[float] = None
+                if sum_out_tiles > 0 and sum_compute_s > 0:
+                    sec_per_tile = sum_compute_s / sum_out_tiles
+
+                if sec_per_tile is not None and rem_est > 0:
+                    eta_part = _eta_part_scan_remaining(
+                        rem_est=rem_est,
+                        sec_per_tile=sec_per_tile,
+                        total_elapsed_s=total_elapsed_s,
+                        jobs_remaining=total_jobs - k,
+                        eta_scale=args.eta_scale,
+                    )
+                elif k > 0 and sum_compute_s > 0:
+                    eta_part = _eta_part_job_average_fallback(
+                        sum_compute_s=sum_compute_s,
+                        job_done_idx=k,
+                        total_jobs=total_jobs,
+                    )
+                else:
+                    eta_part = "scan time left: … (establishing rate — first job in batch)"
+
+                print(
+                    f"[{k + 1}/{total_jobs}] ({100.0 * (k + 1) / total_jobs:.1f}%) "
+                    f"{_sn} z{_z} | elapsed {_fmt_duration(total_elapsed_s)} | "
+                    f"{eta_part} | {job_elapsed:.0f}s elapsed on this job → {out.name}",
+                    flush=True,
                 )
-            else:
-                eta_part = "scan time left: … (establishing rate)"
-            print(
-                f"[{k + 1}/{total_jobs}] ({100.0 * (k + 1) / total_jobs:.1f}%) {_sn} z{_z} | "
-                f"elapsed {_fmt_duration(total_elapsed_s)} | {eta_part} | "
-                f"band {bands_done}/{bands_total} ({frac_done * 100:.0f}%) "
-                f"{tiles_so_far:,} tiles in {job_elapsed:.1f}s → {out.name}",
-                flush=True,
-            )
-            print(f">>> ETA {eta_part}", flush=True)
+                print(f">>> ETA {eta_part}", flush=True)
+
+        timer_thread = threading.Thread(target=_eta_timer, daemon=True)
+        timer_thread.start()
 
         def progress_log(qual_count: int, rect_done: int, rect_total: int, job_elapsed: float) -> None:
+            """Single-process mode: called every progress_interval_s by the scanner."""
             total_elapsed_s = time.perf_counter() - run_t0
             est_j = zoom_estimates.get(state_name, {}).get(z, 0)
             rem_after = sum_estimated_tiles_remaining(jobs, k + 1, zoom_estimates)
             rem_current = max(0, est_j - qual_count) if est_j else 0
             rem_est = rem_after + rem_current
-            jobs_remaining = total_jobs - k
 
             sec_per_tile: Optional[float] = None
             if sum_out_tiles > 0 and sum_compute_s > 0:
@@ -368,7 +384,7 @@ def main() -> int:
                     rem_est=rem_est,
                     sec_per_tile=sec_per_tile,
                     total_elapsed_s=total_elapsed_s,
-                    jobs_remaining=jobs_remaining,
+                    jobs_remaining=total_jobs - k,
                     eta_scale=args.eta_scale,
                 )
             elif k > 0 and sum_compute_s > 0:
@@ -378,37 +394,31 @@ def main() -> int:
                     total_jobs=total_jobs,
                 )
             else:
-                eta_part = (
-                    "scan time left: … (establishing rate — need a few more qualifying tiles on this job)"
-                )
+                eta_part = "scan time left: … (establishing rate)"
 
             rect_pct = 100.0 * rect_done / max(rect_total, 1)
             tail = (
-                f"{qual_count:,} tiles in {job_elapsed:.1f}s (scanning {rect_pct:.1f}% of tile grid) "
-                f"→ {out.name}"
+                f"{qual_count:,} tiles in {job_elapsed:.1f}s "
+                f"(scanning {rect_pct:.1f}% of tile grid) → {out.name}"
             )
             print(
-                f"[{k + 1}/{total_jobs}] ({100.0 * (k + 1) / total_jobs:.1f}%) {state_name} z{z} | "
-                f"elapsed {_fmt_duration(total_elapsed_s)} | {eta_part} | {tail}",
+                f"[{k + 1}/{total_jobs}] ({100.0 * (k + 1) / total_jobs:.1f}%) "
+                f"{state_name} z{z} | elapsed {_fmt_duration(total_elapsed_s)} | "
+                f"{eta_part} | {tail}",
                 flush=True,
             )
-            print(f">>> ETA {eta_part}", flush=True)
 
         if args.progress_interval > 0:
             tiles = _compute_tiles_for_state(
-                rings,
-                z,
-                buf,
+                rings, z, buf,
                 progress_interval_s=args.progress_interval,
                 progress_log=progress_log,
             )
         else:
-            tiles = _compute_tiles_for_state(
-                rings,
-                z,
-                buf,
-                parallel_band_done=parallel_band_done,
-            )
+            tiles = _compute_tiles_for_state(rings, z, buf)
+
+        _stop_timer.set()
+        timer_thread.join(timeout=2)
         elapsed_task = time.perf_counter() - t0
         sum_compute_s += elapsed_task
         n_out = len(tiles)
