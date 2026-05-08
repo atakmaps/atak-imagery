@@ -222,6 +222,18 @@ def log(msg: str) -> None:
     LOGGER.write(msg)
 
 
+def _tile_plan_runtime_context() -> str:
+    raw_workers = os.environ.get("ATAK_TILE_PLAN_WORKERS", "").strip()
+    workers = raw_workers if raw_workers else "auto"
+    cpu_total = os.cpu_count() or 0
+    try:
+        affinity = os.sched_getaffinity(0)  # type: ignore[attr-defined]
+        cpu_affinity = len(affinity)
+    except (AttributeError, OSError):
+        cpu_affinity = cpu_total
+    return f"workers={workers}, cpu_affinity={cpu_affinity}, cpu_total={cpu_total}"
+
+
 def install_excepthook() -> None:
     def handle_exception(exc_type, exc_value, exc_tb):
         log("FATAL: Unhandled exception")
@@ -2726,6 +2738,7 @@ def run_download(
                 "(tile center inside polygon or within buffer of boundary)"
             )
             log(f"Selected states: {', '.join(state_names)}")
+            log(f"Tile planning runtime context: {_tile_plan_runtime_context()}")
 
             planning_total = max(len(state_names) * len(selected_zooms), 1)
             progress.set_progress_fraction(
@@ -2740,6 +2753,7 @@ def run_download(
                 for z in selected_zooms:
                     progress.wait_if_paused()
                     progress.set_status(f"Tile plan: {state_name} zoom {z}…")
+                    tile_plan_t0 = time.perf_counter()
                     tpr = build_tiles_for_state_result(
                         state_name,
                         rings,
@@ -2748,13 +2762,18 @@ def run_download(
                         tile_plan_dir=TILE_PLAN_DIR,
                     )
                     tiles = tpr.tiles
+                    tile_plan_elapsed_s = time.perf_counter() - tile_plan_t0
                     if tpr.from_cache:
                         log(
                             f"Tile plan (cache): {len(tiles):,} tiles for {state_name}, zoom {z} "
-                            f"— {state_name.replace('/', '_')}_z{z}.tiles.gz"
+                            f"— {state_name.replace('/', '_')}_z{z}.tiles.gz "
+                            f"(planned in {tile_plan_elapsed_s:.1f}s)"
                         )
                     else:
-                        log(f"Tile plan (computed): {len(tiles):,} tiles for {state_name}, zoom {z}")
+                        log(
+                            f"Tile plan (computed): {len(tiles):,} tiles for {state_name}, zoom {z} "
+                            f"(planned in {tile_plan_elapsed_s:.1f}s)"
+                        )
                     planning_step += 1
                     progress.set_progress_fraction(
                         planning_step / planning_total,

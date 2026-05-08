@@ -116,6 +116,8 @@ Version **1.3.14** highlights:
 - **Screen-aware Tk windows** (`scripts/tk_window_scaling.py`): main dialogs scale to fit small laptops and grow modestly on large displays.
 - **Optional in-app update check** (`scripts/git_update_check.py`): when running from a git clone, fetches `origin/main` in the background and offers to pull and restart if new commits exist.
 - **Linux install zip on Releases:** full tree under `atak-imagery/` for `install_linux.sh`; built with `python3 scripts/build_release.py`.
+- **Tile-plan cache policy:** keep `scripts/data/tile_plans/v1/*.tiles.gz` out of git history; include them in the release zip asset instead.
+- **One-command upload:** `scripts/build_and_upload_release_asset.sh <tag>` builds `dist/atak-imagery-v*-linux-install.zip` and uploads it to the GitHub release.
 
 ### Previous release (v1.0.0)
 
