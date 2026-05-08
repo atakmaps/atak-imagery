@@ -55,11 +55,17 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.3.14` (tag **`v1.3.14`** on GitHub).
+**Linux / source release:** `v1.3.15` (tag **`v1.3.15`** on GitHub).
 
 **Windows:** A new Windows packaged build is **not** included in this cycle. **Use Windows release `2.8`** until a newer Windows installer is published. Source copies under `windows_build/` include the same startup behaviors when run with Python.
 
-Version **1.3.14** highlights:
+Version **1.3.15** highlights:
+
+- **Device Installer (plugin-only) reliability:** plugin-only flow now force-uninstalls the old UV-PRO package before install to avoid version/signature mismatch, then proceeds through the plugin confirmation workflow and completion path.
+- **Maps + add-ons UX flow:** when both options are selected, add-ons preflight runs before imagery, including completion messaging and disconnect guidance before download scope.
+- **Radius zoom options expanded:** radius mode now offers zoom levels through **z18** (state mode remains capped at **z16**) with an explicit warning about z17/z18 data growth.
+
+### Previous release (v1.3.14)
 
 - **Add-ons refresh workflow hardening:** the downloader now uses the same checked add-ons routine (close ATAK, verify device, detect missing items, confirm install list) for both **refresh-only** and **maps + refresh** flows.
 - **Maps + refresh execution order:** when both options are selected, add-ons refresh runs first. A completion dialog confirms device work is done before imagery starts.
