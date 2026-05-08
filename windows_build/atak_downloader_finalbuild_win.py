@@ -1721,6 +1721,8 @@ class ZoomDialog(tk.Tk):
         _zs = scale_factor(self)
 
         self.download_scope = download_scope
+        self.zoom_min = 10
+        self.zoom_max = 18 if download_scope == "radius" else 16
 
         self.result: List[int] = []
         self.go_back = False
@@ -1802,6 +1804,13 @@ class ZoomDialog(tk.Tk):
                 "look wider than your circle even when the high-zoom data is tight — uncheck coarser zooms if you want a tighter footprint.\n\n",
                 "note_body",
             )
+            intro.insert(
+                "end",
+                "NOTE:  Zoom 17 and 18 is very detailed resolution and is very large in file size.  "
+                "Please keep your radius small (~10-25 miles) if you plan on using this resolution, "
+                "as map data and construction time increases exponentially every mile you add to the radius.\n\n",
+                "note_body",
+            )
         intro.insert("end", "NOTE:", "note_label")
         intro.insert(
             "end",
@@ -1853,10 +1862,10 @@ class ZoomDialog(tk.Tk):
         mid.pack(fill="both", expand=True)
         checks = pack_vertical_scroll_area(mid)
 
-        default_avg: Dict[int, int] = {zz: 25000 for zz in range(10, 17)}
+        default_avg: Dict[int, int] = {zz: 25000 for zz in range(self.zoom_min, self.zoom_max + 1)}
         avgs = avg_tile_bytes_by_zoom if avg_tile_bytes_by_zoom else default_avg
 
-        for z in range(10, 17):
+        for z in range(self.zoom_min, self.zoom_max + 1):
             total_tiles = 0
             total_bytes = 0
             if download_scope == "radius":

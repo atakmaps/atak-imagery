@@ -649,6 +649,88 @@ def launch_atak(serial: str) -> None:
         log(f"monkey launch returned {r.returncode}: {r.stderr}")
 
 
+def launch_atak_reliable(serial: Optional[str] = None) -> bool:
+    """Best-effort ATAK launch with fallback strategies."""
+    ser = (serial or env_optional("ANDROID_SERIAL")).strip()
+    pkg = atak_package_name()
+
+    # Clear stale background state first.
+    run_adb(["shell", "am", "force-stop", pkg], serial=(ser or None), timeout=30)
+    time.sleep(0.8)
+
+    # Resolve launcher activity dynamically (varies by ATAK flavor/build).
+    resolved_activity = ""
+    rr = run_adb(
+        ["shell", "cmd", "package", "resolve-activity", "--brief", pkg],
+        serial=(ser or None),
+        timeout=30,
+    )
+    if rr.returncode == 0:
+        for line in (rr.stdout or "").splitlines():
+            txt = line.strip()
+            if txt.startswith(pkg + "/"):
+                resolved_activity = txt
+                break
+
+    # Prefer explicit am start and wait for launch completion.
+    am_target = resolved_activity or f"{pkg}/com.atakmap.app.ATAKActivityCiv"
+    r2 = run_adb(
+        [
+            "shell",
+            "am",
+            "start",
+            "-W",
+            "-a",
+            "android.intent.action.MAIN",
+            "-c",
+            "android.intent.category.LAUNCHER",
+            "-n",
+            am_target,
+        ],
+        serial=(ser or None),
+        timeout=60,
+    )
+    out2 = ((r2.stdout or "") + "\n" + (r2.stderr or "")).strip()
+    if r2.returncode == 0 and "Error:" not in out2:
+        log(f"ATAK restart via am start succeeded: {am_target}")
+        return True
+
+    # Fallback to monkey launcher.
+    r = run_adb(
+        ["shell", "monkey", "-p", pkg, "-c", "android.intent.category.LAUNCHER", "1"],
+        serial=(ser or None),
+        timeout=60,
+    )
+    out1 = ((r.stdout or "") + "\n" + (r.stderr or "")).strip()
+    if r.returncode == 0:
+        log("ATAK restart via monkey succeeded.")
+        return True
+
+    log(
+        "Warning: ATAK restart failed. "
+        f"am start={r2.returncode} ({out2}), "
+        f"monkey={r.returncode} ({out1})"
+    )
+    return False
+
+
+def uninstall_package(serial: str, package_name: str, status_cb=None) -> None:
+    """Full uninstall for a package; non-fatal if not installed."""
+    if status_cb:
+        status_cb(f"Removing previous {package_name}…")
+    r = run_adb(["uninstall", package_name], serial=serial, timeout=120)
+    out = ((r.stdout or "") + "\n" + (r.stderr or "")).strip()
+    lower = out.lower()
+    if r.returncode == 0 and "success" in lower:
+        log(f"Uninstalled package: {package_name}")
+        return
+    if "unknown package" in lower or "not installed" in lower or "delete failed internal error" in lower:
+        log(f"Package not installed (nothing to remove): {package_name}")
+        return
+    # Keep going but log details so operators can diagnose odd device states.
+    log(f"Warning: uninstall of {package_name} returned {r.returncode}: {out}")
+
+
 def post_report(
     report_url: str,
     token: Optional[str],
@@ -898,6 +980,36 @@ class DeployWizard(tk.Tk):
     def _set_busy(self, busy: bool) -> None:
         self.btn_primary.configure(state=("disabled" if busy else "normal"))
 
+    def _set_secondary_visible(self, visible: bool) -> None:
+        if visible:
+            if not self.btn_secondary.winfo_manager():
+                self.btn_secondary.pack(side="right")
+        else:
+            if self.btn_secondary.winfo_manager():
+                self.btn_secondary.pack_forget()
+
+    def _restart_atak_then_finish(self) -> None:
+        """Step-6 continue action: restart ATAK, wait, then show final exit screen."""
+        self.btn_primary.configure(state="disabled")
+        self.btn_secondary.configure(state="disabled")
+        self.status.configure(text="Restarting ATAK on device…")
+
+        def work() -> None:
+            try:
+                log("Step 6 continue: attempting ATAK restart (pass 1)")
+                ok = launch_atak_reliable(self.selected_serial)
+                if not ok:
+                    log("Step 6 continue: first ATAK restart attempt failed; retrying once")
+                    time.sleep(1.0)
+                    launch_atak_reliable(self.selected_serial)
+            except Exception:
+                log("launch_atak before final screen failed")
+            # Keep installer alive briefly so restart command settles while app is running.
+            time.sleep(5.0)
+            self.after(0, lambda: self._advance(7))
+
+        threading.Thread(target=work, daemon=True).start()
+
     def _show_body_label(self) -> None:
         self._instructions_outer.pack_forget()
         self._selection_outer.pack_forget()
@@ -938,6 +1050,7 @@ class DeployWizard(tk.Tk):
 
         # Step 0 — welcome
         if self._step == 0:
+            self._set_secondary_visible(True)
             self._show_body_label()
             self.step_label.configure(text="")
             self.body.configure(
@@ -952,6 +1065,7 @@ class DeployWizard(tk.Tk):
 
         # Step 1 — choose what to install
         elif self._step == 1:
+            self._set_secondary_visible(True)
             self.body.configure(text="")
             self._show_selection_panel()
             self.step_label.configure(text="What would you like to install?")
@@ -960,6 +1074,7 @@ class DeployWizard(tk.Tk):
 
         # Step 2 — connect device
         elif self._step == 2:
+            self._set_secondary_visible(True)
             self._show_body_label()
             self.step_label.configure(text="Connect your Android device")
             self.body.configure(
@@ -975,6 +1090,7 @@ class DeployWizard(tk.Tk):
 
         # Step 3 — install ATAK  (skipped when plugin-only)
         elif self._step == 3:
+            self._set_secondary_visible(True)
             self._show_body_label()
             self.step_label.configure(text="Installing ATAK")
             self.body.configure(
@@ -986,6 +1102,7 @@ class DeployWizard(tk.Tk):
 
         # Step 4 — ATAK first-run setup  (skipped when plugin-only)
         elif self._step == 4:
+            self._set_secondary_visible(True)
             self._show_setup_instructions_panel()
             self.step_label.configure(text="Complete ATAK setup on device")
             # After ATAK setup: go to plugin install if needed, else skip to completion
@@ -997,6 +1114,7 @@ class DeployWizard(tk.Tk):
 
         # Step 5 — install plugin  (skipped when atak-only)
         elif self._step == 5:
+            self._set_secondary_visible(True)
             self._show_body_label()
             self.step_label.configure(text="Installing plugin")
             self.body.configure(
@@ -1011,15 +1129,17 @@ class DeployWizard(tk.Tk):
 
         # Step 6 — post-plugin instructions  (skipped when atak-only)
         elif self._step == 6:
+            self._set_secondary_visible(True)
             self._show_instructions_panel(ATAK_POST_PLUGIN_SETUP_INSTRUCTIONS)
             self.step_label.configure(text="Almost done")
             self.btn_primary.configure(
-                state="normal", text="Continue", command=lambda: self._advance(7)
+                state="normal", text="Continue", command=self._restart_atak_then_finish
             )
             self.status.configure(text="")
 
         # Step 7 — completion
         elif self._step == 7:
+            self._set_secondary_visible(False)
             self._show_body_label()
             self.step_label.configure(text="Installation complete")
             self.body.configure(
@@ -1029,8 +1149,8 @@ class DeployWizard(tk.Tk):
                     "Please run the ATAK Imagery Downloader to install imagery on your device."
                 )
             )
-            self.btn_primary.configure(text="Exit", command=self.destroy)
-            self.btn_secondary.configure(state="disabled")
+            self.btn_primary.configure(state="normal", text="Exit", command=self.destroy)
+            self.protocol("WM_DELETE_WINDOW", self.destroy)
             self.status.configure(text="")
 
     def _on_primary(self) -> None:
@@ -1217,7 +1337,7 @@ class DeployWizard(tk.Tk):
             try:
                 try:
                     launch_atak(ser)
-                    time.sleep(1.5)
+                    time.sleep(15.0)
                 except Exception:
                     log("launch_atak before plugin install failed")
 
@@ -1237,13 +1357,22 @@ class DeployWizard(tk.Tk):
                     self.after(0, lambda m=msg: self.status.configure(text=m))
 
                 self.after(0, self.progress.start, 8)
+                if self._install_choice == "plugin":
+                    # Plugin-only flow: force a clean slate before install to avoid
+                    # version/signature mismatch from prior UV-PRO installs.
+                    uninstall_package(ser, DEFAULT_PLUGIN_PACKAGE, ui_install)
+                    try:
+                        launch_atak(ser)
+                        time.sleep(15.0)
+                    except Exception:
+                        log("launch_atak after plugin uninstall failed")
                 install_apk(
                     self.selected_serial,
                     apk_path,
                     ui_install,
                     package_name=DEFAULT_PLUGIN_PACKAGE,
                 )
-                if self._install_choice in ("both", "plugin"):
+                if self._install_choice == "both":
                     install_bundled_addon_apks(ser, log, ui_install)
 
                 self.after(0, self.progress.stop)
@@ -1275,6 +1404,11 @@ class DeployWizard(tk.Tk):
             self._step = 4 if self._install_choice == "both" else 2
             self._render_step()
             return
+        if self._install_choice == "plugin":
+            try:
+                launch_atak(self.selected_serial or "")
+            except Exception:
+                log("launch_atak after plugin-only install failed")
         self._cleanup_temp_apks()
         self._advance(6)
 
