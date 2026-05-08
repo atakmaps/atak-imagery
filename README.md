@@ -55,11 +55,17 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.3.15` (tag **`v1.3.15`** on GitHub).
+**Linux / source release:** `v1.3.16` (tag **`v1.3.16`** on GitHub).
 
 **Windows:** A new Windows packaged build is **not** included in this cycle. **Use Windows release `2.8`** until a newer Windows installer is published. Source copies under `windows_build/` include the same startup behaviors when run with Python.
 
-Version **1.3.15** highlights:
+Version **1.3.16** highlights:
+
+- **Precomputed tile-plan cache refresh:** updated `scripts/data/tile_plans/v1/*.tiles.gz` coverage now includes states through Illinois to reduce state-planning compute time during imagery runs.
+- **Faster first-run state planning on included states:** downloader can load cache-backed tile plans (`Tile plan (cache)`) for newly included states instead of recomputing.
+- **Linux install bundle updated:** release asset includes the refreshed tile-plan cache set.
+
+### Previous release (v1.3.15)
 
 - **Device Installer (plugin-only) reliability:** plugin-only flow now force-uninstalls the old UV-PRO package before install to avoid version/signature mismatch, then proceeds through the plugin confirmation workflow and completion path.
 - **Maps + add-ons UX flow:** when both options are selected, add-ons preflight runs before imagery, including completion messaging and disconnect guidance before download scope.
