@@ -1160,8 +1160,7 @@ class DeployWizard(tk.Tk):
             self.step_label.configure(text="Installing plugin")
             self.body.configure(
                 text=(
-                    "Installing the TAK-UV-PRO plugin from your configured download source, "
-                    "then any bundled add-on plugins shipped with this installer."
+                    "Installing the TAK-UV-PRO plugin from your configured download source."
                 )
             )
             self.progress.pack(fill="x", pady=(8, 0), before=self.status)
