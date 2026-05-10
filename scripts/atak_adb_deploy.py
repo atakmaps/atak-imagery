@@ -552,6 +552,20 @@ def install_apk(serial: str, apk_path: Path, status_cb=None, *, package_name: Op
                 status_cb(f"Installing {name} (allow downgrade, -d)…")
             r = run_adb(["install", "-d", "-r", str(apk_path)], serial=serial, timeout=600)
             combined = (r.stderr or "") + (r.stdout or "")
+        # Some devices still reject downgrade flags. In that case, fully uninstall
+        # the existing package and retry once if the caller provided a package name.
+        if r.returncode != 0 and "INSTALL_FAILED_VERSION_DOWNGRADE" in combined and package_name:
+            log(
+                f"adb install: downgrade still rejected for {package_name}; "
+                "performing full uninstall and retrying install"
+            )
+            if status_cb:
+                status_cb(f"Removing previous {package_name} (downgrade blocked)…")
+            uninstall_package(serial, package_name, status_cb, require_absent=True)
+            if status_cb:
+                status_cb(f"Installing {name}…")
+            r = run_adb(["install", "-r", str(apk_path)], serial=serial, timeout=600)
+            combined = (r.stderr or "") + (r.stdout or "")
 
     # Signature mismatch: uninstall the old package and retry once.
     if r.returncode != 0 and "INSTALL_FAILED_UPDATE_INCOMPATIBLE" in combined:
@@ -714,21 +728,48 @@ def launch_atak_reliable(serial: Optional[str] = None) -> bool:
     return False
 
 
-def uninstall_package(serial: str, package_name: str, status_cb=None) -> None:
-    """Full uninstall for a package; non-fatal if not installed."""
+def is_package_installed(serial: str, package_name: str) -> bool:
+    """True if package is installed on the target device."""
+    r = run_adb(["shell", "pm", "list", "packages", package_name], serial=serial, timeout=30)
+    out = (r.stdout or "") + "\n" + (r.stderr or "")
+    if r.returncode != 0:
+        return False
+    needle = f"package:{package_name}"
+    return any(line.strip() == needle for line in out.splitlines())
+
+
+def uninstall_package(serial: str, package_name: str, status_cb=None, *, require_absent: bool = False) -> None:
+    """Full uninstall for a package.
+
+    By default this is non-fatal if the package is not installed. When
+    ``require_absent`` is True, raise if the package is still present after
+    uninstall attempt(s).
+    """
     if status_cb:
         status_cb(f"Removing previous {package_name}…")
+    installed_before = is_package_installed(serial, package_name)
+    if not installed_before:
+        log(f"Package not installed (nothing to remove): {package_name}")
+        return
+
     r = run_adb(["uninstall", package_name], serial=serial, timeout=120)
     out = ((r.stdout or "") + "\n" + (r.stderr or "")).strip()
     lower = out.lower()
     if r.returncode == 0 and "success" in lower:
-        log(f"Uninstalled package: {package_name}")
+        if not require_absent or not is_package_installed(serial, package_name):
+            log(f"Uninstalled package: {package_name}")
+            return
+
+    still_installed = is_package_installed(serial, package_name)
+    if not still_installed:
+        log(f"Uninstalled package (verified absent): {package_name}")
         return
-    if "unknown package" in lower or "not installed" in lower or "delete failed internal error" in lower:
-        log(f"Package not installed (nothing to remove): {package_name}")
-        return
+
+    msg = f"uninstall of {package_name} failed; package is still installed. adb={r.returncode}: {out}"
+    if require_absent:
+        raise RuntimeError(msg)
     # Keep going but log details so operators can diagnose odd device states.
-    log(f"Warning: uninstall of {package_name} returned {r.returncode}: {out}")
+    log(f"Warning: {msg}")
 
 
 def post_report(
@@ -1360,7 +1401,7 @@ class DeployWizard(tk.Tk):
                 if self._install_choice == "plugin":
                     # Plugin-only flow: force a clean slate before install to avoid
                     # version/signature mismatch from prior UV-PRO installs.
-                    uninstall_package(ser, DEFAULT_PLUGIN_PACKAGE, ui_install)
+                    uninstall_package(ser, DEFAULT_PLUGIN_PACKAGE, ui_install, require_absent=True)
                     try:
                         launch_atak(ser)
                         time.sleep(15.0)

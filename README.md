@@ -55,11 +55,17 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.3.16` (tag **`v1.3.16`** on GitHub).
+**Linux / source release:** `v1.3.17` (tag **`v1.3.17`** on GitHub).
 
 **Windows:** A new Windows packaged build is **not** included in this cycle. **Use Windows release `2.8`** until a newer Windows installer is published. Source copies under `windows_build/` include the same startup behaviors when run with Python.
 
-Version **1.3.16** highlights:
+Version **1.3.17** highlights:
+
+- **Installer downgrade recovery:** when plugin install returns `INSTALL_FAILED_VERSION_DOWNGRADE`, the installer now retries downgrade flags and, if still blocked, performs a full uninstall/reinstall recovery automatically.
+- **Strict uninstall verification for plugin-only flow:** plugin-only install now verifies the old UV-PRO package is truly removed before proceeding, reducing repeated version-code mismatch failures.
+- **Improved package-state checks:** installer now checks package presence directly via `pm list packages` to make uninstall handling deterministic across devices.
+
+### Previous release (v1.3.16)
 
 - **Precomputed tile-plan cache refresh:** updated `scripts/data/tile_plans/v1/*.tiles.gz` coverage now includes states through Illinois to reduce state-planning compute time during imagery runs.
 - **Faster first-run state planning on included states:** downloader can load cache-backed tile plans (`Tile plan (cache)`) for newly included states instead of recomputing.
