@@ -1756,7 +1756,7 @@ class ZoomDialog(tk.Tk):
 
         self.download_scope = download_scope
         self.zoom_min = 10
-        self.zoom_max = 18 if download_scope == "radius" else 16
+        self.zoom_max = 16
 
         self.result: List[int] = []
         self.go_back = False
@@ -1836,13 +1836,6 @@ class ZoomDialog(tk.Tk):
                 "Radius mode: checking a zoom also selects every coarser zoom (same pyramid as state mode). "
                 "Very low zoom tiles span huge areas, so the full pyramid can make the ATAK offline outline "
                 "look wider than your circle even when the high-zoom data is tight — uncheck coarser zooms if you want a tighter footprint.\n\n",
-                "note_body",
-            )
-            intro.insert(
-                "end",
-                "NOTE:  Zoom 17 and 18 is very detailed resolution and is very large in file size.  "
-                "Please keep your radius small (~10-25 miles) if you plan on using this resolution, "
-                "as map data and construction time increases exponentially every mile you add to the radius.\n\n",
                 "note_body",
             )
         intro.insert("end", "NOTE:", "note_label")
@@ -3394,9 +3387,10 @@ def main() -> None:
                 "Device check/prompt will run before add-ons push after download."
             )
         else:
-            if not show_downloader_intro_and_verify_device():
-                log("Exited at device verification prompt.")
-                return
+            log(
+                "Imagery-only selected — skipping upfront device-connect intro. "
+                "Device check/prompt will run later before DTED/device steps."
+            )
     else:
         if from_installer:
             log("Add-ons refresh only — skipping map download (launched from Device Installer).")

@@ -55,11 +55,17 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.3.18` (tag **`v1.3.18`** on GitHub).
+**Linux / source release:** `v1.3.19` (tag **`v1.3.19`** on GitHub).
 
 **Windows:** A new Windows packaged build is **not** included in this cycle. **Use Windows release `2.8`** until a newer Windows installer is published. Source copies under `windows_build/` include the same startup behaviors when run with Python.
 
-Version **1.3.18** highlights:
+Version **1.3.19** highlights:
+
+- **Radius zoom range reset:** removed z17/z18 selection from the downloader UI; both state and radius workflows now cap at z16.
+- **Imagery-only startup flow hardening:** imagery-only mode now follows the same skip-intro workflow used by maps+add-ons, avoiding the separate upfront device-check path that was reported as crashing.
+- **Linux/Windows parity:** the same downloader behavior changes were applied in both `scripts/` and `windows_build/` script variants.
+
+### Previous release (v1.3.18)
 
 - **Installer plugin-step UI cleanup:** removed text indicating bundled add-on plugin installation from the "Installing plugin" window.
 - **Current behavior reflected in wizard copy:** plugin installation messaging now reflects UV-PRO-only install behavior.
