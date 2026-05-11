@@ -2718,6 +2718,7 @@ def run_download(
                         z,
                         geojson_path=STATE_GEOJSON_PATH,
                         tile_plan_dir=TILE_PLAN_DIR,
+                        cancel_check=progress.wait_if_paused,
                     )
                     tiles = tpr.tiles
                     tile_plan_elapsed_s = time.perf_counter() - tile_plan_t0

@@ -2575,6 +2575,27 @@ def save_output_parent(parent: Path) -> None:
 
 def pick_directory(title: str, initial: Path, parent: tk.Misc) -> str:
     """Linux: same Zenity folder picker as output selection; else Tk ``askdirectory`` parented to ``parent``."""
+    try:
+        if shutil.which("zenity"):
+            start_uri = str(initial.resolve()) + "/"
+            result = subprocess.run(
+                [
+                    "zenity",
+                    "--file-selection",
+                    "--directory",
+                    f"--title={title}",
+                    f"--filename={start_uri}",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0:
+                folder = result.stdout.strip()
+                if folder:
+                    return str(Path(folder))
+            return ""
+    except Exception:
+        pass
     ensure_window_stacking(parent)
     folder = filedialog.askdirectory(title=title, initialdir=str(initial), parent=parent)
     return folder or ""
@@ -2583,6 +2604,30 @@ def pick_directory(title: str, initial: Path, parent: tk.Misc) -> str:
 def ask_output_parent() -> str:
     initial = default_output_parent()
     pick_title = "Select a temporary folder for install"
+    try:
+        if shutil.which("zenity"):
+            start_uri = str(initial.resolve()) + "/"
+            result = subprocess.run(
+                [
+                    "zenity",
+                    "--file-selection",
+                    "--directory",
+                    f"--title={pick_title}",
+                    f"--filename={start_uri}",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0:
+                folder = result.stdout.strip()
+                if folder:
+                    p = Path(folder)
+                    save_output_parent(p)
+                    return str(p)
+            return ""
+    except Exception:
+        pass
+
     root = tk.Tk()
     root.configure(cursor="arrow")
     root.geometry("1x1")
@@ -2901,6 +2946,7 @@ def run_download(
                         z,
                         geojson_path=STATE_GEOJSON_PATH,
                         tile_plan_dir=TILE_PLAN_DIR,
+                        cancel_check=progress.wait_if_paused,
                     )
                     tiles = tpr.tiles
                     tile_plan_elapsed_s = time.perf_counter() - tile_plan_t0

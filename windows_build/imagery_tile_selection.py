@@ -518,6 +518,7 @@ def build_tiles_for_state_result(
     *,
     geojson_path: Optional[Path] = None,
     tile_plan_dir: Optional[Path] = None,
+    cancel_check: Optional[Callable[[], None]] = None,
 ) -> TilePlanBuildResult:
     """
     Like ``build_tiles_for_state`` but reports whether the list came from disk cache.
@@ -531,7 +532,28 @@ def build_tiles_for_state_result(
         if cached is not None:
             return TilePlanBuildResult(cached, True)
 
-    tiles = _compute_tiles_for_state(rings, zoom, buf)
+    parallel_done_cb = None
+    scan_cb = None
+    scan_interval_s = 0.0
+    if cancel_check is not None:
+        def _parallel_done_cb(_bands_done: int, _bands_total: int, _tiles_so_far: int, _elapsed_s: float) -> None:
+            cancel_check()
+
+        def _scan_cb(_rect_done: int, _rect_total: int, _qual_tiles: int, _elapsed_s: float) -> None:
+            cancel_check()
+
+        parallel_done_cb = _parallel_done_cb
+        scan_cb = _scan_cb
+        scan_interval_s = 0.25
+
+    tiles = _compute_tiles_for_state(
+        rings,
+        zoom,
+        buf,
+        parallel_band_done=parallel_done_cb,
+        scan_progress_interval_s=scan_interval_s,
+        scan_progress_callback=scan_cb,
+    )
     return TilePlanBuildResult(tiles, False)
 
 
