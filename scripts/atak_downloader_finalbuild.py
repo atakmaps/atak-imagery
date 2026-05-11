@@ -1042,10 +1042,15 @@ def run_refresh_addons_only(progress: Any) -> None:
         log("Add-ons refresh mode — skipping map download.")
         progress.wait_if_paused()
         if not bundled_addons_available():
-            progress.error_message = (
+            msg = (
                 "No bundled add-ons found under data/mobile_xml or data/bundled_plugins "
-                "in this install."
+                "in this install. Nothing to refresh."
             )
+            log(msg)
+            progress.completion_log_summary = "Add-ons refresh skipped — no bundled add-ons in this build."
+            progress.completion_message = msg
+            progress.skip_sqlite_builder_after_session = True
+            progress.set_status("Complete")
             return
         _refresh_addons_only_for_device(progress, log)
         if getattr(progress, "user_cancelled", False) or getattr(progress, "error_message", None):
@@ -2435,43 +2440,57 @@ class ProgressWindow(tk.Tk):
 # -----------------------------
 
 def run_with_busy_dialog(message: str, fn: Callable[[], None]) -> None:
-    """Show a pulsing zenity progress bar while ``fn()`` runs, then close it.
+    """Run ``fn`` while showing an always-on-top modal busy dialog."""
+    done = threading.Event()
+    err: List[BaseException] = []
 
-    Uses zenity (already a dependency on Linux) so no extra Tk root is created.
-    Falls back to running ``fn()`` silently if zenity is unavailable.
-    ``fn()`` is called on the main thread; zenity runs in a subprocess.
-    """
-    if not shutil.which("zenity"):
-        fn()
-        return
-
-    proc = subprocess.Popen(
-        [
-            "zenity",
-            "--progress",
-            "--pulsate",
-            "--no-cancel",
-            "--auto-close",
-            "--width=400",
-            "--height=120",
-            f"--title={APP_TITLE}",
-            f"--text={message}",
-        ],
-        stdin=subprocess.PIPE,
-    )
+    dlg = tk.Tk()
+    dlg.title(APP_TITLE)
+    dlg.configure(cursor="arrow")
+    apply_resizable_window(dlg, 480, 160, (360, 130))
+    refit_toplevel_geometry(dlg, 480, 160)
     try:
-        fn()
-    finally:
+        dlg.attributes("-topmost", True)
+    except tk.TclError:
+        pass
+    ensure_window_stacking(dlg)
+    dlg.grab_set()
+
+    frame = tk.Frame(dlg, padx=18, pady=16)
+    frame.pack(fill="both", expand=True)
+    tk.Label(frame, text=message, justify="left", anchor="w", wraplength=420).pack(fill="x", pady=(0, 10))
+    bar = ttk.Progressbar(frame, mode="indeterminate")
+    bar.pack(fill="x")
+    bar.start(10)
+
+    def _worker() -> None:
         try:
-            proc.stdin.write(b"100\n")
-            proc.stdin.flush()
-            proc.stdin.close()
-        except Exception:
-            pass
-        try:
-            proc.wait(timeout=3)
-        except Exception:
-            proc.kill()
+            fn()
+        except BaseException as exc:  # propagate after dialog closes
+            err.append(exc)
+        finally:
+            done.set()
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+    def _poll() -> None:
+        if done.is_set():
+            try:
+                bar.stop()
+            except Exception:
+                pass
+            try:
+                dlg.grab_release()
+            except Exception:
+                pass
+            dlg.destroy()
+            return
+        dlg.after(80, _poll)
+
+    dlg.after(80, _poll)
+    dlg.mainloop()
+    if err:
+        raise err[0]
 
 
 def show_summary_confirm(
@@ -2506,16 +2525,6 @@ def show_summary_confirm(
             "Downloads folder if you have not chosen one before).\n\n"
             "Press OK to continue."
         )
-    if shutil.which("zenity"):
-        try:
-            subprocess.run(
-                ["zenity", "--info", "--no-wrap", f"--title={APP_TITLE}", f"--text={msg}"],
-                check=False,
-            )
-            return True
-        except OSError:
-            pass
-
     root = tk.Tk()
     try:
         root.option_add("*cursor", "arrow")
@@ -2566,27 +2575,6 @@ def save_output_parent(parent: Path) -> None:
 
 def pick_directory(title: str, initial: Path, parent: tk.Misc) -> str:
     """Linux: same Zenity folder picker as output selection; else Tk ``askdirectory`` parented to ``parent``."""
-    try:
-        if shutil.which("zenity"):
-            start_uri = str(initial.resolve()) + "/"
-            result = subprocess.run(
-                [
-                    "zenity",
-                    "--file-selection",
-                    "--directory",
-                    f"--title={title}",
-                    f"--filename={start_uri}",
-                ],
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode == 0:
-                folder = result.stdout.strip()
-                if folder:
-                    return str(Path(folder))
-            return ""
-    except Exception:
-        pass
     ensure_window_stacking(parent)
     folder = filedialog.askdirectory(title=title, initialdir=str(initial), parent=parent)
     return folder or ""
@@ -2595,31 +2583,6 @@ def pick_directory(title: str, initial: Path, parent: tk.Misc) -> str:
 def ask_output_parent() -> str:
     initial = default_output_parent()
     pick_title = "Select a temporary folder for install"
-    try:
-        if shutil.which("zenity"):
-            # Start in Downloads or last-used folder
-            start_uri = str(initial.resolve()) + "/"
-            result = subprocess.run(
-                [
-                    "zenity",
-                    "--file-selection",
-                    "--directory",
-                    f"--title={pick_title}",
-                    f"--filename={start_uri}",
-                ],
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode == 0:
-                folder = result.stdout.strip()
-                if folder:
-                    p = Path(folder)
-                    save_output_parent(p)
-                    return str(p)
-            return ""
-    except Exception:
-        pass
-
     root = tk.Tk()
     root.configure(cursor="arrow")
     root.geometry("1x1")

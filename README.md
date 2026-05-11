@@ -55,11 +55,17 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.3.19` (tag **`v1.3.19`** on GitHub).
+**Linux / source release:** `v1.3.20` (tag **`v1.3.20`** on GitHub).
 
 **Windows:** A new Windows packaged build is **not** included in this cycle. **Use Windows release `2.8`** until a newer Windows installer is published. Source copies under `windows_build/` include the same startup behaviors when run with Python.
 
-Version **1.3.19** highlights:
+Version **1.3.20** highlights:
+
+- **Foreground dialog behavior:** “Calculating coverage”, download summary, and directory picker dialogs now stay on top instead of opening behind other windows.
+- **Add-ons refresh-only bug fix:** when no bundled add-ons are present, the downloader now reports “nothing to refresh” and completes cleanly instead of showing an error.
+- **Bundled plugin cleanup:** removed the bundled WASP APK from `scripts/data/bundled_plugins`.
+
+### Previous release (v1.3.19)
 
 - **Radius zoom range reset:** removed z17/z18 selection from the downloader UI; both state and radius workflows now cap at z16.
 - **Imagery-only startup flow hardening:** imagery-only mode now follows the same skip-intro workflow used by maps+add-ons, avoiding the separate upfront device-check path that was reported as crashing.

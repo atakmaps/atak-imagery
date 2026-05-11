@@ -789,10 +789,15 @@ def run_refresh_addons_only(progress: Any) -> None:
         log("Add-ons refresh mode — skipping map download.")
         progress.wait_if_paused()
         if not bundled_addons_available():
-            progress.error_message = (
+            msg = (
                 "No bundled add-ons found under data/mobile_xml or data/bundled_plugins "
-                "in this install."
+                "in this install. Nothing to refresh."
             )
+            log(msg)
+            progress.completion_log_summary = "Add-ons refresh skipped — no bundled add-ons in this build."
+            progress.completion_message = msg
+            progress.skip_sqlite_builder_after_session = True
+            progress.set_status("Complete")
             return
         _refresh_addons_only_for_device(progress, log)
         if getattr(progress, "user_cancelled", False) or getattr(progress, "error_message", None):
@@ -2388,16 +2393,6 @@ def show_summary_confirm(
             f"Estimated tiles:\n{total_tiles:,}\n\n"
             f"Continue to choose an output folder?"
         )
-    if shutil.which("zenity"):
-        try:
-            r = subprocess.run(
-                ["zenity", "--question", "--no-wrap", f"--title={APP_TITLE}", f"--text={msg}"],
-                check=False,
-            )
-            return r.returncode == 0
-        except OSError:
-            pass
-
     root = tk.Tk()
     try:
         root.option_add("*cursor", "arrow")
@@ -2421,51 +2416,12 @@ def show_summary_confirm(
 
 def pick_directory(title: str, initial: Path, parent: tk.Misc) -> str:
     """Linux: Zenity folder picker when available; else Tk ``askdirectory`` parented to ``parent``."""
-    try:
-        if shutil.which("zenity"):
-            start_uri = str(initial.resolve()) + "/"
-            result = subprocess.run(
-                [
-                    "zenity",
-                    "--file-selection",
-                    "--directory",
-                    f"--title={title}",
-                    f"--filename={start_uri}",
-                ],
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode == 0:
-                folder = result.stdout.strip()
-                if folder:
-                    return str(Path(folder))
-            return ""
-    except Exception:
-        pass
     ensure_window_stacking(parent)
     folder = filedialog.askdirectory(title=title, initialdir=str(initial), parent=parent)
     return folder or ""
 
 
 def ask_output_parent() -> str:
-    try:
-        if shutil.which("zenity"):
-            result = subprocess.run(
-                [
-                    "zenity",
-                    "--file-selection",
-                    "--directory",
-                    "--title=Select output parent folder",
-                ],
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode == 0:
-                return result.stdout.strip()
-            return ""
-    except Exception:
-        pass
-
     root = tk.Tk()
     root.configure(cursor="arrow")
     root.withdraw()
