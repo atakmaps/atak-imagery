@@ -2440,21 +2440,27 @@ class ProgressWindow(tk.Tk):
 # -----------------------------
 
 def run_with_busy_dialog(message: str, fn: Callable[[], None]) -> None:
-    """Run ``fn`` while showing an always-on-top modal busy dialog."""
-    done = threading.Event()
-    err: List[BaseException] = []
-
-    dlg = tk.Tk()
+    """Run ``fn`` while showing a foreground modal busy dialog (main thread only)."""
+    owner = tk._default_root
+    dlg = tk.Toplevel(owner) if owner is not None else tk.Tk()
     dlg.title(APP_TITLE)
     dlg.configure(cursor="arrow")
+    if owner is not None:
+        try:
+            dlg.transient(owner)
+        except tk.TclError:
+            pass
     apply_resizable_window(dlg, 480, 160, (360, 130))
     refit_toplevel_geometry(dlg, 480, 160)
     try:
         dlg.attributes("-topmost", True)
     except tk.TclError:
         pass
-    ensure_window_stacking(dlg)
-    dlg.grab_set()
+    ensure_window_stacking(dlg, above=owner)
+    try:
+        dlg.grab_set()
+    except tk.TclError:
+        pass
 
     frame = tk.Frame(dlg, padx=18, pady=16)
     frame.pack(fill="both", expand=True)
@@ -2462,35 +2468,23 @@ def run_with_busy_dialog(message: str, fn: Callable[[], None]) -> None:
     bar = ttk.Progressbar(frame, mode="indeterminate")
     bar.pack(fill="x")
     bar.start(10)
-
-    def _worker() -> None:
+    try:
+        dlg.update_idletasks()
+        dlg.update()
+        fn()
+    finally:
         try:
-            fn()
-        except BaseException as exc:  # propagate after dialog closes
-            err.append(exc)
-        finally:
-            done.set()
-
-    threading.Thread(target=_worker, daemon=True).start()
-
-    def _poll() -> None:
-        if done.is_set():
-            try:
-                bar.stop()
-            except Exception:
-                pass
-            try:
-                dlg.grab_release()
-            except Exception:
-                pass
+            bar.stop()
+        except Exception:
+            pass
+        try:
+            dlg.grab_release()
+        except Exception:
+            pass
+        try:
             dlg.destroy()
-            return
-        dlg.after(80, _poll)
-
-    dlg.after(80, _poll)
-    dlg.mainloop()
-    if err:
-        raise err[0]
+        except Exception:
+            pass
 
 
 def show_summary_confirm(
@@ -2974,8 +2968,12 @@ def run_download(
 
         if radius_mode:
             progress.set_status("Resolving states for DTED…")
+            if preloaded_states is not None:
+                states_for_dted = preloaded_states
+            else:
+                states_for_dted = load_states(bundled_state_geojson_path())
             dted_state_list = state_names_intersecting_geodesic_circle(
-                lat, lon, miles, load_states(bundled_state_geojson_path())
+                lat, lon, miles, states_for_dted
             )
             log(
                 "DTED: full state package(s) for states overlapping the radius "
@@ -3186,6 +3184,12 @@ def run_download(
             if not dted_state_list:
                 log("DTED: no state packages match this download region; skipping.")
             else:
+                radius_bbox_for_dted: Optional[Tuple[float, float, float, float]] = None
+                if radius_mode:
+                    try:
+                        radius_bbox_for_dted = square_lonlat_footprint_for_radius_miles(lat, lon, miles)
+                    except Exception as exc:
+                        log(f"DTED: could not compute radius bbox for DTED clipping ({exc}); using full-state DTED.")
                 # Mark that DTED is handled inline so the SQLite builder won't
                 # launch the standalone DTED downloader afterward.
                 mark_standalone_dted_skip()
@@ -3223,6 +3227,7 @@ def run_download(
                         log_sink=log,
                         progress=progress,
                         local_state_zip_root=local_dted_root,
+                        radius_bbox_lonlat=radius_bbox_for_dted,
                     )
                     if dted_zip is not None:
                         dted_note = f"\n\nDTED archive ready:\n{dted_zip.name}"
@@ -3584,7 +3589,7 @@ def main() -> None:
                     _radius_tiles: Dict[int, int] = {}
 
                     def _precompute_radius_tiles() -> None:
-                        for z in range(10, 19):
+                        for z in range(10, 17):
                             tiles = compute_tiles_for_radius(rd.center_lat, rd.center_lon, rd.radius_miles, z)
                             _radius_tiles[z] = len(tiles)
 
@@ -3639,6 +3644,9 @@ def main() -> None:
                         log("Cancelled at output folder prompt.")
                         return
 
+                    _geo = bundled_state_geojson_path()
+                    _preloaded = load_states(_geo)
+
                     progress = ProgressWindow(LOGGER.log_file)
                     pump_gui_logs(progress)
                     worker = threading.Thread(
@@ -3650,6 +3658,7 @@ def main() -> None:
                             "radius_center": (rd.center_lat, rd.center_lon),
                             "radius_miles": rd.radius_miles,
                             "radius_region_folder": scope_dlg.radius_region_folder,
+                            "preloaded_states": _preloaded,
                             "refresh_addons_after": do_addons,
                         },
                         daemon=True,

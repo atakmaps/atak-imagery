@@ -1078,17 +1078,62 @@ def extract_state_zip(
         zf.extractall(state_extract_dir)
 
 
+_LON_DIR_RE = re.compile(r"^([ew])(\d{3})$", re.IGNORECASE)
+_LAT_FILE_RE = re.compile(r"^([ns])(\d{2})\.dt[012]$", re.IGNORECASE)
+
+
+def _dted_cell_bounds_from_arcname(arc_posix: str) -> Optional[Tuple[float, float, float, float]]:
+    """
+    Parse DTED cell bounds from archive path like ``w111/n32.dt2``.
+
+    Returns (west, south, east, north) in lon/lat degrees, or None when
+    the path is not a DTED cell file.
+    """
+    parts = Path(arc_posix).parts
+    if len(parts) < 2:
+        return None
+    lon_part = parts[-2]
+    lat_part = parts[-1]
+    m_lon = _LON_DIR_RE.match(lon_part)
+    m_lat = _LAT_FILE_RE.match(lat_part)
+    if not m_lon or not m_lat:
+        return None
+
+    lon_hemi, lon_deg_s = m_lon.groups()
+    lat_hemi, lat_deg_s = m_lat.groups()
+    lon_deg = int(lon_deg_s)
+    lat_deg = int(lat_deg_s)
+
+    west = -lon_deg if lon_hemi.lower() == "w" else lon_deg
+    south = -lat_deg if lat_hemi.lower() == "s" else lat_deg
+    east = west + 1.0
+    north = south + 1.0
+    return west, south, east, north
+
+
+def _bbox_overlaps(
+    a_w: float, a_s: float, a_e: float, a_n: float,
+    b_w: float, b_s: float, b_e: float, b_n: float,
+) -> bool:
+    return not (a_e < b_w or b_e < a_w or a_n < b_s or b_n < a_s)
+
+
 def build_final_dted_zip(
     extract_root: Path,
     final_zip_path: Path,
     log_fn: Optional[Callable[[str], None]] = None,
     on_packed: Optional[Callable[[int, int], None]] = None,
+    radius_bbox_lonlat: Optional[Tuple[float, float, float, float]] = None,
 ) -> None:
     _log = log_fn or log
     if final_zip_path.exists():
         final_zip_path.unlink()
 
     entries: List[Tuple[Path, str]] = []
+    filtered_out = 0
+    radius_filter_enabled = radius_bbox_lonlat is not None
+    if radius_filter_enabled:
+        rw, rs, re_, rn = radius_bbox_lonlat  # type: ignore[misc]
     for state_dir in sorted(extract_root.iterdir(), key=lambda p: p.name.lower()):
         if not state_dir.is_dir():
             continue
@@ -1096,9 +1141,22 @@ def build_final_dted_zip(
             if not item.is_file():
                 continue
             arcname = item.relative_to(state_dir)
-            entries.append((item, arcname.as_posix()))
+            arc_posix = arcname.as_posix()
+            if radius_filter_enabled:
+                cell = _dted_cell_bounds_from_arcname(arc_posix)
+                if cell is not None:
+                    cw, cs, ce, cn = cell
+                    if not _bbox_overlaps(cw, cs, ce, cn, rw, rs, re_, rn):
+                        filtered_out += 1
+                        continue
+            entries.append((item, arc_posix))
 
     _log(f"Building final ATAK zip: {final_zip_path} ({len(entries)} files)")
+    if radius_filter_enabled:
+        _log(
+            "DTED radius clip applied: "
+            f"kept {len(entries)} file(s), filtered {filtered_out} outside radius bbox."
+        )
 
     nf = len(entries)
     with zipfile.ZipFile(final_zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=5) as zf:
@@ -1118,6 +1176,7 @@ def run_dted_inline_for_states(
     log_sink: Callable[[str], None],
     progress: object,
     local_state_zip_root: Optional[Path] = None,
+    radius_bbox_lonlat: Optional[Tuple[float, float, float, float]] = None,
 ) -> Optional[Path]:
     """
     Download DTED state ZIPs for the given states into upload_dir, same server/layout as the DTED app.
@@ -1258,7 +1317,13 @@ def run_dted_inline_for_states(
             set_overall(fr, f"{int(fr * 100)}% · packing {cur} / {tot}")
 
         progress.set_status("DTED: building dted2.zip…")
-        build_final_dted_zip(extract_root, final_zip_path, log_fn=log_sink, on_packed=on_packed)
+        build_final_dted_zip(
+            extract_root,
+            final_zip_path,
+            log_fn=log_sink,
+            on_packed=on_packed,
+            radius_bbox_lonlat=radius_bbox_lonlat,
+        )
         set_overall(base_b + _DTED_W_BUILD, f"{int((base_b + _DTED_W_BUILD) * 100)}% · finishing…")
 
         # Write a sidecar listing which states are in this zip so the

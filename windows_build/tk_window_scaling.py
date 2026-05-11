@@ -276,6 +276,33 @@ def ensure_window_stacking(
     except tk.TclError:
         return
 
+    # Track pulse timers per toplevel so stale callbacks do not survive teardown.
+    registry = getattr(top, "_atak_nudge_after_ids", None)
+    if registry is None:
+        registry = []
+        setattr(top, "_atak_nudge_after_ids", registry)
+
+        def _clear_nudges_on_destroy(_evt: object = None) -> None:
+            ids = getattr(top, "_atak_nudge_after_ids", [])
+            for aid in list(ids):
+                try:
+                    top.after_cancel(aid)
+                except (tk.TclError, ValueError):
+                    pass
+            ids.clear()
+
+        try:
+            top.bind("<Destroy>", _clear_nudges_on_destroy, add="+")
+        except tk.TclError:
+            pass
+    else:
+        for aid in list(registry):
+            try:
+                top.after_cancel(aid)
+            except (tk.TclError, ValueError):
+                pass
+        registry.clear()
+
     _PULSE_INTERVAL_MS = 100
     _PULSE_DURATION_MS = 3000
     _pulses = [0]
@@ -296,7 +323,8 @@ def ensure_window_stacking(
 
         _pulses[0] += _PULSE_INTERVAL_MS
         if persistent_topmost or _pulses[0] < _PULSE_DURATION_MS:
-            top.after(_PULSE_INTERVAL_MS, _pulse)
+            aid = top.after(_PULSE_INTERVAL_MS, _pulse)
+            registry.append(aid)
         else:
             try:
                 top.attributes("-topmost", False)

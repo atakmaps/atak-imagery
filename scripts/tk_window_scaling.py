@@ -277,6 +277,34 @@ def ensure_window_stacking(
     except tk.TclError:
         return
 
+    # Track nudge timers per toplevel so stale callbacks do not survive teardown.
+    registry = getattr(top, "_atak_nudge_after_ids", None)
+    if registry is None:
+        registry = []
+        setattr(top, "_atak_nudge_after_ids", registry)
+
+        def _clear_nudges_on_destroy(_evt: object = None) -> None:
+            ids = getattr(top, "_atak_nudge_after_ids", [])
+            for aid in list(ids):
+                try:
+                    top.after_cancel(aid)
+                except (tk.TclError, ValueError):
+                    pass
+            ids.clear()
+
+        try:
+            top.bind("<Destroy>", _clear_nudges_on_destroy, add="+")
+        except tk.TclError:
+            pass
+    else:
+        # Cancel any prior stacking nudges for this same toplevel before scheduling new ones.
+        for aid in list(registry):
+            try:
+                top.after_cancel(aid)
+            except (tk.TclError, ValueError):
+                pass
+        registry.clear()
+
     # Three quick nudges spaced 150 ms apart to beat WM restack timing without
     # visible flashing. focus_force() is intentionally omitted — it caused the
     # rapid-pulse appearance reported by the user.
@@ -298,9 +326,11 @@ def ensure_window_stacking(
 
         _nudge_count[0] += 1
         if persistent_topmost:
-            top.after(5000, _nudge)
+            aid = top.after(5000, _nudge)
+            registry.append(aid)
         elif _nudge_count[0] < _MAX_NUDGES:
-            top.after(150, _nudge)
+            aid = top.after(150, _nudge)
+            registry.append(aid)
         else:
             try:
                 top.attributes("-topmost", False)

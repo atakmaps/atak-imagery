@@ -2563,6 +2563,7 @@ def run_download(
     radius_center: Optional[Tuple[float, float]] = None,
     radius_miles: Optional[float] = None,
     radius_region_folder: Optional[str] = None,
+    preloaded_states: Optional[Dict[str, List[List[Tuple[float, float]]]]] = None,
     refresh_addons_after: bool = True,
 ) -> None:
     stats = {"downloaded": 0, "existing": 0, "failed": 0, "missing": 0}
@@ -2665,8 +2666,13 @@ def run_download(
                     plan.append((radius_folder, z, x, y, out_path))
         else:
             progress.set_status("Loading state boundaries...")
-            geojson_path = bundled_state_geojson_path()
-            states = load_states(geojson_path)
+            if preloaded_states is not None:
+                states = preloaded_states
+                geojson_path = STATE_GEOJSON_PATH
+                log(f"Using pre-loaded state boundaries ({len(states)} states)")
+            else:
+                geojson_path = bundled_state_geojson_path()
+                states = load_states(geojson_path)
 
             state_names = []
             for state_name in selected_states:
@@ -2746,8 +2752,12 @@ def run_download(
 
         if radius_mode:
             progress.set_status("Resolving states for DTED…")
+            if preloaded_states is not None:
+                states_for_dted = preloaded_states
+            else:
+                states_for_dted = load_states(bundled_state_geojson_path())
             dted_state_list = state_names_intersecting_geodesic_circle(
-                lat, lon, miles, load_states(bundled_state_geojson_path())
+                lat, lon, miles, states_for_dted
             )
             log(
                 "DTED: full state package(s) for states overlapping the radius "
@@ -3220,6 +3230,9 @@ def main() -> None:
                         log("Cancelled at output folder prompt.")
                         return
 
+                    _geo = bundled_state_geojson_path()
+                    _preloaded = load_states(_geo)
+
                     progress = ProgressWindow(LOGGER.log_file)
                     pump_gui_logs(progress)
                     worker = threading.Thread(
@@ -3236,6 +3249,7 @@ def main() -> None:
                             "local_dted_root": dted_path,
                             "radius_center": None,
                             "radius_miles": None,
+                            "preloaded_states": _preloaded,
                             "refresh_addons_after": do_addons,
                         },
                         daemon=True,
@@ -3302,6 +3316,9 @@ def main() -> None:
                         log("Cancelled at output folder prompt.")
                         return
 
+                    _geo = bundled_state_geojson_path()
+                    _preloaded = load_states(_geo)
+
                     progress = ProgressWindow(LOGGER.log_file)
                     pump_gui_logs(progress)
                     worker = threading.Thread(
@@ -3313,6 +3330,7 @@ def main() -> None:
                             "radius_center": (rd.center_lat, rd.center_lon),
                             "radius_miles": rd.radius_miles,
                             "radius_region_folder": scope_dlg.radius_region_folder,
+                            "preloaded_states": _preloaded,
                             "refresh_addons_after": do_addons,
                         },
                         daemon=True,

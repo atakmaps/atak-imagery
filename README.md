@@ -55,11 +55,17 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.3.20` (tag **`v1.3.20`** on GitHub).
+**Linux / source release:** `v1.3.21` (tag **`v1.3.21`** on GitHub).
 
 **Windows:** A new Windows packaged build is **not** included in this cycle. **Use Windows release `2.8`** until a newer Windows installer is published. Source copies under `windows_build/` include the same startup behaviors when run with Python.
 
-Version **1.3.20** highlights:
+Version **1.3.21** highlights:
+
+- **Radius stability fixes:** avoided `Tcl_AsyncDelete` crashes by moving radius DTED state-geometry resolution to preloaded main-thread state data.
+- **Cancelable tile planning:** cancel now interrupts state tile-plan computation while planning is still running.
+- **Radius DTED clip:** radius runs now clip DTED packaging to radius-overlapping DTED cells instead of packing whole-state extracts.
+
+### Previous release (v1.3.20)
 
 - **Foreground dialog behavior:** “Calculating coverage”, download summary, and directory picker dialogs now stay on top instead of opening behind other windows.
 - **Add-ons refresh-only bug fix:** when no bundled add-ons are present, the downloader now reports “nothing to refresh” and completes cleanly instead of showing an error.
