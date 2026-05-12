@@ -382,24 +382,37 @@ class _DownloadState:
         self.completed = 0
 
 
-def _extract_tile_plan_caches_from_linux_zip(zip_path: Path, repo_root: Path) -> int:
+def _extract_bundled_data_assets_from_linux_zip(zip_path: Path, repo_root: Path) -> int:
     """
-    Extract only tile-plan cache files from the Linux install zip into the installed tree.
-    Returns number of files extracted.
+    Refresh bundled downloader data assets from the Linux install zip into the installed tree:
+    - tile plan caches (*.tiles.gz)
+    - mobile xml/kmz/zip add-ons
+    - bundled plugin APKs
+    Returns number of extracted files.
     """
-    target_dir = repo_root / "scripts" / "data" / "tile_plans" / "v1"
-    target_dir.mkdir(parents=True, exist_ok=True)
-    prefix = "atak-imagery/scripts/data/tile_plans/v1/"
+    scripts_data = repo_root / "scripts" / "data"
+    scripts_data.mkdir(parents=True, exist_ok=True)
     count = 0
     with zipfile.ZipFile(zip_path, "r") as zf:
         for info in zf.infolist():
             name = info.filename
-            if not name.startswith(prefix) or not name.endswith(".tiles.gz"):
+            if not name.startswith("atak-imagery/scripts/data/"):
                 continue
-            rel = name[len(prefix) :]
-            if not rel or "/" in rel:
+            rel = name[len("atak-imagery/scripts/data/") :]
+            if not rel or rel.endswith("/"):
                 continue
-            out_path = target_dir / rel
+            lower = rel.lower()
+            allowed = (
+                lower.startswith("tile_plans/v1/") and lower.endswith(".tiles.gz")
+            ) or (
+                lower.startswith("mobile_xml/") and lower.endswith((".xml", ".kmz", ".zip"))
+            ) or (
+                lower.startswith("bundled_plugins/") and lower.endswith(".apk")
+            )
+            if not allowed:
+                continue
+            out_path = scripts_data / rel
+            out_path.parent.mkdir(parents=True, exist_ok=True)
             with zf.open(info, "r") as src, out_path.open("wb") as dst:
                 dst.write(src.read())
             count += 1
@@ -448,7 +461,7 @@ def _worker_download_and_apply(
                 zip_bytes = _gh_get(linux_zip_url, timeout=120)
                 release_zip = tmp / "release_linux_install.zip"
                 release_zip.write_bytes(zip_bytes)
-                _extract_tile_plan_caches_from_linux_zip(release_zip, repo_root)
+                _extract_bundled_data_assets_from_linux_zip(release_zip, repo_root)
                 dl_state.completed += 1
 
             # Apply — replace scripts in place
@@ -588,7 +601,10 @@ def run_startup_release_update_check(*, app_title: str, script_path: Path) -> No
             body += notes + "\n\n"
         body += "Update now? The scripts will be replaced and the app will restart automatically."
         if check_state.linux_zip_url:
-            body += "\n\nThis update will also refresh bundled tile-plan cache files (*.tiles.gz)."
+            body += (
+                "\n\nThis update will also refresh bundled downloader data assets "
+                "(tile-plan caches, map/import add-ons, and plugin APKs)."
+            )
 
         _lift()
         if not messagebox.askyesno(app_title, body, parent=root):

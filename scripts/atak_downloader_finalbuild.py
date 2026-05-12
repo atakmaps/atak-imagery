@@ -3102,13 +3102,34 @@ def run_download(
 
                     now_t = time.time()
 
-                    if completed >= 8 and total > completed and tile_time_samples:
+                    remaining_tiles = max(0, total - completed)
+                    raw_eta_tile: Optional[float] = None
+                    raw_eta_net: Optional[float] = None
+
+                    if completed >= 8 and remaining_tiles > 0 and tile_time_samples:
                         seconds_per_tile = sum(tile_time_samples) / len(tile_time_samples)
-                        raw_eta = (seconds_per_tile * (total - completed)) * 1.08
-                    elif total > completed:
-                        raw_eta = None
+                        raw_eta_tile = (seconds_per_tile * remaining_tiles) * 1.08
+
+                    downloaded_count = int(stats.get("downloaded", 0))
+                    if (
+                        remaining_tiles > 0
+                        and downloaded_count >= 20
+                        and downloaded_bytes > 0
+                        and smoothed_speed_bps > 1.0
+                    ):
+                        # Use observed outcome ratio to estimate how many remaining tiles
+                        # will likely require network transfer (vs local-existing/missing).
+                        download_ratio = downloaded_count / max(1, completed)
+                        expected_download_tiles = remaining_tiles * min(1.0, max(0.0, download_ratio))
+                        avg_bytes_per_download = downloaded_bytes / max(1, downloaded_count)
+                        expected_remaining_bytes = expected_download_tiles * avg_bytes_per_download
+                        raw_eta_net = expected_remaining_bytes / max(smoothed_speed_bps, 1.0)
+
+                    if remaining_tiles <= 0:
+                        raw_eta = 0.0
                     else:
-                        raw_eta = 0
+                        eta_candidates = [v for v in (raw_eta_tile, raw_eta_net) if v is not None and v >= 0]
+                        raw_eta = max(eta_candidates) if eta_candidates else None
 
                     if raw_eta is None:
                         eta_to_show = None

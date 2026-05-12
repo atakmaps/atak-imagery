@@ -23,12 +23,11 @@ import math
 import multiprocessing
 import os
 import struct
-import threading
 import time
 import zlib
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from pathlib import Path
-from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
+from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
 
 # Miles beyond the GeoJSON boundary to keep imagery for (edge tiles + visibility).
 STATE_BOUNDARY_BUFFER_MILES = 3.0
@@ -452,15 +451,9 @@ def _compute_tiles_rect_band(
         float,
         List[List[Tuple[float, float]]],
         int,
-        Optional[Any],
-        Optional[Any],
     ],
 ) -> List[Tuple[int, int]]:
-    """Picklable worker: qualifying (x, y) inside inclusive [x_lo,x_hi]×[y_lo,y_hi].
-
-    When ``cells_arr`` / ``tiles_arr`` are shared ``Array('Q', n_bands)``, the worker
-    writes ``cells_arr[band_idx]`` / ``tiles_arr[band_idx]`` periodically for progress.
-    """
+    """Picklable worker: qualifying (x, y) inside inclusive [x_lo,x_hi]×[y_lo,y_hi]."""
     (
         x_lo,
         x_hi,
@@ -470,27 +463,13 @@ def _compute_tiles_rect_band(
         boundary_buffer_m,
         rings,
         band_idx,
-        cells_arr,
-        tiles_arr,
     ) = args
     tiles: List[Tuple[int, int]] = []
-    cells = 0
-    q = 0
-    flush_every = 16_384
     for x in range(x_lo, x_hi + 1):
         for y in range(y_lo, y_hi + 1):
-            cells += 1
             lon, lat = tile_center_lonlat(x, y, zoom)
             if tile_qualifies(lon, lat, rings, boundary_buffer_m):
                 tiles.append((x, y))
-                q += 1
-            if cells_arr is not None and tiles_arr is not None and (cells % flush_every == 0):
-                cells_arr[band_idx] = cells
-                tiles_arr[band_idx] = q
-    if cells_arr is not None:
-        cells_arr[band_idx] = cells
-    if tiles_arr is not None:
-        tiles_arr[band_idx] = q
     return tiles
 
 
@@ -551,58 +530,53 @@ def _compute_tiles_for_state(
                 for bi, (ya, yb) in enumerate(bands)
             ]
         n_bands = len(args_list)
+        band_cells = [(a[1] - a[0] + 1) * (a[3] - a[2] + 1) for a in args_list]
         job_t0 = time.perf_counter()
         ctx = multiprocessing.get_context("spawn")
         tiles_acc: List[Tuple[int, int]] = []
-        poll_stop: Optional[threading.Event] = None
-        poll_thread: Optional[threading.Thread] = None
-        prog_cells: Optional[Any] = None
-        prog_tiles: Optional[Any] = None
-        if scan_progress_interval_s > 0 and scan_progress_callback is not None:
-            prog_cells = multiprocessing.Array("Q", n_bands)  # type: ignore[call-arg]
-            prog_tiles = multiprocessing.Array("Q", n_bands)  # type: ignore[call-arg]
-            args_list = [(*a[:7], a[7], prog_cells, prog_tiles) for a in args_list]
-            poll_stop = threading.Event()
-
-            def _poll_loop() -> None:
-                assert prog_cells is not None and prog_tiles is not None
-                while not poll_stop.wait(timeout=max(0.05, float(scan_progress_interval_s))):
-                    c = int(sum(int(prog_cells[i]) for i in range(n_bands)))
-                    t = int(sum(int(prog_tiles[i]) for i in range(n_bands)))
-                    scan_progress_callback(c, rect_total, t, time.perf_counter() - job_t0)
-
-            poll_thread = threading.Thread(target=_poll_loop, daemon=True)
-            poll_thread.start()
         results: List[Optional[List[Tuple[int, int]]]] = [None] * n_bands
+        completed_cells = 0
+        last_scan_cb_t = job_t0
+        wait_timeout = 30.0
+        if scan_progress_callback is not None and scan_progress_interval_s > 0:
+            wait_timeout = max(0.2, float(scan_progress_interval_s))
         try:
             with ProcessPoolExecutor(max_workers=n_bands, mp_context=ctx) as ex:
                 futures = {ex.submit(_compute_tiles_rect_band, a): i for i, a in enumerate(args_list)}
                 bands_done = 0
                 pending = set(futures)
                 while pending:
-                    done, pending = wait(pending, timeout=30.0, return_when=FIRST_COMPLETED)
+                    done, pending = wait(pending, timeout=wait_timeout, return_when=FIRST_COMPLETED)
                     for fut in done:
                         idx = futures[fut]
                         results[idx] = fut.result()
+                        completed_cells += band_cells[idx]
                         bands_done += 1
                     if parallel_band_done is not None:
                         tiles_so_far = sum(len(r) for r in results if r is not None)
                         parallel_band_done(
                             bands_done, n_bands, tiles_so_far, time.perf_counter() - job_t0
                         )
+                    if scan_progress_callback is not None and scan_progress_interval_s > 0:
+                        now = time.perf_counter()
+                        if now - last_scan_cb_t >= scan_progress_interval_s:
+                            tiles_so_far = sum(len(r) for r in results if r is not None)
+                            scan_progress_callback(
+                                completed_cells,
+                                rect_total,
+                                tiles_so_far,
+                                now - job_t0,
+                            )
+                            last_scan_cb_t = now
         finally:
-            if poll_stop is not None:
-                poll_stop.set()
-            if poll_thread is not None:
-                poll_thread.join(timeout=2.0)
-        if (
-            scan_progress_callback is not None
-            and prog_cells is not None
-            and prog_tiles is not None
-        ):
-            c_fin = int(sum(int(prog_cells[i]) for i in range(n_bands)))
-            t_fin = int(sum(int(prog_tiles[i]) for i in range(n_bands)))
-            scan_progress_callback(c_fin, rect_total, t_fin, time.perf_counter() - job_t0)
+            pass
+        if scan_progress_callback is not None and scan_progress_interval_s > 0:
+            scan_progress_callback(
+                rect_total,
+                rect_total,
+                sum(len(r) for r in results if r is not None),
+                time.perf_counter() - job_t0,
+            )
         for part in results:
             if part:
                 tiles_acc.extend(part)
