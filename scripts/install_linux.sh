@@ -222,6 +222,16 @@ fi
 append_deploy_env_defaults
 echo "  deploy.env: default ATAK manifest + plugin GitHub repo (edit or override env if you fork)."
 
+tile_plan_dir="$ROOT/scripts/data/tile_plans/v1"
+mkdir -p "$tile_plan_dir"
+tile_plan_count="$(find "$tile_plan_dir" -maxdepth 1 -type f -name '*.tiles.gz' | wc -l | tr -d '[:space:]')"
+if [ "${tile_plan_count:-0}" -gt 0 ]; then
+    echo "  Tile-plan caches bundled: $tile_plan_count file(s) in $tile_plan_dir"
+else
+    echo "  WARNING: no tile-plan caches found in $tile_plan_dir"
+    echo "           Downloader will still work but may recompute tile plans."
+fi
+
 echo "[5/7] Creating runtime launchers..."
 cat > "$LAUNCHER" <<LAUNCHER_EOF
 #!/usr/bin/env bash

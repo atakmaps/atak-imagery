@@ -18,6 +18,7 @@ import sys
 import threading
 import urllib.request
 import webbrowser
+import zipfile
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -323,7 +324,15 @@ def _gh_get(url: str, timeout: int = 15) -> bytes:
 
 
 class _ReleaseCheckState:
-    __slots__ = ("done", "error", "update_available", "remote_version", "release_body")
+    __slots__ = (
+        "done",
+        "error",
+        "update_available",
+        "remote_version",
+        "release_body",
+        "linux_zip_url",
+        "linux_zip_name",
+    )
 
     def __init__(self) -> None:
         self.done = threading.Event()
@@ -331,6 +340,8 @@ class _ReleaseCheckState:
         self.update_available = False
         self.remote_version = ""
         self.release_body = ""
+        self.linux_zip_url = ""
+        self.linux_zip_name = ""
 
 
 def _worker_check_github_release(local_version: str, state: _ReleaseCheckState) -> None:
@@ -341,6 +352,17 @@ def _worker_check_github_release(local_version: str, state: _ReleaseCheckState) 
             return
         state.remote_version = tag.lstrip("v")
         state.release_body = (data.get("body") or "").strip()
+        assets = data.get("assets") or []
+        for asset in assets:
+            name = str(asset.get("name") or "")
+            if not name.endswith("-linux-install.zip"):
+                continue
+            url = str(asset.get("browser_download_url") or "")
+            if not url:
+                continue
+            state.linux_zip_name = name
+            state.linux_zip_url = url
+            break
         if _parse_semver(tag) > _parse_semver(local_version):
             state.update_available = True
     except Exception as exc:
@@ -360,9 +382,35 @@ class _DownloadState:
         self.completed = 0
 
 
+def _extract_tile_plan_caches_from_linux_zip(zip_path: Path, repo_root: Path) -> int:
+    """
+    Extract only tile-plan cache files from the Linux install zip into the installed tree.
+    Returns number of files extracted.
+    """
+    target_dir = repo_root / "scripts" / "data" / "tile_plans" / "v1"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "atak-imagery/scripts/data/tile_plans/v1/"
+    count = 0
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        for info in zf.infolist():
+            name = info.filename
+            if not name.startswith(prefix) or not name.endswith(".tiles.gz"):
+                continue
+            rel = name[len(prefix) :]
+            if not rel or "/" in rel:
+                continue
+            out_path = target_dir / rel
+            with zf.open(info, "r") as src, out_path.open("wb") as dst:
+                dst.write(src.read())
+            count += 1
+    return count
+
+
 def _worker_download_and_apply(
     scripts_dir: Path,
     repo_root: Path,
+    linux_zip_url: str,
+    linux_zip_name: str,
     dl_state: _DownloadState,
 ) -> None:
     """Download all scripts/*.py files + VERSION from main branch and replace in place."""
@@ -373,7 +421,8 @@ def _worker_download_and_apply(
         # Get file list for scripts/
         entries = json.loads(_gh_get(f"{_GH_CONTENTS_API}/scripts", timeout=15))
         py_files = [e for e in entries if e.get("type") == "file" and e["name"].endswith(".py")]
-        dl_state.total = len(py_files) + 1  # +1 for VERSION
+        # +1 for VERSION, +1 optional linux zip tile-plan cache extraction step.
+        dl_state.total = len(py_files) + 1 + (1 if linux_zip_url else 0)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
@@ -392,6 +441,15 @@ def _worker_download_and_apply(
             version_content = _gh_get(f"{_GH_RAW}/VERSION", timeout=15)
             (tmp / "VERSION").write_bytes(version_content)
             dl_state.completed += 1
+
+            # Download latest release linux zip and refresh tile-plan caches if available.
+            if linux_zip_url:
+                dl_state.current_file = linux_zip_name or "linux-install.zip"
+                zip_bytes = _gh_get(linux_zip_url, timeout=120)
+                release_zip = tmp / "release_linux_install.zip"
+                release_zip.write_bytes(zip_bytes)
+                _extract_tile_plan_caches_from_linux_zip(release_zip, repo_root)
+                dl_state.completed += 1
 
             # Apply — replace scripts in place
             for entry in py_files:
@@ -459,7 +517,13 @@ def run_startup_release_update_check(*, app_title: str, script_path: Path) -> No
         dl_state = _DownloadState(total=1)
         threading.Thread(
             target=_worker_download_and_apply,
-            args=(scripts_dir, repo_root, dl_state),
+            args=(
+                scripts_dir,
+                repo_root,
+                check_state.linux_zip_url,
+                check_state.linux_zip_name,
+                dl_state,
+            ),
             daemon=True,
         ).start()
 
@@ -523,6 +587,8 @@ def run_startup_release_update_check(*, app_title: str, script_path: Path) -> No
         if notes:
             body += notes + "\n\n"
         body += "Update now? The scripts will be replaced and the app will restart automatically."
+        if check_state.linux_zip_url:
+            body += "\n\nThis update will also refresh bundled tile-plan cache files (*.tiles.gz)."
 
         _lift()
         if not messagebox.askyesno(app_title, body, parent=root):
