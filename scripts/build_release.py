@@ -27,6 +27,7 @@ EXCLUDE_DIRS = {
     "output",
     "installer-dist",
     "New Test",
+    "windows_build",
 }
 
 EXCLUDE_FILES = {
