@@ -55,11 +55,20 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.3.21` (tag **`v1.3.21`** on GitHub).
+**Linux / source release:** `v1.3.26` (tag **`v1.3.26`** on GitHub).
 
 **Windows:** A new Windows packaged build is **not** included in this cycle. **Use Windows release `2.8`** until a newer Windows installer is published. Source copies under `windows_build/` include the same startup behaviors when run with Python.
 
-Version **1.3.21** highlights:
+Version **1.3.26** highlights:
+
+- **Installer plugin-only crash hardening:** plugin install step now runs on the Tk main thread to avoid cross-thread Tk callback crashes seen on some Linux systems/devices.
+- **Stability in step-5 transition:** removes worker-thread UI scheduling in the plugin-only path that could abort around “Installing plugin” before install logs appeared.
+
+### Previous release (v1.3.25)
+
+- **Packaging hygiene:** Linux release bundling excludes `windows_build/` content from linux-install assets.
+
+### Previous release (v1.3.21)
 
 - **Radius stability fixes:** avoided `Tcl_AsyncDelete` crashes by moving radius DTED state-geometry resolution to preloaded main-thread state data.
 - **Cancelable tile planning:** cancel now interrupts state tile-plan computation while planning is still running.
