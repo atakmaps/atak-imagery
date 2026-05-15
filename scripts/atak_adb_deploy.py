@@ -1380,12 +1380,6 @@ class DeployWizard(tk.Tk):
             self.progress.start(8)
             self.update_idletasks()
 
-            try:
-                launch_atak(ser)
-                time.sleep(15.0)
-            except Exception:
-                log("launch_atak before plugin install failed")
-
             manifest = self._manifest_cache
             if manifest is None:
                 if self.manifest_url:
@@ -1398,23 +1392,32 @@ class DeployWizard(tk.Tk):
             self._plugin_apk_temp = apk_path if is_temp else None
             self._plugin_report_label = report_label
 
+            if self._install_choice == "both":
+                # Keep ATAK closed while installing bundled add-ons so only UV-PRO
+                # triggers the in-app "load plugin" notification.
+                try:
+                    run_adb(["shell", "am", "force-stop", atak_package_name()], serial=ser or None, timeout=30)
+                except Exception:
+                    log("force-stop ATAK before bundled add-on install failed")
+                install_bundled_addon_apks(ser, log, ui_install)
+
             if self._install_choice == "plugin":
                 # Plugin-only flow: force a clean slate before install to avoid
                 # version/signature mismatch from prior UV-PRO installs.
                 uninstall_package(ser, DEFAULT_PLUGIN_PACKAGE, ui_install, require_absent=True)
-                try:
-                    launch_atak(ser)
-                    time.sleep(15.0)
-                except Exception:
-                    log("launch_atak after plugin uninstall failed")
+
+            try:
+                launch_atak(ser)
+                time.sleep(15.0)
+            except Exception:
+                log("launch_atak before UV-PRO install failed")
+
             install_apk(
                 self.selected_serial,
                 apk_path,
                 ui_install,
                 package_name=DEFAULT_PLUGIN_PACKAGE,
             )
-            if self._install_choice == "both":
-                install_bundled_addon_apks(ser, log, ui_install)
 
             if self.report_url:
                 safe_post_report(
