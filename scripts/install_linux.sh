@@ -289,6 +289,30 @@ StartupNotify=true
     fi
 }
 
+cleanup_legacy_shortcuts() {
+    local app_dir desktop_dir dir f base
+    app_dir="$HOME/.local/share/applications"
+    desktop_dir="$HOME/Desktop"
+
+    for dir in "$app_dir" "$desktop_dir"; do
+        [ -d "$dir" ] || continue
+        for f in "$dir"/*.desktop; do
+            [ -f "$f" ] || continue
+            base="$(basename "$f")"
+            case "$base" in
+                "$DESKTOP_FILE_NAME"|"$DESKTOP_FILE_NAME_DEVICE")
+                    continue
+                    ;;
+            esac
+
+            # Remove old ATAK pipeline shortcuts from prior installer naming.
+            if grep -q "run_atak_pipeline" "$f" 2>/dev/null; then
+                rm -f "$f"
+            fi
+        done
+    done
+}
+
 # Remove the extracted bundle after install (app lives in INSTALL_ROOT). Safe: cd out first.
 maybe_remove_source_extract() {
     if [ "$SOURCE_ROOT" = "$INSTALL_ROOT" ]; then
@@ -347,6 +371,7 @@ maybe_remove_source_extract() {
 REMOVED_SOURCE_EXTRACT=0
 
 echo "[6/7] Creating desktop shortcuts..."
+cleanup_legacy_shortcuts
 write_desktop_shortcut "$DESKTOP_FILE_NAME" "$APP_NAME" "Download maps and build packages for ATAK" \
     "/bin/bash -lc 'cd \"$ROOT\" && nohup \"$ROOT/run_atak_pipeline.sh\" >/tmp/atak_pipeline_launcher.log 2>&1 &'"
 write_desktop_shortcut "$DESKTOP_FILE_NAME_DEVICE" "$APP_NAME_DEVICE" "Install ATAK and plugin on Android, then run the map pipeline" \

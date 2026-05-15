@@ -55,11 +55,16 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.3.27` (tag **`v1.3.27`** on GitHub).
+**Linux / source release:** `v1.3.28` (tag **`v1.3.28`** on GitHub).
 
 **Windows:** A new Windows packaged build is **not** included in this cycle. **Use Windows release `2.8`** until a newer Windows installer is published. Source copies under `windows_build/` include the same startup behaviors when run with Python.
 
-Version **1.3.27** highlights:
+Version **1.3.28** highlights:
+
+- **Linux desktop shortcut cleanup:** installer now removes legacy ATAK pipeline `.desktop` launchers before writing current shortcuts.
+- **Expected launcher behavior restored:** rerunning installer now leaves only `ATAK Device Installer` and `ATAK Imagery Downloader`.
+
+### Previous release (v1.3.27)
 
 - **Installer plugin sequencing fix:** in ATAK + UV-PRO mode, bundled add-on plugins now install while ATAK is closed so they do not all trigger load prompts.
 - **UV-PRO notification targeting:** installer now launches ATAK, waits 15 seconds, then installs UV-PRO last so only UV-PRO prompts to load in-app.
