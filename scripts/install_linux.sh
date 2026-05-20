@@ -143,6 +143,9 @@ append_deploy_env_defaults() {
     if ! grep -qE "^[[:space:]]*ATAK_PLUGIN_GITHUB_REPO=" "$f" 2>/dev/null; then
         echo "ATAK_PLUGIN_GITHUB_REPO=$ATAK_BUNDLE_PLUGIN_REPO" >> "$f"
     fi
+    if ! grep -qE "^[[:space:]]*ATAK_ADDON_PLUGIN_GITHUB_REPO=" "$f" 2>/dev/null; then
+        echo "ATAK_ADDON_PLUGIN_GITHUB_REPO=atakmaps/atak-imagery" >> "$f"
+    fi
 }
 
 echo "[1/7] Install location: $INSTALL_ROOT"
@@ -325,6 +328,12 @@ cat > "$LAUNCHER" <<LAUNCHER_EOF
 set -euo pipefail
 ROOT="$ROOT"
 cd "\$ROOT"
+if [ -f "\$ROOT/deploy.env" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "\$ROOT/deploy.env"
+  set +a
+fi
 exec "\$ROOT/.venv/bin/python" "\$ROOT/scripts/atak_downloader_finalbuild.py"
 LAUNCHER_EOF
 

@@ -51,12 +51,8 @@ Configuration (environment variables — in ``deploy.env`` at the project root):
   Alternatively, add optional plugin_apk_url to the manifest JSON (lowest priority
   among network/manifest sources after the above).
 
-  **Bundled add-on plugins:** ``scripts/data/bundled_plugins/`` may contain additional
-  ``.apk`` files (shipped inside the release zip / PyInstaller bundle). They are installed
-  over adb after the appropriate step. **TAK-UV-PRO** is never taken from this folder —
-  it always comes from GitHub Releases / manifest / env so you always get the latest.
-  Sync ``bundled_plugins`` from ``…/Plugins/Add Ons for Build/`` before building (see
-  project handoff / Cursor rule).
+  Additional bundled add-on plugins are not installed by this Device Installer.
+  Those plugin installs are handled by the Imagery Downloader flow.
 
   ATAK_PACKAGE_NAME — ATAK applicationId to install/launch (default
     com.atakmap.app.civ).
@@ -88,8 +84,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
-
-from bundled_plugin_install import install_bundled_addon_apks as _install_bundled_addon_apks_core
 
 try:
     import tkinter as tk
@@ -586,17 +580,6 @@ def install_apk(serial: str, apk_path: Path, status_cb=None, *, package_name: Op
         raise RuntimeError(f"adb install failed:\n{(r.stderr or r.stdout).strip()}")
 
 
-def install_bundled_addon_apks(serial: str, log_fn, status_cb=None) -> None:
-    """Install add-on plugin APKs bundled under ``scripts/data/bundled_plugins/`` (non-fatal per file)."""
-    _install_bundled_addon_apks_core(
-        serial,
-        log_fn,
-        status_cb,
-        install_apk,
-        plugin_root=SCRIPT_DIR / "data" / "bundled_plugins",
-    )
-
-
 def _device_rejects_allow_downgrade_flag(combined: str) -> bool:
     """True if device's ``pm install`` failed because ``--allow-downgrade`` is unsupported."""
     if not combined:
@@ -616,7 +599,7 @@ def push_mobile_xml(serial: str, log_fn=None) -> None:
     Routing by extension (bundled: scripts/data/mobile_xml/ — rsync from
     /home/paul/Documents/ATAK/Plugins/Add Ons for Build/ before every build; see HANDOFF):
       .xml          → MOBILE_XML_DEVICE_PATH  (/sdcard/atak/imagery/mobile/mapsources)
-      .kmz / .zip   → MOBILE_IMPORT_DEVICE_PATH (/sdcard/atak/tools/import)
+      .kml / .kmz / .zip   → MOBILE_IMPORT_DEVICE_PATH (/sdcard/atak/tools/import)
     """
     if not MOBILE_XML_DIR.is_dir():
         if log_fn:
@@ -624,7 +607,11 @@ def push_mobile_xml(serial: str, log_fn=None) -> None:
         return
 
     xml_files = sorted(MOBILE_XML_DIR.rglob("*.xml"))
-    import_files = sorted(MOBILE_XML_DIR.rglob("*.kmz")) + sorted(MOBILE_XML_DIR.rglob("*.zip"))
+    import_files = (
+        sorted(MOBILE_XML_DIR.rglob("*.kml"))
+        + sorted(MOBILE_XML_DIR.rglob("*.kmz"))
+        + sorted(MOBILE_XML_DIR.rglob("*.zip"))
+    )
     dest_map: dict[str, list] = {
         MOBILE_XML_DEVICE_PATH: xml_files,
         MOBILE_IMPORT_DEVICE_PATH: import_files,
@@ -1328,8 +1315,6 @@ class DeployWizard(tk.Tk):
             self.update_idletasks()
             install_apk(self.selected_serial, apk_path, ui_install)
             push_mobile_xml(self.selected_serial or "", log)
-            if self._install_choice == "atak":
-                install_bundled_addon_apks(self.selected_serial or "", log, ui_install)
 
             if is_temp:
                 try:
@@ -1393,15 +1378,6 @@ class DeployWizard(tk.Tk):
             apk_path, report_label, is_temp = resolve_plugin_apk(manifest, self._resolve_url_base())
             self._plugin_apk_temp = apk_path if is_temp else None
             self._plugin_report_label = report_label
-
-            if self._install_choice == "both":
-                # Keep ATAK closed while installing bundled add-ons so only UV-PRO
-                # triggers the in-app "load plugin" notification.
-                try:
-                    run_adb(["shell", "am", "force-stop", atak_package_name()], serial=ser or None, timeout=30)
-                except Exception:
-                    log("force-stop ATAK before bundled add-on install failed")
-                install_bundled_addon_apks(ser, log, ui_install)
 
             if self._install_choice == "plugin":
                 # Plugin-only flow: force a clean slate before install to avoid

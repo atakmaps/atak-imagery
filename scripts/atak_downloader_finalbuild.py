@@ -17,7 +17,7 @@ ATAK USGS Orthophoto Downloader (shared core)
 - Zenity folder picker on Linux with Tk fallback
 - Progress bar during download
 - Safe re-run: skips tiles that already exist
-- After download: pushes bundled map/import files (`data/mobile_xml/`) and installs bundled add-on plugin APKs (`data/bundled_plugins/`) when adb serial is set (same payloads as the Device Installer).
+- After download: pushes map/import files (`data/mobile_xml/`) and installs add-on plugin APKs sourced from release assets (with local fallback) when adb serial is set.
 
 Output structure:
     <selected parent>/Imagery/<state or radius name>/zoom/x/y.jpg
@@ -112,6 +112,10 @@ STATE_GEOJSON_PATH = DATA_DIR / "us_states.geojson"
 TILE_PLAN_DIR = DATA_DIR / "tile_plans" / "v1"
 MOBILE_ASSET_DIR = DATA_DIR / "mobile_xml"
 BUNDLED_PLUGIN_DIR = DATA_DIR / "bundled_plugins"
+ADDON_PLUGIN_ASSET_CACHE_DIR = RUNTIME_STATE_DIR / ".addon_plugin_asset_cache"
+ADDON_PLUGIN_GITHUB_REPO = (os.environ.get("ATAK_ADDON_PLUGIN_GITHUB_REPO") or "atakmaps/atak-imagery").strip()
+ADDON_PLUGIN_RELEASE_TAG = (os.environ.get("ATAK_ADDON_PLUGIN_RELEASE_TAG") or "").strip()
+ADDON_PLUGIN_APK_URLS = (os.environ.get("ATAK_ADDON_PLUGIN_APK_URLS") or "").strip()
 MOBILE_XML_DEVICE_PATH = "/sdcard/atak/imagery/mobile/mapsources"
 MOBILE_IMPORT_DEVICE_PATH = "/sdcard/atak/tools/import"
 MOBILE_OVERLAY_DEVICE_PATH = "/sdcard/Download"
@@ -132,10 +136,7 @@ from imagery_tile_selection import (  # noqa: E402
 # Load on the main thread only: first-importing ``atak_adb_deploy`` from the download worker
 # pulls in tkinter on a background thread and can abort with Tcl_AsyncDelete on Linux/X11.
 from atak_adb_deploy import install_apk  # noqa: E402
-from bundled_plugin_install import (  # noqa: E402
-    install_bundled_addon_apks as install_bundled_addon_plugins,
-    iter_bundled_addon_apks,
-)
+from bundled_plugin_install import iter_bundled_addon_apks  # noqa: E402
 
 
 def sanitize_radius_imagery_folder_name(raw: str) -> str:
@@ -401,11 +402,13 @@ def _shell_single_quote(value: str) -> str:
 
 def _mobile_asset_targets() -> List[Tuple[Path, str]]:
     xml_files = sorted(MOBILE_ASSET_DIR.rglob("*.xml"))
+    kml_files = sorted(MOBILE_ASSET_DIR.rglob("*.kml"))
     kmz_files = sorted(MOBILE_ASSET_DIR.rglob("*.kmz"))
     zip_files = sorted(MOBILE_ASSET_DIR.rglob("*.zip"))
     out: List[Tuple[Path, str]] = []
     out.extend((f, MOBILE_XML_DEVICE_PATH) for f in xml_files)
-    # Put KMZ/ZIP in Download for manual ATAK import.
+    # Put KML/KMZ/ZIP in Download for manual ATAK import.
+    out.extend((f, MOBILE_OVERLAY_DEVICE_PATH) for f in kml_files)
     out.extend((f, MOBILE_OVERLAY_DEVICE_PATH) for f in kmz_files)
     out.extend((f, MOBILE_OVERLAY_DEVICE_PATH) for f in zip_files)
     return out
@@ -419,6 +422,113 @@ def _format_asset_label_for_display(src: Path, device_dir: str) -> str:
         if device_dir == MOBILE_OVERLAY_DEVICE_PATH:
             return f"{src.name} (from ZIP contents) -> {device_dir}"
         return f"{src.name} -> {device_dir}"
+
+
+def _is_uvpro_apk_filename(name: str) -> bool:
+    compact = name.lower().replace("_", "").replace("-", "").replace(" ", "")
+    return "uvpro" in compact or "takuvpro" in compact
+
+
+def _download_addon_apk_file(url: str, dest: Path) -> Path:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    session = requests.Session()
+    session.headers.update({"User-Agent": USER_AGENT})
+    with session.get(url, timeout=120, stream=True) as r:
+        r.raise_for_status()
+        with open(tmp, "wb") as f:
+            for chunk in r.iter_content(chunk_size=1024 * 256):
+                if chunk:
+                    f.write(chunk)
+    tmp.replace(dest)
+    return dest
+
+
+def _addon_plugin_paths_from_github_assets(log_sink: Callable[[str], None]) -> List[Path]:
+    owner_repo = ADDON_PLUGIN_GITHUB_REPO.strip()
+    if not owner_repo:
+        return []
+    if owner_repo.count("/") != 1:
+        log_sink(f"Warning: ATAK_ADDON_PLUGIN_GITHUB_REPO must be owner/repo, got {owner_repo!r}")
+        return []
+
+    owner, repo = owner_repo.split("/", 1)
+    if ADDON_PLUGIN_RELEASE_TAG:
+        api = f"https://api.github.com/repos/{owner}/{repo}/releases/tags/{ADDON_PLUGIN_RELEASE_TAG}"
+    else:
+        api = f"https://api.github.com/repos/{owner}/{repo}/releases/latest"
+
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": USER_AGENT}
+    token = (os.environ.get("GITHUB_TOKEN") or os.environ.get("ATAK_GITHUB_TOKEN") or "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    r = requests.get(api, headers=headers, timeout=30)
+    r.raise_for_status()
+    payload = r.json() or {}
+    tag = str(payload.get("tag_name") or "latest")
+    assets = payload.get("assets") or []
+    apk_assets = []
+    for a in assets:
+        name = str(a.get("name") or "")
+        dl = str(a.get("browser_download_url") or "")
+        if not name.lower().endswith(".apk"):
+            continue
+        if _is_uvpro_apk_filename(name):
+            continue
+        if not dl.startswith("http://") and not dl.startswith("https://"):
+            continue
+        apk_assets.append((name, dl))
+    if not apk_assets:
+        return []
+
+    release_cache = ADDON_PLUGIN_ASSET_CACHE_DIR / f"{owner}_{repo}_{tag}"
+    out: List[Path] = []
+    for name, dl in apk_assets:
+        dest = release_cache / name
+        if not dest.is_file():
+            log_sink(f"Downloading add-on plugin asset: {name}")
+            _download_addon_apk_file(dl, dest)
+        out.append(dest)
+    return out
+
+
+def _resolve_addon_plugin_apks(log_sink: Callable[[str], None]) -> List[Path]:
+    if ADDON_PLUGIN_APK_URLS:
+        urls = [u.strip() for u in ADDON_PLUGIN_APK_URLS.split(",") if u.strip()]
+        out: List[Path] = []
+        custom_cache = ADDON_PLUGIN_ASSET_CACHE_DIR / "custom_urls"
+        for i, url in enumerate(urls, 1):
+            filename = Path(url.split("?", 1)[0]).name or f"addon_{i}.apk"
+            if not filename.lower().endswith(".apk") or _is_uvpro_apk_filename(filename):
+                continue
+            dest = custom_cache / filename
+            if not dest.is_file():
+                log_sink(f"Downloading add-on plugin URL: {filename}")
+                _download_addon_apk_file(url, dest)
+            out.append(dest)
+        if out:
+            return out
+
+    try:
+        apks = _addon_plugin_paths_from_github_assets(log_sink)
+        if apks:
+            return apks
+    except Exception as exc:
+        log_sink(f"Warning: could not fetch add-on plugin assets from GitHub release: {exc}")
+
+    # Backward-compatible fallback for older local builds.
+    local_apks = iter_bundled_addon_apks(BUNDLED_PLUGIN_DIR)
+    if local_apks:
+        log_sink("Using local bundled add-on plugin APKs (legacy fallback).")
+    return local_apks
+
+
+def _plugin_label_for_display(apk: Path) -> str:
+    try:
+        return str(apk.relative_to(BUNDLED_PLUGIN_DIR))
+    except Exception:
+        return apk.name
 
 
 def _adb_device_file_exists(serial: str, device_path: str) -> bool:
@@ -471,6 +581,7 @@ def _extract_apk_package_name(apk_path: Path) -> Optional[str]:
 
 def _build_missing_addons_plan(
     serial: str,
+    plugin_apks: List[Path],
 ) -> Tuple[List[Tuple[Path, str]], List[Path], List[str]]:
     missing_assets: List[Tuple[Path, str]] = []
     missing_plugins: List[Path] = []
@@ -483,9 +594,9 @@ def _build_missing_addons_plan(
             display_items.append(f"Add-on file: {_format_asset_label_for_display(src, device_dir)}")
 
     installed_pkgs = _installed_plugin_package_names(serial)
-    for apk in iter_bundled_addon_apks(BUNDLED_PLUGIN_DIR):
+    for apk in plugin_apks:
         package_name = _extract_apk_package_name(apk)
-        rel = apk.relative_to(BUNDLED_PLUGIN_DIR)
+        rel = _plugin_label_for_display(apk)
         if package_name:
             if package_name not in installed_pkgs:
                 missing_plugins.append(apk)
@@ -559,7 +670,7 @@ def _install_selected_plugin_apks(
         return
     log_sink(f"Installing {len(plugin_apks)} missing bundled add-on plugin(s)…")
     for apk in plugin_apks:
-        rel = apk.relative_to(BUNDLED_PLUGIN_DIR)
+        rel = _plugin_label_for_display(apk)
         progress.set_status(f"Add-on: {apk.name}…")
         log_sink(f"Installing bundled add-on: {rel}")
         install_apk(serial, apk, progress.set_status, package_name=None)
@@ -830,10 +941,11 @@ ADDONS_PRE_DOWNLOAD_DONE_TEXT = (
 
 
 def bundled_addons_available() -> bool:
-    """True if we ship files under data/mobile_xml or data/bundled_plugins to deploy over adb."""
+    """True if map/import add-ons or any add-on plugin source is configured."""
     if MOBILE_ASSET_DIR.is_dir():
         if (
             any(MOBILE_ASSET_DIR.rglob("*.xml"))
+            or any(MOBILE_ASSET_DIR.rglob("*.kml"))
             or any(MOBILE_ASSET_DIR.rglob("*.kmz"))
             or any(MOBILE_ASSET_DIR.rglob("*.zip"))
         ):
@@ -841,6 +953,10 @@ def bundled_addons_available() -> bool:
     if BUNDLED_PLUGIN_DIR.is_dir():
         if iter_bundled_addon_apks(BUNDLED_PLUGIN_DIR):
             return True
+    if ADDON_PLUGIN_APK_URLS.strip():
+        return True
+    if ADDON_PLUGIN_GITHUB_REPO.strip():
+        return True
     return False
 
 
@@ -943,7 +1059,7 @@ def _resolve_adb_serial_for_push() -> Tuple[str, List[str]]:
 
 
 def deploy_bundled_addons_to_device(progress: Any, log_sink: Callable[[str], None]) -> None:
-    """Push data/mobile_xml assets and install data/bundled_plugins APKs when adb target is available."""
+    """Push data/mobile_xml assets and install add-on plugin APKs when adb target is available."""
     if not bundled_addons_available():
         log_sink("No bundled map/import or plugin add-ons in this install — skipping device push.")
         return
@@ -973,14 +1089,9 @@ def deploy_bundled_addons_to_device(progress: Any, log_sink: Callable[[str], Non
         log_sink(f"Warning: mobile asset push failed — {exc}")
     _await_cancel_scheduled_after_on_main(progress)
     try:
-
-        def ui_addon(msg: str) -> None:
-            progress.set_status(msg)
-
+        plugin_apks = _resolve_addon_plugin_apks(log_sink)
         progress.set_status("Installing bundled add-on plugins…")
-        install_bundled_addon_plugins(
-            ser_resolved, log_sink, ui_addon, install_apk, plugin_root=BUNDLED_PLUGIN_DIR
-        )
+        _install_selected_plugin_apks(ser_resolved, plugin_apks, progress, log_sink)
     except Exception as exc:
         log_sink(f"Warning: bundled add-on plugin install failed — {exc}")
 
@@ -1009,7 +1120,8 @@ def _refresh_addons_only_for_device(
 
     _force_stop_atak(ser_resolved, log_sink)
     progress.set_status("Checking existing add-ons on device…")
-    missing_assets, missing_plugins, missing_display = _build_missing_addons_plan(ser_resolved)
+    plugin_apks = _resolve_addon_plugin_apks(log_sink)
+    missing_assets, missing_plugins, missing_display = _build_missing_addons_plan(ser_resolved, plugin_apks)
     if not missing_display:
         log_sink("Device already has all required add-ons.")
         if addons_only:
@@ -1043,8 +1155,8 @@ def run_refresh_addons_only(progress: Any) -> None:
         progress.wait_if_paused()
         if not bundled_addons_available():
             msg = (
-                "No bundled add-ons found under data/mobile_xml or data/bundled_plugins "
-                "in this install. Nothing to refresh."
+                "No add-ons configured (mobile XML/KMZ/ZIP or add-on plugin asset source). "
+                "Nothing to refresh."
             )
             log(msg)
             progress.completion_log_summary = "Add-ons refresh skipped — no bundled add-ons in this build."
