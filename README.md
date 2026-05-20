@@ -55,11 +55,16 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.3.30` (tag **`v1.3.30`** on GitHub).
+**Linux / source release:** `v1.3.31` (tag **`v1.3.31`** on GitHub).
 
 **Windows:** A new Windows packaged build is **not** included in this cycle. **Use Windows release `2.8`** until a newer Windows installer is published. Source copies under `windows_build/` include the same startup behaviors when run with Python.
 
-Version **1.3.30** highlights:
+Version **1.3.31** highlights:
+
+- **Installer step-3 crash hardening:** ATAK install flow now runs entirely on the Tk main thread, removing worker-thread Tk callback usage in this step.
+- **Tcl stability fix:** reduces `Tcl_AsyncDelete: async handler deleted by the wrong thread` crashes reported immediately after entering step 3 (“Installing ATAK”).
+
+### Previous release (v1.3.30)
 
 - **SSL-safe Python selection:** installer now selects a Python interpreter with working `ssl` + `venv` support (prefers `/usr/bin/python3`) to avoid broken custom PATH Python builds.
 - **Desktop icon reliability:** installer now resolves the desktop folder using `xdg-user-dir DESKTOP` and writes launchers there, improving icon creation on systems that do not use `~/Desktop`.
