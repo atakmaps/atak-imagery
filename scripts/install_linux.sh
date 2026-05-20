@@ -35,6 +35,36 @@ apt_pkg_available() {
     apt-cache show "$1" >/dev/null 2>&1
 }
 
+python_supports_ssl_and_venv() {
+    local py="$1"
+    "$py" -c "import ssl, venv" >/dev/null 2>&1
+}
+
+select_install_python() {
+    # Prefer distro python first; avoid custom python3 builds without SSL.
+    local candidate
+    for candidate in /usr/bin/python3 python3; do
+        if command -v "$candidate" >/dev/null 2>&1 && python_supports_ssl_and_venv "$candidate"; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+resolve_desktop_dir() {
+    local d=""
+    if command -v xdg-user-dir >/dev/null 2>&1; then
+        d="$(xdg-user-dir DESKTOP 2>/dev/null || true)"
+        # Guard against odd outputs like literal "$HOME" or empty strings.
+        if [ -n "$d" ] && [ "$d" != "$HOME" ] && [ "$d" != "\$HOME" ]; then
+            printf '%s\n' "$d"
+            return 0
+        fi
+    fi
+    printf '%s\n' "$HOME/Desktop"
+}
+
 rpm_installed() {
     rpm -q "$1" &>/dev/null
 }
@@ -130,7 +160,11 @@ if command -v apt >/dev/null 2>&1; then
         sudo apt-get install -y python3
     fi
 
-    PY_VER="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+    PY_DISCOVER="python3"
+    if [ -x "/usr/bin/python3" ]; then
+        PY_DISCOVER="/usr/bin/python3"
+    fi
+    PY_VER="$("$PY_DISCOVER" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
     apt_pkgs=(python3 python3-pip python3-tk zenity adb rsync)
     # Some systems run a newer python3 than apt provides versioned -venv for
     # (for example python3.13 from external sources). Prefer versioned when
@@ -220,28 +254,43 @@ else
     exit 1
 fi
 
+INSTALL_PYTHON="$(select_install_python || true)"
+if [ -z "${INSTALL_PYTHON:-}" ]; then
+    echo "ERROR: No python3 interpreter with working ssl+venv was found."
+    echo "       The current default python may be a custom build without SSL."
+    echo "       Install distro python packages, then rerun:"
+    echo "         sudo apt-get install -y python3 python3-venv python3-pip"
+    exit 1
+fi
+echo "  Using Python interpreter: $INSTALL_PYTHON"
+
 venv_python="$VENV_DIR/bin/python"
 venv_created=0
 
 echo "[3/7] Virtual environment in install directory..."
 
 if [ -x "$venv_python" ]; then
-    if "$venv_python" -c "import geopandas, shapely, rasterio, numpy, requests" &>/dev/null; then
+    if "$venv_python" -c "import ssl, geopandas, shapely, rasterio, numpy, requests" &>/dev/null; then
         echo "  Reusing existing .venv (imports OK)."
     else
         echo "  Existing .venv is incomplete; recreating..."
         rm -rf "$VENV_DIR"
-        python3 -m venv "$VENV_DIR"
+        "$INSTALL_PYTHON" -m venv "$VENV_DIR"
         venv_created=1
     fi
 else
     echo "  Creating new .venv..."
     rm -rf "$VENV_DIR"
-    python3 -m venv "$VENV_DIR"
+    "$INSTALL_PYTHON" -m venv "$VENV_DIR"
     venv_created=1
 fi
 
 echo "[4/7] Python dependencies (requirements.txt)..."
+if ! "$VENV_DIR/bin/python" -c "import ssl" >/dev/null 2>&1; then
+    echo "ERROR: Created virtualenv Python has no SSL module; cannot install from PyPI."
+    echo "       Ensure distro python3 is installed and first in use, then rerun installer."
+    exit 1
+fi
 if [ "$venv_created" -eq 1 ]; then
     "$VENV_DIR/bin/python" -m pip install --upgrade pip
     "$VENV_DIR/bin/pip" install -r "$ROOT/requirements.txt"
@@ -301,6 +350,9 @@ DEVICE_LAUNCHER_EOF
 
 chmod +x "$DEVICE_LAUNCHER"
 
+DESKTOP_DIR="$(resolve_desktop_dir)"
+mkdir -p "$DESKTOP_DIR"
+
 write_desktop_shortcut() {
     local file_name="$1"
     local name="$2"
@@ -321,16 +373,14 @@ StartupNotify=true
     printf '%s\n' "$content" > "$HOME/.local/share/applications/$file_name"
     chmod +x "$HOME/.local/share/applications/$file_name"
 
-    if [ -d "$HOME/Desktop" ]; then
-        printf '%s\n' "$content" > "$HOME/Desktop/$file_name"
-        chmod +x "$HOME/Desktop/$file_name"
-    fi
+    printf '%s\n' "$content" > "$DESKTOP_DIR/$file_name"
+    chmod +x "$DESKTOP_DIR/$file_name"
 }
 
 cleanup_legacy_shortcuts() {
     local app_dir desktop_dir dir f base
     app_dir="$HOME/.local/share/applications"
-    desktop_dir="$HOME/Desktop"
+    desktop_dir="$DESKTOP_DIR"
 
     for dir in "$app_dir" "$desktop_dir"; do
         [ -d "$dir" ] || continue
