@@ -31,6 +31,10 @@ deb_installed() {
     [[ "$st" == *"ok installed"* ]]
 }
 
+apt_pkg_available() {
+    apt-cache show "$1" >/dev/null 2>&1
+}
+
 rpm_installed() {
     rpm -q "$1" &>/dev/null
 }
@@ -127,7 +131,18 @@ if command -v apt >/dev/null 2>&1; then
     fi
 
     PY_VER="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
-    apt_pkgs=(python3 python3-pip python3-tk zenity adb rsync "python${PY_VER}-venv")
+    apt_pkgs=(python3 python3-pip python3-tk zenity adb rsync)
+    # Some systems run a newer python3 than apt provides versioned -venv for
+    # (for example python3.13 from external sources). Prefer versioned when
+    # available, otherwise fall back to generic python3-venv.
+    if apt_pkg_available "python${PY_VER}-venv"; then
+        apt_pkgs+=("python${PY_VER}-venv")
+    elif apt_pkg_available "python3-venv"; then
+        apt_pkgs+=("python3-venv")
+    else
+        echo "  WARNING: no apt venv package found for python${PY_VER} (tried python${PY_VER}-venv and python3-venv)."
+        echo "           Continuing; if venv creation fails, install python3-venv manually for your distro."
+    fi
     apt_missing=()
     for pkg in "${apt_pkgs[@]}"; do
         if ! deb_installed "$pkg"; then
@@ -138,7 +153,30 @@ if command -v apt >/dev/null 2>&1; then
     if [ ${#apt_missing[@]} -gt 0 ]; then
         echo "  Installing: ${apt_missing[*]}"
         sudo apt-get update -qq
-        sudo apt-get install -y "${apt_missing[@]}"
+        if ! sudo apt-get install -y "${apt_missing[@]}"; then
+            # Defensive fallback for mixed Python environments where a
+            # version-specific pythonX.Y-venv package is unavailable.
+            local_retry=()
+            for pkg in "${apt_missing[@]}"; do
+                case "$pkg" in
+                    python*-venv)
+                        ;;
+                    *)
+                        local_retry+=("$pkg")
+                        ;;
+                esac
+            done
+            if ! deb_installed python3-venv; then
+                local_retry+=("python3-venv")
+            fi
+            if [ ${#local_retry[@]} -gt 0 ]; then
+                echo "  Retrying apt install with fallback package set: ${local_retry[*]}"
+                sudo apt-get install -y "${local_retry[@]}"
+            else
+                echo "  apt install failed and no fallback package set available."
+                exit 1
+            fi
+        fi
     else
         echo "  All apt packages already present; skipping."
     fi
