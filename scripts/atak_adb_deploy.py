@@ -1308,51 +1308,53 @@ class DeployWizard(tk.Tk):
                     pass
 
     def _begin_install_atak(self) -> None:
-        def work() -> None:
-            err: List[Optional[Exception]] = [None]
+        err: Optional[Exception] = None
+        try:
+            base = self._resolve_url_base()
+            if self._inline_atak_manifest:
+                manifest = self._inline_atak_manifest
+            else:
+                manifest = fetch_manifest(self.manifest_url)
+            self._manifest_cache = manifest
+            apk_path, version, is_temp = resolve_atak_apk(manifest, base)
+            self._atak_apk_temp = apk_path if is_temp else None
+            self._atak_version_value = str(version)
+
+            def ui_install(msg: str) -> None:
+                self.status.configure(text=msg)
+                self.update_idletasks()
+
+            self.progress.start(8)
+            self.update_idletasks()
+            install_apk(self.selected_serial, apk_path, ui_install)
+            push_mobile_xml(self.selected_serial or "", log)
+            if self._install_choice == "atak":
+                install_bundled_addon_apks(self.selected_serial or "", log, ui_install)
+
+            if is_temp:
+                try:
+                    apk_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            self._atak_apk_temp = None
+            if self.report_url:
+                safe_post_report(
+                    self.report_url,
+                    env_optional("ATAK_DEPLOY_API_TOKEN") or None,
+                    self._atak_version_value,
+                    "",
+                    self.selected_serial or "",
+                    "atak_installed",
+                )
+        except Exception as e:
+            err = e
+            log(traceback.format_exc())
+        finally:
             try:
-                base = self._resolve_url_base()
-                if self._inline_atak_manifest:
-                    manifest = self._inline_atak_manifest
-                else:
-                    manifest = fetch_manifest(self.manifest_url)
-                self.after(0, lambda m=manifest: setattr(self, "_manifest_cache", m))
-                apk_path, version, is_temp = resolve_atak_apk(manifest, base)
-                self._atak_apk_temp = apk_path if is_temp else None
-                self._atak_version_value = str(version)
-
-                def ui_install(msg: str) -> None:
-                    self.after(0, lambda m=msg: self.status.configure(text=m))
-
-                self.after(0, self.progress.start, 8)
-                install_apk(self.selected_serial, apk_path, ui_install)
-                push_mobile_xml(self.selected_serial or "", log)
-                if self._install_choice == "atak":
-                    install_bundled_addon_apks(self.selected_serial or "", log, ui_install)
-
-                self.after(0, self.progress.stop)
-                if is_temp:
-                    try:
-                        apk_path.unlink(missing_ok=True)
-                    except Exception:
-                        pass
-                self._atak_apk_temp = None
-                if self.report_url:
-                    safe_post_report(
-                        self.report_url,
-                        env_optional("ATAK_DEPLOY_API_TOKEN") or None,
-                        self._atak_version_value,
-                        "",
-                        self.selected_serial or "",
-                        "atak_installed",
-                    )
-            except Exception as e:
-                err[0] = e
-                log(traceback.format_exc())
-            finally:
-                self.after(0, lambda: self._after_install_atak(err[0]))
-
-        threading.Thread(target=work, daemon=True).start()
+                self.progress.stop()
+            except Exception:
+                pass
+            self._after_install_atak(err)
 
     def _after_install_atak(self, err: Optional[Exception]) -> None:
         if err:
