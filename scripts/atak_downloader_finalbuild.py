@@ -429,17 +429,47 @@ def _is_uvpro_apk_filename(name: str) -> bool:
     return "uvpro" in compact or "takuvpro" in compact
 
 
-def _download_addon_apk_file(url: str, dest: Path) -> Path:
+def _download_addon_apk_file(
+    url: str,
+    dest: Path,
+    *,
+    progress_cb: Optional[Callable[[int, int], None]] = None,
+) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".part")
     session = requests.Session()
     session.headers.update({"User-Agent": USER_AGENT})
     with session.get(url, timeout=120, stream=True) as r:
         r.raise_for_status()
+        try:
+            total_bytes = int(r.headers.get("content-length") or 0)
+        except Exception:
+            total_bytes = 0
+        downloaded_bytes = 0
+        last_emit = 0.0
+        if progress_cb:
+            try:
+                progress_cb(0, total_bytes)
+            except Exception:
+                pass
         with open(tmp, "wb") as f:
-            for chunk in r.iter_content(chunk_size=1024 * 256):
+            for chunk in r.iter_content(chunk_size=1024 * 64):
                 if chunk:
                     f.write(chunk)
+                    downloaded_bytes += len(chunk)
+                    if progress_cb:
+                        now = time.monotonic()
+                        if (now - last_emit) >= 0.06:
+                            try:
+                                progress_cb(downloaded_bytes, total_bytes)
+                            except Exception:
+                                pass
+                            last_emit = now
+        if progress_cb:
+            try:
+                progress_cb(downloaded_bytes, total_bytes)
+            except Exception:
+                pass
     tmp.replace(dest)
     return dest
 
@@ -773,7 +803,12 @@ def push_mobile_assets(
         log_fn(f"Mobile assets pushed to device ({total} file copies).")
 
 
-def _ensure_plugin_row_apk(row: Dict[str, Any], log_sink: Callable[[str], None]) -> Optional[Path]:
+def _ensure_plugin_row_apk(
+    row: Dict[str, Any],
+    log_sink: Callable[[str], None],
+    *,
+    progress_cb: Optional[Callable[[int, int], None]] = None,
+) -> Optional[Path]:
     apk_path = row.get("apk_path")
     if isinstance(apk_path, Path) and apk_path.is_file():
         return apk_path
@@ -793,7 +828,7 @@ def _ensure_plugin_row_apk(row: Dict[str, Any], log_sink: Callable[[str], None])
     else:
         dest = ADDON_PLUGIN_ASSET_CACHE_DIR / "runtime" / name
     log_sink(f"Downloading selected add-on plugin: {name}")
-    downloaded = _download_addon_apk_file(url, dest)
+    downloaded = _download_addon_apk_file(url, dest, progress_cb=progress_cb)
     row["apk_path"] = downloaded
     try:
         row["size_bytes"] = int(downloaded.stat().st_size)
@@ -817,6 +852,7 @@ def _install_selected_plugin_apks(
     log_sink: Callable[[str], None],
     *,
     step_cb: Optional[Callable[[str], None]] = None,
+    download_progress_cb: Optional[Callable[[str, int, int], None]] = None,
 ) -> None:
     if not plugin_rows:
         log_sink("No bundled add-on plugins need install.")
@@ -824,17 +860,44 @@ def _install_selected_plugin_apks(
     log_sink(f"Installing {len(plugin_rows)} selected add-on plugin(s)…")
     for row in plugin_rows:
         had_local_apk = isinstance(row.get("apk_path"), Path) and row.get("apk_path").is_file()
+        row_name = str(row.get("name") or row.get("label") or "plugin.apk")
         if not had_local_apk and str(row.get("download_url") or "").strip():
-            progress.set_status(f"Downloading add-on: {row.get('name') or 'plugin.apk'}…")
-        apk = _ensure_plugin_row_apk(row, log_sink)
+            progress.set_status(f"Downloading add-on: {row_name}…")
+            if download_progress_cb:
+                try:
+                    hinted_total = int(row.get("size_bytes") or 0)
+                except Exception:
+                    hinted_total = 0
+                try:
+                    download_progress_cb(row_name, 0, max(0, hinted_total))
+                except Exception:
+                    pass
+        apk = _ensure_plugin_row_apk(
+            row,
+            log_sink,
+            progress_cb=(
+                (lambda done, total, name=row_name: download_progress_cb(name, done, total))
+                if download_progress_cb
+                else None
+            ),
+        )
         if apk is None:
-            log_sink(f"Warning: could not resolve APK for {row.get('name') or row.get('label')}")
+            log_sink(f"Warning: could not resolve APK for {row_name}")
             continue
         if not had_local_apk and step_cb:
             try:
                 step_cb(f"Downloaded {apk.name}")
             except Exception:
                 pass
+            if download_progress_cb:
+                try:
+                    file_size = int(apk.stat().st_size)
+                except Exception:
+                    file_size = 0
+                try:
+                    download_progress_cb(row_name, file_size, file_size)
+                except Exception:
+                    pass
         rel = _plugin_label_for_display(apk)
         progress.set_status(f"Add-on: {apk.name}…")
         log_sink(f"Installing bundled add-on: {rel}")
@@ -898,6 +961,36 @@ def _deploy_selected_addons_to_device(
     completed_steps = 0
     progress.set_progress(0, total_steps)
 
+    def _counter_detail(virtual_completed: float) -> str:
+        pct_f = (max(0.0, min(float(virtual_completed), float(total_steps))) / float(total_steps)) * 100.0
+        if total_steps >= 1000:
+            dec = 3
+        elif total_steps >= 100:
+            dec = 2
+        else:
+            dec = 1
+        return f"{int(completed_steps)} / {total_steps} add-on steps ({pct_f:.{dec}f}%)"
+
+    def _set_fraction_in_current_step(step_frac: float, counter_suffix: str = "") -> None:
+        frac_in_step = max(0.0, min(1.0, float(step_frac)))
+        virtual_completed = float(completed_steps) + frac_in_step
+        overall_frac = virtual_completed / float(total_steps)
+        detail = _counter_detail(virtual_completed)
+        if counter_suffix:
+            detail = f"{detail} | {counter_suffix}"
+        progress.set_progress_fraction(overall_frac, detail)
+
+    def _download_progress(name: str, downloaded: int, total: int) -> None:
+        if total > 0:
+            step_frac = max(0.0, min(1.0, float(downloaded) / float(total)))
+            suffix = f"Downloading {name} ({human_bytes(downloaded)} / {human_bytes(total)})"
+        else:
+            # Unknown content length (chunked transfer) — keep progress moving visually.
+            step_frac = 0.25
+            suffix = f"Downloading {name} ({human_bytes(max(0, downloaded))})"
+        _set_fraction_in_current_step(step_frac, suffix)
+        progress.set_status(f"Downloading add-on: {name}…")
+
     def _step_done(status: str) -> None:
         nonlocal completed_steps
         completed_steps += 1
@@ -913,7 +1006,14 @@ def _deploy_selected_addons_to_device(
     # Start with plugin installs first, then push map/import files.
     try:
         progress.set_status("Installing bundled add-on plugins…")
-        _install_selected_plugin_apks(serial, install_plugins, progress, log_sink, step_cb=_step_done)
+        _install_selected_plugin_apks(
+            serial,
+            install_plugins,
+            progress,
+            log_sink,
+            step_cb=_step_done,
+            download_progress_cb=_download_progress,
+        )
     except Exception as exc:
         log_sink(f"Warning: bundled add-on plugin install failed — {exc}")
 
@@ -1044,14 +1144,19 @@ def show_downloader_intro_and_verify_device() -> bool:
     return bool(proceed["ok"])
 
 
-def show_downloader_welcome() -> Tuple[bool, bool]:
-    """Return (do_maps, do_addons). User must pick at least one; Quit returns (False, False)."""
+def show_downloader_welcome() -> Tuple[bool, bool, str]:
+    """Return (do_maps, do_addons, exit_reason)."""
     root = tk.Tk()
     root.title(APP_TITLE)
     root.configure(cursor="arrow")
     root.update_idletasks()
     s = scale_factor(root)
-    state: Dict[str, Any] = {"maps": True, "addons": True, "accepted": False}
+    state: Dict[str, Any] = {
+        "maps": True,
+        "addons": True,
+        "accepted": False,
+        "exit_reason": "unknown",
+    }
 
     tk.Label(root, text="Welcome", font=("TkDefaultFont", 12, "bold")).pack(anchor="w", padx=16, pady=(16, 6))
     intro_lbl = tk.Label(
@@ -1087,6 +1192,12 @@ def show_downloader_welcome() -> Tuple[bool, bool]:
 
     def on_quit() -> None:
         state["accepted"] = False
+        state["exit_reason"] = "quit_button"
+        root.destroy()
+
+    def on_window_close() -> None:
+        state["accepted"] = False
+        state["exit_reason"] = "window_close"
         root.destroy()
 
     def on_continue() -> None:
@@ -1100,6 +1211,7 @@ def show_downloader_welcome() -> Tuple[bool, bool]:
             )
             return
         state["accepted"] = True
+        state["exit_reason"] = "continue"
         root.destroy()
 
     tk.Button(btn_row, text="Continue", width=12, command=on_continue).pack(side="left", padx=6)
@@ -1121,11 +1233,11 @@ def show_downloader_welcome() -> Tuple[bool, bool]:
     refit_toplevel_geometry(root, 520, 400)
     _sync_wrap()
 
-    root.protocol("WM_DELETE_WINDOW", on_quit)
+    root.protocol("WM_DELETE_WINDOW", on_window_close)
     root.mainloop()
     if not state["accepted"]:
-        return False, False
-    return bool(state["maps"]), bool(state["addons"])
+        return False, False, str(state.get("exit_reason") or "unknown")
+    return bool(state["maps"]), bool(state["addons"]), str(state.get("exit_reason") or "continue")
 
 
 DOWNLOADER_NEXT_SQLITE_DIALOG_TEXT = (
@@ -3879,16 +3991,31 @@ def pump_gui_logs(window: ProgressWindow) -> None:
 
 
 def main() -> None:
-    run_startup_git_update_check(app_title=APP_TITLE, script_path=Path(__file__).resolve())
-    run_startup_release_update_check(app_title=APP_TITLE, script_path=Path(__file__).resolve())
+    log("Startup: beginning git update check...")
+    try:
+        run_startup_git_update_check(app_title=APP_TITLE, script_path=Path(__file__).resolve())
+    except Exception as exc:
+        log(f"Startup warning: git update check failed: {exc}")
+        log(traceback.format_exc())
+    else:
+        log("Startup: git update check complete.")
+
+    log("Startup: beginning release update check...")
+    try:
+        run_startup_release_update_check(app_title=APP_TITLE, script_path=Path(__file__).resolve())
+    except Exception as exc:
+        log(f"Startup warning: release update check failed: {exc}")
+        log(traceback.format_exc())
+    else:
+        log("Startup: release update check complete.")
     log(f"Log file: {LOGGER.log_file}")
     zoom_payload = read_zoom_estimates_file()
     zoom_estimates = zoom_payload["states"]
     avg_tile_bytes_map = avg_tile_bytes_by_zoom(zoom_payload)
 
-    do_maps, do_addons = show_downloader_welcome()
+    do_maps, do_addons, welcome_exit_reason = show_downloader_welcome()
     if not do_maps and not do_addons:
-        log("Cancelled at welcome.")
+        log(f"Exited at welcome (reason={welcome_exit_reason}).")
         return
 
     from_installer = is_launched_from_device_installer()
@@ -4174,4 +4301,5 @@ if __name__ == "__main__":
     log(f"Python: {sys.version}")
     log(f"Working directory: {Path.cwd()}")
     log(f"Script directory: {Path(__file__).resolve().parent}")
+    log(f"Log file: {LOGGER.log_file}")
     main()

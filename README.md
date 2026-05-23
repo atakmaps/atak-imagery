@@ -55,11 +55,17 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.3.33` (tag **`v1.3.33`** on GitHub).
+**Linux / source release:** `v1.3.34` (tag **`v1.3.34`** on GitHub).
 
 **Windows:** A new Windows packaged build is **not** included in this cycle. **Use Windows release `2.8`** until a newer Windows installer is published. Source copies under `windows_build/` include the same startup behaviors when run with Python.
 
-Version **1.3.33** highlights:
+Version **1.3.34** highlights:
+
+- **Live add-on download progress:** plugin downloads now emit in-flight byte progress so large APK transfers visibly advance instead of appearing stuck.
+- **Startup diagnostics hardening:** startup update-check phases now log begin/complete and catch/log exceptions to avoid silent early exits.
+- **Welcome exit clarity:** welcome-screen exits now log explicit reason (`continue`, `quit_button`, `window_close`) instead of ambiguous cancel wording.
+
+### Previous release (v1.3.33)
 
 - **Plugin refresh UX update:** add-on plugin refresh now shows full plugin rows with `Remove` and `Install` columns, per-plugin size lines, and live totals for install/remove actions.
 - **Deferred plugin downloads:** plugin APKs are no longer downloaded before selection; download happens only for user-selected installs after confirmation.
