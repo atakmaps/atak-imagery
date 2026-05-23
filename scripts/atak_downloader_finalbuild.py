@@ -33,9 +33,11 @@ import queue
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import warnings
+import zipfile
 
 # Suppress the benign "leaked semaphore" warning from Python's resource_tracker
 # subprocess on hard exit (os._exit). The env var propagates to child processes;
@@ -56,7 +58,7 @@ from typing import Any, Callable, Dict, List, Set, Tuple, Optional
 
 import requests
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from git_update_check import run_startup_git_update_check, run_startup_release_update_check
 from tk_window_scaling import (
@@ -116,6 +118,17 @@ ADDON_PLUGIN_ASSET_CACHE_DIR = RUNTIME_STATE_DIR / ".addon_plugin_asset_cache"
 ADDON_PLUGIN_GITHUB_REPO = (os.environ.get("ATAK_ADDON_PLUGIN_GITHUB_REPO") or "atakmaps/atak-imagery").strip()
 ADDON_PLUGIN_RELEASE_TAG = (os.environ.get("ATAK_ADDON_PLUGIN_RELEASE_TAG") or "").strip()
 ADDON_PLUGIN_APK_URLS = (os.environ.get("ATAK_ADDON_PLUGIN_APK_URLS") or "").strip()
+PROTECTED_IMPORT_ASSET_CACHE_DIR = RUNTIME_STATE_DIR / ".protected_import_asset_cache"
+PROTECTED_IMPORT_GITHUB_REPO = (
+    (os.environ.get("ATAK_PROTECTED_IMPORT_GITHUB_REPO") or ADDON_PLUGIN_GITHUB_REPO or "atakmaps/atak-imagery")
+    .strip()
+)
+PROTECTED_IMPORT_RELEASE_TAG = (os.environ.get("ATAK_PROTECTED_IMPORT_RELEASE_TAG") or "").strip()
+PROTECTED_IMPORT_ASSET_NAMES = [
+    s.strip()
+    for s in (os.environ.get("ATAK_PROTECTED_IMPORT_ASSET_NAMES") or "AmRRON-Default-v1.0.csv.zip").split(",")
+    if s.strip()
+]
 MOBILE_XML_DEVICE_PATH = "/sdcard/atak/imagery/mobile/mapsources"
 MOBILE_IMPORT_DEVICE_PATH = "/sdcard/atak/tools/import"
 MOBILE_OVERLAY_DEVICE_PATH = "/sdcard/Download"
@@ -474,6 +487,51 @@ def _download_addon_apk_file(
     return dest
 
 
+def _download_file_with_progress(
+    url: str,
+    dest: Path,
+    *,
+    progress_cb: Optional[Callable[[int, int], None]] = None,
+) -> Path:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    session = requests.Session()
+    session.headers.update({"User-Agent": USER_AGENT})
+    with session.get(url, timeout=120, stream=True) as r:
+        r.raise_for_status()
+        try:
+            total_bytes = int(r.headers.get("content-length") or 0)
+        except Exception:
+            total_bytes = 0
+        downloaded_bytes = 0
+        last_emit = 0.0
+        if progress_cb:
+            try:
+                progress_cb(0, total_bytes)
+            except Exception:
+                pass
+        with open(tmp, "wb") as f:
+            for chunk in r.iter_content(chunk_size=1024 * 64):
+                if chunk:
+                    f.write(chunk)
+                    downloaded_bytes += len(chunk)
+                    if progress_cb:
+                        now = time.monotonic()
+                        if (now - last_emit) >= 0.06:
+                            try:
+                                progress_cb(downloaded_bytes, total_bytes)
+                            except Exception:
+                                pass
+                            last_emit = now
+        if progress_cb:
+            try:
+                progress_cb(downloaded_bytes, total_bytes)
+            except Exception:
+                pass
+    tmp.replace(dest)
+    return dest
+
+
 def _addon_package_cache_path() -> Path:
     return ADDON_PLUGIN_ASSET_CACHE_DIR / "package_names.json"
 
@@ -639,6 +697,79 @@ def _resolve_addon_plugin_apks(log_sink: Callable[[str], None]) -> List[Dict[str
             }
         )
     return out_local
+
+
+def _protected_import_plain_name(asset_name: str) -> str:
+    lower = asset_name.lower()
+    if lower.endswith(".zip"):
+        return Path(asset_name).stem
+    if lower.endswith(".enc"):
+        return Path(asset_name).stem
+    return Path(asset_name).name
+
+
+def _protected_import_asset_specs() -> List[Dict[str, str]]:
+    owner_repo = PROTECTED_IMPORT_GITHUB_REPO.strip()
+    if not owner_repo or owner_repo.count("/") != 1:
+        return []
+    owner, repo = owner_repo.split("/", 1)
+    specs: List[Dict[str, str]] = []
+    for asset_name in PROTECTED_IMPORT_ASSET_NAMES:
+        if PROTECTED_IMPORT_RELEASE_TAG:
+            url = f"https://github.com/{owner}/{repo}/releases/download/{PROTECTED_IMPORT_RELEASE_TAG}/{asset_name}"
+        else:
+            url = f"https://github.com/{owner}/{repo}/releases/latest/download/{asset_name}"
+        specs.append(
+            {
+                "asset_name": asset_name,
+                "plain_name": _protected_import_plain_name(asset_name),
+                "url": url,
+            }
+        )
+    return specs
+
+
+def _missing_protected_import_specs(serial: str) -> List[Dict[str, str]]:
+    out: List[Dict[str, str]] = []
+    for spec in _protected_import_asset_specs():
+        plain_name = spec.get("plain_name") or ""
+        if not plain_name:
+            continue
+        device_path = f"{MOBILE_IMPORT_DEVICE_PATH}/{plain_name}"
+        if _adb_device_file_exists(serial, device_path):
+            continue
+        out.append(spec)
+    return out
+
+
+def _prompt_protected_import_password(parent: tk.Misc) -> Optional[str]:
+    ensure_window_stacking(parent)
+    try:
+        pw = simpledialog.askstring(
+            APP_TITLE,
+            "Enter password to install protected import file(s):",
+            parent=parent,
+            show="*",
+        )
+    except Exception:
+        return None
+    if pw is None:
+        return None
+    pw = pw.strip()
+    return pw or None
+
+
+def _extract_password_zip_single(zip_path: Path, password: str, out_dir: Path) -> Path:
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        members = [i for i in zf.infolist() if not i.is_dir()]
+        if not members:
+            raise RuntimeError("encrypted asset zip is empty")
+        member = members[0]
+        out_name = Path(member.filename).name or "protected_import.csv"
+        out_path = out_dir / out_name
+        with zf.open(member, "r", pwd=password.encode("utf-8")) as src, open(out_path, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+        return out_path
 
 
 def _plugin_label_for_display(apk: Path) -> str:
@@ -946,6 +1077,7 @@ def _deploy_selected_addons_to_device(
     missing_assets: List[Tuple[Path, str]],
     install_plugins: List[Dict[str, Any]],
     remove_packages: List[str],
+    protected_import_specs: Optional[List[Dict[str, str]]] = None,
 ) -> None:
     def _plugin_needs_download(row: Dict[str, Any]) -> bool:
         apk = row.get("apk_path")
@@ -957,7 +1089,8 @@ def _deploy_selected_addons_to_device(
     download_total = sum(1 for row in install_plugins if _plugin_needs_download(row))
     install_total = len(install_plugins)
     push_total = len(missing_assets)
-    total_steps = max(1, remove_total + download_total + install_total + push_total)
+    protected_total = len(protected_import_specs or [])
+    total_steps = max(1, remove_total + download_total + install_total + push_total + protected_total)
     completed_steps = 0
     progress.set_progress(0, total_steps)
 
@@ -1026,7 +1159,89 @@ def _deploy_selected_addons_to_device(
     else:
         log_sink("No mobile XML/KMZ/ZIP files need push.")
 
+    try:
+        _install_protected_import_assets(
+            serial,
+            progress,
+            log_sink,
+            specs=protected_import_specs,
+            step_cb=_step_done,
+            download_progress_cb=_download_progress,
+        )
+    except Exception as exc:
+        log_sink(f"Warning: protected import install failed — {exc}")
+
     _await_cancel_scheduled_after_on_main(progress)
+
+
+def _install_protected_import_assets(
+    serial: str,
+    progress: Any,
+    log_sink: Callable[[str], None],
+    *,
+    specs: Optional[List[Dict[str, str]]] = None,
+    step_cb: Optional[Callable[[str], None]] = None,
+    download_progress_cb: Optional[Callable[[str, int, int], None]] = None,
+) -> None:
+    pending_specs = list(specs or _missing_protected_import_specs(serial))
+    if not pending_specs:
+        return
+
+    password = _prompt_protected_import_password(progress)
+    if not password:
+        log_sink("Protected import install skipped (no password entered).")
+        return
+
+    _run_adb(["shell", "mkdir", "-p", MOBILE_IMPORT_DEVICE_PATH], serial=serial, timeout=30)
+    for spec in pending_specs:
+        asset_name = spec.get("asset_name") or ""
+        plain_name = spec.get("plain_name") or ""
+        url = spec.get("url") or ""
+        if not asset_name or not plain_name or not url:
+            continue
+
+        progress.set_status(f"Downloading protected import: {plain_name}…")
+        if download_progress_cb:
+            try:
+                download_progress_cb(plain_name, 0, 0)
+            except Exception:
+                pass
+
+        enc_path = PROTECTED_IMPORT_ASSET_CACHE_DIR / asset_name
+        _download_file_with_progress(
+            url,
+            enc_path,
+            progress_cb=(
+                (lambda done, total, name=plain_name: download_progress_cb(name, done, total))
+                if download_progress_cb
+                else None
+            ),
+        )
+
+        with tempfile.TemporaryDirectory(prefix="atak_protected_import_") as td:
+            tmp_dir = Path(td)
+            try:
+                extracted = _extract_password_zip_single(enc_path, password, tmp_dir)
+            except RuntimeError:
+                log_sink(f"Protected import password incorrect for {plain_name}; file was not installed.")
+                return
+            except zipfile.BadZipFile:
+                log_sink(f"Protected import asset is not a valid zip: {asset_name}")
+                continue
+
+            device_target = f"{MOBILE_IMPORT_DEVICE_PATH}/{plain_name}"
+            progress.set_status(f"Installing protected import: {plain_name}…")
+            r = _run_adb(["push", str(extracted), device_target], serial=serial, timeout=120)
+            if r.returncode != 0:
+                msg = (r.stderr or r.stdout or "").strip()
+                log_sink(f"Warning: failed to push protected import {plain_name}: {msg or 'unknown error'}")
+                continue
+            log_sink(f"Installed protected import file: {plain_name}")
+            if step_cb:
+                try:
+                    step_cb(f"Installed protected import: {plain_name}")
+                except Exception:
+                    pass
 
 
 def verify_adb_device_for_imagery_downloader(parent: tk.Tk) -> Tuple[bool, Optional[str], str]:
@@ -1602,11 +1817,15 @@ def _refresh_addons_only_for_device(
     install_count = int(selected.get("install_count") or 0)
     remove_count = int(selected.get("remove_count") or len(remove_packages))
     install_bytes = int(selected.get("install_bytes") or 0)
+    protected_import_specs = _missing_protected_import_specs(ser_resolved)
+    protected_count = len(protected_import_specs)
     log_sink(
         f"{install_count} plugins to install, {remove_count} plugins to remove, "
         f"Total size = {_format_size_mb(install_bytes)}"
     )
-    if not missing_assets and not install_plugins and not remove_packages:
+    if protected_count:
+        log_sink(f"{protected_count} protected import file(s) pending install to {MOBILE_IMPORT_DEVICE_PATH}.")
+    if not missing_assets and not install_plugins and not remove_packages and not protected_import_specs:
         log_sink("Device already has all required add-ons.")
         if addons_only:
             progress.completion_log_summary = "Add-ons refresh skipped — device already current."
@@ -1621,6 +1840,7 @@ def _refresh_addons_only_for_device(
         missing_assets=missing_assets,
         install_plugins=install_plugins,
         remove_packages=remove_packages,
+        protected_import_specs=protected_import_specs,
     )
     if addons_only:
         progress.completion_log_summary = "Add-ons refresh complete."

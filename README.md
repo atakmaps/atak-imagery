@@ -55,11 +55,17 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.3.34` (tag **`v1.3.34`** on GitHub).
+**Linux / source release:** `v1.3.35` (tag **`v1.3.35`** on GitHub).
 
 **Windows:** A new Windows packaged build is **not** included in this cycle. **Use Windows release `2.8`** until a newer Windows installer is published. Source copies under `windows_build/` include the same startup behaviors when run with Python.
 
-Version **1.3.34** highlights:
+Version **1.3.35** highlights:
+
+- **Protected CSV import flow:** imagery downloader now supports password-protected release zip assets for import files and installs decrypted CSVs to `/sdcard/atak/tools/import`.
+- **No password in repo:** protected file install prompts user at runtime and validates by decrypting the encrypted asset, with no stored compare password in source.
+- **Protected import defaults:** includes default protected asset support for `AmRRON-Default-v1.0.csv.zip` via release assets.
+
+### Previous release (v1.3.34)
 
 - **Live add-on download progress:** plugin downloads now emit in-flight byte progress so large APK transfers visibly advance instead of appearing stuck.
 - **Startup diagnostics hardening:** startup update-check phases now log begin/complete and catch/log exceptions to avoid silent early exits.

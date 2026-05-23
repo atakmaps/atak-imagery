@@ -29,6 +29,7 @@ EXCLUDE_DIRS = {
     "New Test",
     "windows_build",
     ".addon_plugin_asset_cache",
+    ".protected_import_asset_cache",
 }
 
 EXCLUDE_FILES = {
