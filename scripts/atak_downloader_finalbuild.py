@@ -444,7 +444,36 @@ def _download_addon_apk_file(url: str, dest: Path) -> Path:
     return dest
 
 
-def _addon_plugin_paths_from_github_assets(log_sink: Callable[[str], None]) -> List[Path]:
+def _addon_package_cache_path() -> Path:
+    return ADDON_PLUGIN_ASSET_CACHE_DIR / "package_names.json"
+
+
+def _load_addon_package_cache() -> Dict[str, str]:
+    p = _addon_package_cache_path()
+    if not p.is_file():
+        return {}
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            return {str(k): str(v) for k, v in raw.items() if str(k).strip() and str(v).strip()}
+    except Exception:
+        pass
+    return {}
+
+
+def _save_addon_package_cache(cache: Dict[str, str]) -> None:
+    try:
+        ADDON_PLUGIN_ASSET_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        _addon_package_cache_path().write_text(json.dumps(cache, indent=2, sort_keys=True), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _addon_candidate_cache_key(name: str, url: str) -> str:
+    return f"{name}|{url}"
+
+
+def _addon_plugin_candidates_from_github_assets(log_sink: Callable[[str], None]) -> List[Dict[str, Any]]:
     owner_repo = ADDON_PLUGIN_GITHUB_REPO.strip()
     if not owner_repo:
         return []
@@ -468,52 +497,96 @@ def _addon_plugin_paths_from_github_assets(log_sink: Callable[[str], None]) -> L
     payload = r.json() or {}
     tag = str(payload.get("tag_name") or "latest")
     assets = payload.get("assets") or []
-    apk_assets = []
+    package_manifest_url = ""
+    apk_assets: List[Tuple[str, str, int]] = []
     for a in assets:
         name = str(a.get("name") or "")
         dl = str(a.get("browser_download_url") or "")
+        if name == "addon_plugin_packages.json" and dl.startswith(("http://", "https://")):
+            package_manifest_url = dl
+            continue
+        try:
+            size_bytes = int(a.get("size") or 0)
+        except Exception:
+            size_bytes = 0
         if not name.lower().endswith(".apk"):
             continue
         if _is_uvpro_apk_filename(name):
             continue
         if not dl.startswith("http://") and not dl.startswith("https://"):
             continue
-        apk_assets.append((name, dl))
+        apk_assets.append((name, dl, size_bytes))
     if not apk_assets:
         return []
 
+    manifest_map: Dict[str, str] = {}
+    if package_manifest_url:
+        try:
+            rr = requests.get(package_manifest_url, headers=headers, timeout=20)
+            rr.raise_for_status()
+            payload_map = rr.json()
+            if isinstance(payload_map, dict):
+                for k, v in payload_map.items():
+                    ks = str(k).strip()
+                    vs = str(v).strip()
+                    if ks and vs:
+                        manifest_map[ks] = vs
+        except Exception as exc:
+            log_sink(f"Warning: could not read add-on package manifest asset: {exc}")
+
     release_cache = ADDON_PLUGIN_ASSET_CACHE_DIR / f"{owner}_{repo}_{tag}"
-    out: List[Path] = []
-    for name, dl in apk_assets:
+    pkg_cache = _load_addon_package_cache()
+    out: List[Dict[str, Any]] = []
+    for name, dl, size_bytes in apk_assets:
         dest = release_cache / name
-        if not dest.is_file():
-            log_sink(f"Downloading add-on plugin asset: {name}")
-            _download_addon_apk_file(dl, dest)
-        out.append(dest)
+        key = _addon_candidate_cache_key(name, dl)
+        pkg_name = pkg_cache.get(key) or manifest_map.get(name)
+        out.append(
+            {
+                "name": name,
+                "label": name,
+                "apk_path": dest if dest.is_file() else None,
+                "cache_path": dest,
+                "download_url": dl,
+                "size_bytes": size_bytes if size_bytes > 0 else (int(dest.stat().st_size) if dest.is_file() else 0),
+                "package_name": pkg_name,
+                "cache_key": key,
+            }
+        )
     return out
 
 
-def _resolve_addon_plugin_apks(log_sink: Callable[[str], None]) -> List[Path]:
+def _resolve_addon_plugin_apks(log_sink: Callable[[str], None]) -> List[Dict[str, Any]]:
     if ADDON_PLUGIN_APK_URLS:
         urls = [u.strip() for u in ADDON_PLUGIN_APK_URLS.split(",") if u.strip()]
-        out: List[Path] = []
+        out: List[Dict[str, Any]] = []
         custom_cache = ADDON_PLUGIN_ASSET_CACHE_DIR / "custom_urls"
+        pkg_cache = _load_addon_package_cache()
         for i, url in enumerate(urls, 1):
             filename = Path(url.split("?", 1)[0]).name or f"addon_{i}.apk"
             if not filename.lower().endswith(".apk") or _is_uvpro_apk_filename(filename):
                 continue
             dest = custom_cache / filename
-            if not dest.is_file():
-                log_sink(f"Downloading add-on plugin URL: {filename}")
-                _download_addon_apk_file(url, dest)
-            out.append(dest)
+            key = _addon_candidate_cache_key(filename, url)
+            out.append(
+                {
+                    "name": filename,
+                    "label": filename,
+                    "apk_path": dest if dest.is_file() else None,
+                    "cache_path": dest,
+                    "download_url": url,
+                    "size_bytes": int(dest.stat().st_size) if dest.is_file() else 0,
+                    "package_name": pkg_cache.get(key),
+                    "cache_key": key,
+                }
+            )
         if out:
             return out
 
     try:
-        apks = _addon_plugin_paths_from_github_assets(log_sink)
-        if apks:
-            return apks
+        candidates = _addon_plugin_candidates_from_github_assets(log_sink)
+        if candidates:
+            return candidates
     except Exception as exc:
         log_sink(f"Warning: could not fetch add-on plugin assets from GitHub release: {exc}")
 
@@ -521,7 +594,21 @@ def _resolve_addon_plugin_apks(log_sink: Callable[[str], None]) -> List[Path]:
     local_apks = iter_bundled_addon_apks(BUNDLED_PLUGIN_DIR)
     if local_apks:
         log_sink("Using local bundled add-on plugin APKs (legacy fallback).")
-    return local_apks
+    out_local: List[Dict[str, Any]] = []
+    for apk in local_apks:
+        out_local.append(
+            {
+                "name": apk.name,
+                "label": _plugin_label_for_display(apk),
+                "apk_path": apk,
+                "cache_path": apk,
+                "download_url": "",
+                "size_bytes": int(apk.stat().st_size) if apk.is_file() else 0,
+                "package_name": _extract_apk_package_name(apk),
+                "cache_key": "",
+            }
+        )
+    return out_local
 
 
 def _plugin_label_for_display(apk: Path) -> str:
@@ -579,33 +666,49 @@ def _extract_apk_package_name(apk_path: Path) -> Optional[str]:
     return None
 
 
-def _build_missing_addons_plan(
+def _build_addons_plan(
     serial: str,
-    plugin_apks: List[Path],
-) -> Tuple[List[Tuple[Path, str]], List[Path], List[str]]:
+    plugin_candidates: List[Dict[str, Any]],
+) -> Tuple[List[Tuple[Path, str]], List[Dict[str, Any]]]:
     missing_assets: List[Tuple[Path, str]] = []
-    missing_plugins: List[Path] = []
-    display_items: List[str] = []
+    plugin_rows: List[Dict[str, Any]] = []
 
     for src, device_dir in _mobile_asset_targets():
         device_path = f"{device_dir}/{src.name}"
         if not _adb_device_file_exists(serial, device_path):
             missing_assets.append((src, device_dir))
-            display_items.append(f"Add-on file: {_format_asset_label_for_display(src, device_dir)}")
 
     installed_pkgs = _installed_plugin_package_names(serial)
-    for apk in plugin_apks:
-        package_name = _extract_apk_package_name(apk)
-        rel = _plugin_label_for_display(apk)
-        if package_name:
-            if package_name not in installed_pkgs:
-                missing_plugins.append(apk)
-                display_items.append(f"Plugin APK: {rel} ({package_name})")
-        else:
-            missing_plugins.append(apk)
-            display_items.append(f"Plugin APK: {rel} (package check unavailable; will install)")
+    for candidate in plugin_candidates:
+        apk_path = candidate.get("apk_path")
+        package_name = str(candidate.get("package_name") or "").strip() or None
+        if package_name is None and isinstance(apk_path, Path) and apk_path.is_file():
+            package_name = _extract_apk_package_name(apk_path)
+        installed = bool(package_name and package_name in installed_pkgs)
+        try:
+            size_bytes = int(candidate.get("size_bytes") or 0)
+        except Exception:
+            size_bytes = 0
+        if size_bytes <= 0 and isinstance(apk_path, Path) and apk_path.is_file():
+            try:
+                size_bytes = int(apk_path.stat().st_size)
+            except Exception:
+                size_bytes = 0
+        plugin_rows.append(
+            {
+                "apk_path": apk_path if isinstance(apk_path, Path) else None,
+                "cache_path": candidate.get("cache_path"),
+                "download_url": str(candidate.get("download_url") or ""),
+                "cache_key": str(candidate.get("cache_key") or ""),
+                "label": str(candidate.get("label") or ""),
+                "name": str(candidate.get("name") or ""),
+                "package_name": package_name,
+                "installed": installed,
+                "size_bytes": size_bytes,
+            }
+        )
 
-    return missing_assets, missing_plugins, display_items
+    return missing_assets, plugin_rows
 
 
 def _force_stop_atak(serial: str, log_fn: Callable[[str], None]) -> None:
@@ -631,7 +734,10 @@ def _restart_atak(serial: str, log_fn: Callable[[str], None]) -> None:
 
 
 def push_mobile_assets(
-    log_fn=None, *, selected_targets: Optional[List[Tuple[Path, str]]] = None
+    log_fn=None,
+    *,
+    selected_targets: Optional[List[Tuple[Path, str]]] = None,
+    step_cb: Optional[Callable[[str], None]] = None,
 ) -> None:
     """Push bundled mobile add-on files to the device (additive — never deletes device files)."""
     if not MOBILE_ASSET_DIR.is_dir():
@@ -657,23 +763,116 @@ def push_mobile_assets(
         r = _run_adb(["push", str(src), f"{device_dir}/{src.name}"], serial=serial, timeout=120)
         if r.returncode != 0 and log_fn:
             log_fn(f"Warning: failed to push {src.name}: {r.stderr}")
+        if step_cb:
+            try:
+                step_cb(f"Pushed {src.name}")
+            except Exception:
+                pass
 
     if log_fn:
         log_fn(f"Mobile assets pushed to device ({total} file copies).")
 
 
+def _ensure_plugin_row_apk(row: Dict[str, Any], log_sink: Callable[[str], None]) -> Optional[Path]:
+    apk_path = row.get("apk_path")
+    if isinstance(apk_path, Path) and apk_path.is_file():
+        return apk_path
+
+    url = str(row.get("download_url") or "").strip()
+    if not url:
+        return None
+
+    name = str(row.get("name") or Path(url.split("?", 1)[0]).name or "addon.apk")
+    if _is_uvpro_apk_filename(name):
+        return None
+
+    cache_key = str(row.get("cache_key") or _addon_candidate_cache_key(name, url))
+    cp = row.get("cache_path")
+    if isinstance(cp, Path):
+        dest = cp
+    else:
+        dest = ADDON_PLUGIN_ASSET_CACHE_DIR / "runtime" / name
+    log_sink(f"Downloading selected add-on plugin: {name}")
+    downloaded = _download_addon_apk_file(url, dest)
+    row["apk_path"] = downloaded
+    try:
+        row["size_bytes"] = int(downloaded.stat().st_size)
+    except Exception:
+        pass
+
+    pkg = _extract_apk_package_name(downloaded)
+    if pkg:
+        row["package_name"] = pkg
+        if cache_key:
+            cache = _load_addon_package_cache()
+            cache[cache_key] = pkg
+            _save_addon_package_cache(cache)
+    return downloaded
+
+
 def _install_selected_plugin_apks(
-    serial: str, plugin_apks: List[Path], progress: Any, log_sink: Callable[[str], None]
+    serial: str,
+    plugin_rows: List[Dict[str, Any]],
+    progress: Any,
+    log_sink: Callable[[str], None],
+    *,
+    step_cb: Optional[Callable[[str], None]] = None,
 ) -> None:
-    if not plugin_apks:
+    if not plugin_rows:
         log_sink("No bundled add-on plugins need install.")
         return
-    log_sink(f"Installing {len(plugin_apks)} missing bundled add-on plugin(s)…")
-    for apk in plugin_apks:
+    log_sink(f"Installing {len(plugin_rows)} selected add-on plugin(s)…")
+    for row in plugin_rows:
+        had_local_apk = isinstance(row.get("apk_path"), Path) and row.get("apk_path").is_file()
+        if not had_local_apk and str(row.get("download_url") or "").strip():
+            progress.set_status(f"Downloading add-on: {row.get('name') or 'plugin.apk'}…")
+        apk = _ensure_plugin_row_apk(row, log_sink)
+        if apk is None:
+            log_sink(f"Warning: could not resolve APK for {row.get('name') or row.get('label')}")
+            continue
+        if not had_local_apk and step_cb:
+            try:
+                step_cb(f"Downloaded {apk.name}")
+            except Exception:
+                pass
         rel = _plugin_label_for_display(apk)
         progress.set_status(f"Add-on: {apk.name}…")
         log_sink(f"Installing bundled add-on: {rel}")
         install_apk(serial, apk, progress.set_status, package_name=None)
+        if step_cb:
+            try:
+                step_cb(f"Installed {apk.name}")
+            except Exception:
+                pass
+
+
+def _remove_selected_plugin_packages(
+    serial: str,
+    package_names: List[str],
+    progress: Any,
+    log_sink: Callable[[str], None],
+    *,
+    step_cb: Optional[Callable[[str], None]] = None,
+) -> None:
+    if not package_names:
+        return
+    unique = sorted({p for p in package_names if p})
+    if not unique:
+        return
+    log_sink(f"Removing {len(unique)} selected plugin(s)…")
+    for pkg in unique:
+        progress.set_status(f"Removing plugin: {pkg}…")
+        r = _run_adb(["uninstall", pkg], serial=serial, timeout=120)
+        if r.returncode == 0:
+            log_sink(f"Removed plugin: {pkg}")
+        else:
+            msg = (r.stderr or r.stdout or "").strip()
+            log_sink(f"Warning: failed to remove {pkg}: {msg or 'unknown error'}")
+        if step_cb:
+            try:
+                step_cb(f"Removed {pkg}")
+            except Exception:
+                pass
 
 
 def _deploy_selected_addons_to_device(
@@ -682,19 +881,46 @@ def _deploy_selected_addons_to_device(
     serial: str,
     *,
     missing_assets: List[Tuple[Path, str]],
-    missing_plugins: List[Path],
+    install_plugins: List[Dict[str, Any]],
+    remove_packages: List[str],
 ) -> None:
+    def _plugin_needs_download(row: Dict[str, Any]) -> bool:
+        apk = row.get("apk_path")
+        if isinstance(apk, Path) and apk.is_file():
+            return False
+        return bool(str(row.get("download_url") or "").strip())
+
+    remove_total = len(sorted({p for p in remove_packages if p}))
+    download_total = sum(1 for row in install_plugins if _plugin_needs_download(row))
+    install_total = len(install_plugins)
+    push_total = len(missing_assets)
+    total_steps = max(1, remove_total + download_total + install_total + push_total)
+    completed_steps = 0
+    progress.set_progress(0, total_steps)
+
+    def _step_done(status: str) -> None:
+        nonlocal completed_steps
+        completed_steps += 1
+        progress.set_progress(completed_steps, total_steps)
+        progress.set_status(status)
+
+    try:
+        progress.set_status("Removing selected add-on plugins…")
+        _remove_selected_plugin_packages(serial, remove_packages, progress, log_sink, step_cb=_step_done)
+    except Exception as exc:
+        log_sink(f"Warning: add-on plugin remove failed — {exc}")
+
     # Start with plugin installs first, then push map/import files.
     try:
         progress.set_status("Installing bundled add-on plugins…")
-        _install_selected_plugin_apks(serial, missing_plugins, progress, log_sink)
+        _install_selected_plugin_apks(serial, install_plugins, progress, log_sink, step_cb=_step_done)
     except Exception as exc:
         log_sink(f"Warning: bundled add-on plugin install failed — {exc}")
 
     if missing_assets:
         try:
             progress.set_status("Pushing map sources and import files to device…")
-            push_mobile_assets(log_fn=log_sink, selected_targets=missing_assets)
+            push_mobile_assets(log_fn=log_sink, selected_targets=missing_assets, step_cb=_step_done)
         except Exception as exc:
             log_sink(f"Warning: mobile asset push failed — {exc}")
     else:
@@ -976,48 +1202,171 @@ def _wait_for_device_ready_dialog(progress: Any, prompt_text: str) -> None:
         time.sleep(0.1)
 
 
-def _show_addons_install_plan_dialog(parent: tk.Misc, title: str, items: List[str]) -> bool:
-    decision = {"ok": False}
+def _format_size_mb(size_bytes: int) -> str:
+    return f"{(max(0, int(size_bytes)) / (1024 * 1024)):.2f} MB"
+
+
+def _show_plugin_actions_dialog(
+    parent: tk.Misc,
+    title: str,
+    plugin_rows: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    decision: Dict[str, Any] = {
+        "ok": False,
+        "install": [],
+        "remove": [],
+        "install_count": 0,
+        "remove_count": 0,
+        "install_bytes": 0,
+    }
     dlg = tk.Toplevel(parent)
     dlg.title(title)
     dlg.configure(cursor="arrow")
     dlg.transient(parent)
     dlg.grab_set()
     dlg.resizable(True, True)
-    dlg.geometry("760x520")
-    dlg.minsize(620, 420)
+    dlg.geometry("980x620")
+    dlg.minsize(820, 460)
     scale = scale_factor(dlg)
-    wrap_w = scaled_int(700, scale)
+    wrap_w = scaled_int(940, scale)
 
     tk.Label(
         dlg,
-        text="Install missing add-ons",
+        text="Plugin add-ons",
         font=("TkDefaultFont", 12, "bold"),
         justify="left",
-    ).pack(anchor="w", padx=18, pady=(14, 6))
+    ).pack(anchor="w", padx=18, pady=(14, 4))
     tk.Label(
         dlg,
-        text="The following items are missing and will be installed:",
+        text=(
+            "Installed plugins show a check mark under Install.\n"
+            "For missing plugins, choose Install with checkboxes.\n"
+            "Use Remove to uninstall currently installed plugins."
+        ),
         justify="left",
         wraplength=wrap_w,
-    ).pack(anchor="w", padx=18, pady=(0, 8))
+    ).pack(anchor="w", padx=18, pady=(0, 10))
 
-    frame = tk.Frame(dlg, padx=18, pady=0)
-    frame.pack(fill="both", expand=True)
-    text = tk.Text(frame, wrap="word", height=14)
-    scroll = tk.Scrollbar(frame, command=text.yview)
-    text.configure(yscrollcommand=scroll.set)
-    text.pack(side="left", fill="both", expand=True)
-    scroll.pack(side="right", fill="y")
+    table_outer = tk.Frame(dlg, padx=18)
+    table_outer.pack(fill="both", expand=True)
 
-    text.insert("1.0", "\n".join(f"{i + 1}. {item}" for i, item in enumerate(items)))
-    text.configure(state="disabled")
+    canvas = tk.Canvas(table_outer, highlightthickness=0)
+    vbar = tk.Scrollbar(table_outer, orient="vertical", command=canvas.yview)
+    inner = tk.Frame(canvas)
+    inner.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+    canvas.create_window((0, 0), window=inner, anchor="nw")
+    canvas.configure(yscrollcommand=vbar.set)
+    canvas.pack(side="left", fill="both", expand=True)
+    vbar.pack(side="right", fill="y")
 
-    btn_row = tk.Frame(dlg, padx=18, pady=14)
+    tk.Label(inner, text="Plugin", font=("TkDefaultFont", 10, "bold")).grid(
+        row=0, column=0, sticky="w", padx=(2, 12), pady=(2, 8)
+    )
+    tk.Label(inner, text="Remove", font=("TkDefaultFont", 10, "bold")).grid(
+        row=0, column=1, sticky="w", padx=(4, 16), pady=(2, 8)
+    )
+    tk.Label(inner, text="Install", font=("TkDefaultFont", 10, "bold")).grid(
+        row=0, column=2, sticky="w", padx=(4, 4), pady=(2, 8)
+    )
+
+    install_vars: Dict[int, tk.BooleanVar] = {}
+    remove_vars: Dict[int, tk.BooleanVar] = {}
+    total_var = tk.StringVar(value="0 plugins to be installed, 0 plugins to be removed, Total size = 0.00 MB")
+
+    def _recompute_total() -> None:
+        count = 0
+        remove_count = 0
+        total = 0
+        for idx, row in enumerate(plugin_rows):
+            installed = bool(row.get("installed"))
+            if installed:
+                rv = remove_vars.get(idx)
+                if rv is not None and bool(rv.get()):
+                    remove_count += 1
+                continue
+            var = install_vars.get(idx)
+            if var is not None and bool(var.get()):
+                count += 1
+                total += int(row.get("size_bytes") or 0)
+        total_var.set(
+            f"{count} plugins to be installed, {remove_count} plugins to be removed, Total size = {_format_size_mb(total)}"
+        )
+
+    grid_row = 1
+    for idx, row in enumerate(plugin_rows):
+        name = str(row.get("name") or row.get("label") or "plugin.apk")
+        pkg = str(row.get("package_name") or "").strip()
+        installed = bool(row.get("installed"))
+        size_bytes = int(row.get("size_bytes") or 0)
+
+        plugin_text = name if not pkg else f"{name} ({pkg})"
+        tk.Label(inner, text=plugin_text, justify="left", anchor="w", wraplength=scaled_int(680, scale)).grid(
+            row=grid_row, column=0, sticky="w", padx=(2, 12), pady=(2, 0)
+        )
+
+        if installed and pkg:
+            remove_var = tk.BooleanVar(value=False)
+            remove_vars[idx] = remove_var
+            tk.Checkbutton(inner, variable=remove_var).grid(
+                row=grid_row, column=1, sticky="w", padx=(4, 16), pady=(2, 0)
+            )
+            remove_var.trace_add("write", lambda *_args: _recompute_total())
+            tk.Label(inner, text="✓", fg="#1fa64a", font=("TkDefaultFont", 12, "bold")).grid(
+                row=grid_row, column=2, sticky="w", padx=(4, 4), pady=(2, 0)
+            )
+        else:
+            tk.Label(inner, text="").grid(row=grid_row, column=1, sticky="w", padx=(4, 16), pady=(2, 0))
+            install_var = tk.BooleanVar(value=True)
+            install_vars[idx] = install_var
+            tk.Checkbutton(inner, variable=install_var, command=_recompute_total).grid(
+                row=grid_row, column=2, sticky="w", padx=(4, 4), pady=(2, 0)
+            )
+
+        grid_row += 1
+        tk.Label(
+            inner,
+            text=f"Size: {_format_size_mb(size_bytes)}",
+            fg="#666666",
+            justify="left",
+            anchor="w",
+        ).grid(row=grid_row, column=0, sticky="w", padx=(24, 12), pady=(0, 6))
+        grid_row += 1
+
+    _recompute_total()
+
+    summary = tk.Label(dlg, textvariable=total_var, font=("TkDefaultFont", 10, "bold"), justify="left")
+    summary.pack(anchor="w", padx=18, pady=(8, 4))
+
+    btn_row = tk.Frame(dlg, padx=18, pady=10)
     btn_row.pack(fill="x")
 
     def _close(ok: bool) -> None:
-        decision["ok"] = ok
+        if ok:
+            install_rows: List[Dict[str, Any]] = []
+            remove_packages: List[str] = []
+            install_count = 0
+            install_bytes = 0
+            for idx, row in enumerate(plugin_rows):
+                installed = bool(row.get("installed"))
+                pkg = str(row.get("package_name") or "").strip()
+                if installed:
+                    if pkg and idx in remove_vars and bool(remove_vars[idx].get()):
+                        remove_packages.append(pkg)
+                    continue
+                if idx in install_vars and bool(install_vars[idx].get()):
+                    install_rows.append(dict(row))
+                    install_count += 1
+                    install_bytes += int(row.get("size_bytes") or 0)
+            decision.update(
+                {
+                    "ok": True,
+                    "install": install_rows,
+                    "remove": remove_packages,
+                    "install_count": install_count,
+                    "remove_count": len(remove_packages),
+                    "install_bytes": install_bytes,
+                }
+            )
         cancel_all_scheduled_after(dlg)
         dlg.destroy()
 
@@ -1028,23 +1377,23 @@ def _show_addons_install_plan_dialog(parent: tk.Misc, title: str, items: List[st
     dlg.lift(parent)
     dlg.focus_set()
     parent.wait_window(dlg)
-    return bool(decision["ok"])
+    return decision if decision.get("ok") else None
 
 
-def _ask_ok_cancel(progress: Any, title: str, items: List[str]) -> bool:
+def _ask_plugin_actions(progress: Any, title: str, plugin_rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if threading.current_thread() is threading.main_thread():
-        return _show_addons_install_plan_dialog(progress, title, items)
+        return _show_plugin_actions_dialog(progress, title, plugin_rows)
 
-    progress.confirm_result = False
+    progress.plugin_action_result = None
     evt = threading.Event()
-    progress.confirm_event = evt
-    progress.confirm_prompt = (title, items)
+    progress.plugin_action_event = evt
+    progress.plugin_action_prompt = (title, plugin_rows)
     while True:
         progress.wait_if_paused()
         if evt.is_set():
             break
         time.sleep(0.1)
-    return bool(progress.confirm_result)
+    return getattr(progress, "plugin_action_result", None)
 
 
 def _resolve_adb_serial_for_push() -> Tuple[str, List[str]]:
@@ -1121,8 +1470,31 @@ def _refresh_addons_only_for_device(
     _force_stop_atak(ser_resolved, log_sink)
     progress.set_status("Checking existing add-ons on device…")
     plugin_apks = _resolve_addon_plugin_apks(log_sink)
-    missing_assets, missing_plugins, missing_display = _build_missing_addons_plan(ser_resolved, plugin_apks)
-    if not missing_display:
+    missing_assets, plugin_rows = _build_addons_plan(ser_resolved, plugin_apks)
+    if not missing_assets and not plugin_rows:
+        log_sink("No add-on files or plugin assets were found for this build.")
+        if addons_only:
+            progress.completion_log_summary = "Add-ons refresh skipped — no add-ons available."
+            progress.completion_message = "No add-ons are available in this build."
+            progress.skip_sqlite_builder_after_session = True
+        return
+
+    selected = _ask_plugin_actions(progress, APP_TITLE, plugin_rows)
+    if not selected:
+        log_sink("Add-ons refresh cancelled by user before install.")
+        progress.user_cancelled = True
+        return
+
+    install_plugins = list(selected.get("install") or [])
+    remove_packages = list(selected.get("remove") or [])
+    install_count = int(selected.get("install_count") or 0)
+    remove_count = int(selected.get("remove_count") or len(remove_packages))
+    install_bytes = int(selected.get("install_bytes") or 0)
+    log_sink(
+        f"{install_count} plugins to install, {remove_count} plugins to remove, "
+        f"Total size = {_format_size_mb(install_bytes)}"
+    )
+    if not missing_assets and not install_plugins and not remove_packages:
         log_sink("Device already has all required add-ons.")
         if addons_only:
             progress.completion_log_summary = "Add-ons refresh skipped — device already current."
@@ -1130,17 +1502,13 @@ def _refresh_addons_only_for_device(
             progress.skip_sqlite_builder_after_session = True
         return
 
-    if not _ask_ok_cancel(progress, APP_TITLE, missing_display):
-        log_sink("Add-ons refresh cancelled by user before install.")
-        progress.user_cancelled = True
-        return
-
     _deploy_selected_addons_to_device(
         progress,
         log_sink,
         ser_resolved,
         missing_assets=missing_assets,
-        missing_plugins=missing_plugins,
+        install_plugins=install_plugins,
+        remove_packages=remove_packages,
     )
     if addons_only:
         progress.completion_log_summary = "Add-ons refresh complete."
@@ -2314,9 +2682,9 @@ class ProgressWindow(tk.Tk):
         self.skip_sqlite_builder_after_session = False
         self.device_ready_prompt: Optional[str] = None
         self.device_ready_event: Optional[threading.Event] = None
-        self.confirm_prompt: Optional[Tuple[str, List[str]]] = None
-        self.confirm_event: Optional[threading.Event] = None
-        self.confirm_result: bool = False
+        self.plugin_action_prompt: Optional[Tuple[str, List[Dict[str, Any]]]] = None
+        self.plugin_action_event: Optional[threading.Event] = None
+        self.plugin_action_result: Optional[Dict[str, Any]] = None
         self.restart_atak_serial: Optional[str] = None
 
     def append_log(self, line: str) -> None:
@@ -3441,17 +3809,16 @@ def pump_gui_logs(window: ProgressWindow) -> None:
             if evt is not None:
                 evt.set()
 
-        if getattr(window, "confirm_prompt", None):
-            title, items = window.confirm_prompt
-            evt = getattr(window, "confirm_event", None)
-            window.confirm_prompt = None
-            # Clear any parent-window stacking timers before opening another modal.
+        if getattr(window, "plugin_action_prompt", None):
+            title, plugin_rows = window.plugin_action_prompt
+            evt = getattr(window, "plugin_action_event", None)
+            window.plugin_action_prompt = None
             cancel_all_scheduled_after(window)
-            window.confirm_result = _show_addons_install_plan_dialog(window, title, items)
+            window.plugin_action_result = _show_plugin_actions_dialog(window, title, plugin_rows)
             cancel_all_scheduled_after(window)
             if evt is not None:
                 evt.set()
-            window.confirm_event = None
+            window.plugin_action_event = None
 
         if getattr(window, "completion_message", None):
             msg = window.completion_message

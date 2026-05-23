@@ -55,11 +55,17 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.3.32` (tag **`v1.3.32`** on GitHub).
+**Linux / source release:** `v1.3.33` (tag **`v1.3.33`** on GitHub).
 
 **Windows:** A new Windows packaged build is **not** included in this cycle. **Use Windows release `2.8`** until a newer Windows installer is published. Source copies under `windows_build/` include the same startup behaviors when run with Python.
 
-Version **1.3.32** highlights:
+Version **1.3.33** highlights:
+
+- **Plugin refresh UX update:** add-on plugin refresh now shows full plugin rows with `Remove` and `Install` columns, per-plugin size lines, and live totals for install/remove actions.
+- **Deferred plugin downloads:** plugin APKs are no longer downloaded before selection; download happens only for user-selected installs after confirmation.
+- **Progress accuracy:** add-on refresh progress now advances through remove/download/install/push steps instead of remaining at 0%.
+
+### Previous release (v1.3.32)
 
 - **Plugin source migration:** imagery downloader add-on plugins now resolve from GitHub release assets (or explicit URLs) with local fallback, reducing repo/source bloat from bundled APKs.
 - **Installer/downloader split clarified:** Device Installer no longer installs additional add-on plugins; those installs are downloader-managed only.

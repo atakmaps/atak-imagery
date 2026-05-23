@@ -28,6 +28,7 @@ EXCLUDE_DIRS = {
     "installer-dist",
     "New Test",
     "windows_build",
+    ".addon_plugin_asset_cache",
 }
 
 EXCLUDE_FILES = {
