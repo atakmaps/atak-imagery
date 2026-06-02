@@ -55,11 +55,17 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.3.36` (tag **`v1.3.36`** on GitHub).
+**Linux / source release:** `v1.3.37` (tag **`v1.3.37`** on GitHub).
 
 **Windows:** A new Windows packaged build is **not** included in this cycle. **Use Windows release `2.8`** until a newer Windows installer is published. Source copies under `windows_build/` include the same startup behaviors when run with Python.
 
-Version **1.3.36** highlights:
+Version **1.3.37** highlights:
+
+- **New Meshcore install options:** Device Installer now includes `ATAK + TAK-MESHCORE plugin` and `TAK-MESHCORE plugin only` in the install-choice screen.
+- **Multi-plugin install routing:** plugin install step now resolves and installs either UV-PRO or Meshcore based on selection while preserving existing wizard step flow.
+- **Meshcore source support:** installer can resolve Meshcore APKs from `ATAK_MESHCORE_PLUGIN_APK`, `ATAK_MESHCORE_PLUGIN_REPO`, or default `/home/paul/Documents/ATAK/Plugins/MeshcoreAtak`.
+
+### Previous release (v1.3.36)
 
 - **Installer lockup fix after device connect:** ATAK install/plugin steps now run in worker threads so step 3 no longer freezes the UI when Continue is pressed.
 - **Thread-safe UI updates:** installer status/progress updates are marshaled onto Tk via async UI calls to avoid main-loop stalls during network/adb operations.
