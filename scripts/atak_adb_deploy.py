@@ -1294,26 +1294,45 @@ class DeployWizard(tk.Tk):
                 except Exception:
                     pass
 
+    def _ui_call(self, fn: Any, *args: Any, **kwargs: Any) -> None:
+        """Schedule a Tk/UI call from any thread."""
+        try:
+            self.after(0, lambda: fn(*args, **kwargs))
+        except Exception:
+            pass
+
+    def _set_status_async(self, msg: str) -> None:
+        self._ui_call(self.status.configure, text=msg)
+
     def _begin_install_atak(self) -> None:
+        # Run long network/adb work off the Tk thread to keep the UI responsive.
+        self.progress.start(8)
+        self.update_idletasks()
+        threading.Thread(target=self._begin_install_atak_worker, daemon=True).start()
+
+    def _begin_install_atak_worker(self) -> None:
+        _lg = logging.getLogger("atak_installer")
         err: Optional[Exception] = None
         try:
+            _lg.info("Step 3: resolving ATAK source...")
             base = self._resolve_url_base()
             if self._inline_atak_manifest:
                 manifest = self._inline_atak_manifest
             else:
+                _lg.info("Step 3: fetching manifest from %s", self.manifest_url)
                 manifest = fetch_manifest(self.manifest_url)
             self._manifest_cache = manifest
+            _lg.info("Step 3: resolving ATAK APK URL/version...")
             apk_path, version, is_temp = resolve_atak_apk(manifest, base)
             self._atak_apk_temp = apk_path if is_temp else None
             self._atak_version_value = str(version)
 
             def ui_install(msg: str) -> None:
-                self.status.configure(text=msg)
-                self.update_idletasks()
+                self._set_status_async(msg)
 
-            self.progress.start(8)
-            self.update_idletasks()
+            _lg.info("Step 3: installing ATAK APK (%s)", apk_path.name)
             install_apk(self.selected_serial, apk_path, ui_install)
+            _lg.info("Step 3: pushing mobile XML/import files...")
             push_mobile_xml(self.selected_serial or "", log)
 
             if is_temp:
@@ -1335,11 +1354,8 @@ class DeployWizard(tk.Tk):
             err = e
             log(traceback.format_exc())
         finally:
-            try:
-                self.progress.stop()
-            except Exception:
-                pass
-            self._after_install_atak(err)
+            self._ui_call(self.progress.stop)
+            self._ui_call(self._after_install_atak, err)
 
     def _after_install_atak(self, err: Optional[Exception]) -> None:
         if err:
@@ -1357,24 +1373,29 @@ class DeployWizard(tk.Tk):
         self._advance(4)
 
     def _begin_install_plugin(self) -> None:
+        # Keep Tk responsive while plugin download/install runs.
+        self.progress.start(8)
+        self.update_idletasks()
+        threading.Thread(target=self._begin_install_plugin_worker, daemon=True).start()
+
+    def _begin_install_plugin_worker(self) -> None:
+        _lg = logging.getLogger("atak_installer")
         ser = self.selected_serial or ""
         err: Optional[Exception] = None
         try:
             def ui_install(msg: str) -> None:
-                self.status.configure(text=msg)
-                self.update_idletasks()
-
-            self.progress.start(8)
-            self.update_idletasks()
+                self._set_status_async(msg)
 
             manifest = self._manifest_cache
             if manifest is None:
                 if self.manifest_url:
+                    _lg.info("Step 5: fetching manifest from %s", self.manifest_url)
                     manifest = fetch_manifest(self.manifest_url)
                 elif self._inline_atak_manifest:
                     manifest = dict(self._inline_atak_manifest)
                 else:
                     raise RuntimeError("No ATAK deploy configuration")
+            _lg.info("Step 5: resolving UV-PRO plugin APK source...")
             apk_path, report_label, is_temp = resolve_plugin_apk(manifest, self._resolve_url_base())
             self._plugin_apk_temp = apk_path if is_temp else None
             self._plugin_report_label = report_label
@@ -1414,7 +1435,7 @@ class DeployWizard(tk.Tk):
                 self.progress.stop()
             except Exception:
                 pass
-            self._after_install_plugin(err)
+            self._ui_call(self._after_install_plugin, err)
 
     def _after_install_plugin(self, err: Optional[Exception]) -> None:
         self.progress.stop()

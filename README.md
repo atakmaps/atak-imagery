@@ -55,11 +55,17 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.3.35` (tag **`v1.3.35`** on GitHub).
+**Linux / source release:** `v1.3.36` (tag **`v1.3.36`** on GitHub).
 
 **Windows:** A new Windows packaged build is **not** included in this cycle. **Use Windows release `2.8`** until a newer Windows installer is published. Source copies under `windows_build/` include the same startup behaviors when run with Python.
 
-Version **1.3.35** highlights:
+Version **1.3.36** highlights:
+
+- **Installer lockup fix after device connect:** ATAK install/plugin steps now run in worker threads so step 3 no longer freezes the UI when Continue is pressed.
+- **Thread-safe UI updates:** installer status/progress updates are marshaled onto Tk via async UI calls to avoid main-loop stalls during network/adb operations.
+- **Installer diagnostics:** added clearer step logging around manifest fetch/resolve/install paths to pinpoint slow or blocked stages.
+
+### Previous release (v1.3.35)
 
 - **Protected CSV import flow:** imagery downloader now supports password-protected release zip assets for import files and installs decrypted CSVs to `/sdcard/atak/tools/import`.
 - **No password in repo:** protected file install prompts user at runtime and validates by decrypting the encrypted asset, with no stored compare password in source.
