@@ -25,6 +25,8 @@ function Resolve-Iscc {
     foreach ($candidate in @(
         "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
         "${env:ProgramFiles}\Inno Setup 6\ISCC.exe",
+        "${env:ProgramFiles(x86)}\Inno Setup 7\ISCC.exe",
+        "${env:ProgramFiles}\Inno Setup 7\ISCC.exe",
         (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe")
     )) {
         if (Test-Path -LiteralPath $candidate) { return $candidate }
@@ -85,17 +87,15 @@ if (-not $Iscc) {
     throw @"
 Inno Setup 6 is not installed (ISCC.exe not found).
 
-Install it, then rerun this script:
+Run this first (downloads and installs silently):
 
-  winget install --id JRSoftware.InnoSetup -e --accept-package-agreements --accept-source-agreements
+  powershell -ExecutionPolicy Bypass -File windows_build\install_inno_setup.ps1
 
-Or download innosetup-6.x.exe from https://jrsoftware.org/isdl.php and run the installer.
-
-After install, close and reopen PowerShell, then:
+Or install manually from https://jrsoftware.org/isdl.php then rerun:
 
   powershell -ExecutionPolicy Bypass -File windows_build\build_windows_installer.ps1
 
-If ISCC is installed in a custom location:
+If ISCC is in a custom location:
 
   powershell -ExecutionPolicy Bypass -File windows_build\build_windows_installer.ps1 -IsccPath "C:\path\to\ISCC.exe"
 "@
