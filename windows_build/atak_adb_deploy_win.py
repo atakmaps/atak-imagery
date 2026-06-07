@@ -121,7 +121,7 @@ except Exception:  # pragma: no cover
 APP_TITLE = "ATAK Device Installer"
 DEFAULT_ATAK_PACKAGE = "com.atakmap.app.civ"
 DEFAULT_PLUGIN_PACKAGE = "com.uvpro.plugin"
-DEFAULT_MESHCORE_PLUGIN_PACKAGE = "com.meshcore.atakplugin"
+DEFAULT_MESHCORE_PLUGIN_PACKAGE = "com.atakmaps.meshcore.plugin"
 DEFAULT_MESHCORE_PLUGIN_GITHUB_REPO = "atakmaps/TAK-MESHCORE"
 DEFAULT_MESHCORE_PLUGIN_REPO = Path.home() / "Documents" / "ATAK" / "Plugins" / "MeshcoreAtak"
 
