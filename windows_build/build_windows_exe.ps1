@@ -14,6 +14,8 @@ $BuildDir = Join-Path $Root "build"
 $VersionFile = Join-Path $Root "VERSION"
 $ToolsDir = Join-Path $Root "tools"
 $PlatformToolsDir = Join-Path $ToolsDir "platform-tools"
+$PlatformToolsUrl = "https://dl.google.com/android/repository/platform-tools-latest-windows.zip"
+$PlatformToolsZip = Join-Path $ToolsDir "platform-tools-latest-windows.zip"
 
 function Resolve-BuildPython {
     param([string]$Preferred)
@@ -52,6 +54,39 @@ function Stop-AtakAppProcesses {
     foreach ($name in @("ATAKImageryDownloader", "ATAKDeviceInstaller", "ATAKPipeline")) {
         Get-Process -Name $name -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     }
+}
+
+function Ensure-PlatformTools {
+    if (Test-Path (Join-Path $PlatformToolsDir "adb.exe")) {
+        return (Join-Path $PlatformToolsDir "adb.exe")
+    }
+
+    Write-Host "=== platform-tools not found; downloading Android platform-tools ==="
+    New-Item -ItemType Directory -Force -Path $ToolsDir | Out-Null
+
+    if (Test-Path $PlatformToolsZip) {
+        Remove-Item $PlatformToolsZip -Force -ErrorAction SilentlyContinue
+    }
+
+    Invoke-WebRequest -Uri $PlatformToolsUrl -OutFile $PlatformToolsZip -UseBasicParsing
+
+    $extractRoot = Join-Path $ToolsDir "_extract_platform_tools"
+    if (Test-Path $extractRoot) {
+        Remove-Item $extractRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Expand-Archive -Path $PlatformToolsZip -DestinationPath $extractRoot -Force
+    $inner = Join-Path $extractRoot "platform-tools"
+    if (-not (Test-Path (Join-Path $inner "adb.exe"))) {
+        throw "platform-tools zip did not contain adb.exe"
+    }
+
+    if (Test-Path $PlatformToolsDir) {
+        Remove-Item $PlatformToolsDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Move-Item $inner $PlatformToolsDir
+    Remove-Item $extractRoot -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item $PlatformToolsZip -Force -ErrorAction SilentlyContinue
+    return (Join-Path $PlatformToolsDir "adb.exe")
 }
 
 function Build-OneExe {
@@ -238,11 +273,19 @@ if (Test-Path $VersionFile) {
     Copy-Item $VersionFile (Join-Path $DistDir "VERSION") -Force
 }
 
-if (Test-Path (Join-Path $PlatformToolsDir "adb.exe")) {
+$bundledAdb = $null
+try {
+    $bundledAdb = Ensure-PlatformTools
+} catch {
+    Write-Warning "Could not auto-download platform-tools: $($_.Exception.Message)"
+}
+if ($bundledAdb -and (Test-Path $bundledAdb)) {
     $distTools = Join-Path $DistDir "tools\platform-tools"
     New-Item -ItemType Directory -Force -Path $distTools | Out-Null
     Copy-Item (Join-Path $PlatformToolsDir "*") $distTools -Recurse -Force
     Write-Host "Copied platform-tools to $distTools"
+} else {
+    Write-Warning "adb.exe not available for bundling; dist build will require adb on PATH."
 }
 
 Write-Host ""
