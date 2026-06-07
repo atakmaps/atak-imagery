@@ -320,6 +320,8 @@ if (-not $SkipBuild) {
     if ($launcherText -notmatch 'getattr\(sys,\s*"frozen"') {
         throw "Outdated $launcherPath will open the Imagery Downloader during build. Update the repo (git pull) before running setup."
     }
+    Write-Log "[4/7] Syncing windows_build from scripts/ (copy Linux sources + Windows patches)..."
+    & $PythonExe (Join-Path $Root "scripts\sync_windows_build.py")
     Write-Log "[4/7] Building ATAK Device Installer + Imagery Downloader (several minutes)..."
     Stop-AtakAppProcesses
     Push-Location $Root

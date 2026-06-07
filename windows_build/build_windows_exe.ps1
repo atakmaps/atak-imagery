@@ -44,6 +44,9 @@ function Resolve-BuildPython {
 }
 
 $PythonExe = Resolve-BuildPython -Preferred $PythonExe
+Write-Host ""
+Write-Host "=== Syncing windows_build from scripts/ (Linux copy + Windows patches) ==="
+& $PythonExe (Join-Path $ScriptsDir "sync_windows_build.py")
 $PythonRoot = Split-Path -Parent $PythonExe
 $TclDir = Join-Path $PythonRoot "tcl\tcl8.6"
 $TkDir  = Join-Path $PythonRoot "tcl\tk8.6"

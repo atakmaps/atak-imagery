@@ -18,6 +18,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
+import requests
+
 from win_subprocess import run_hidden
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog

@@ -94,24 +94,19 @@ import requests
 try:
     import tkinter as tk
     from tkinter import messagebox, scrolledtext, ttk
+
+    from git_update_check import run_startup_git_update_check, run_startup_release_update_check
+    from tk_window_scaling import apply_resizable_window, ensure_window_stacking, scaled_int
 except Exception:  # pragma: no cover
     tk = None
     messagebox = None
     scrolledtext = None
     ttk = None
-
-try:
-    from git_update_check import run_startup_git_update_check, run_startup_release_update_check
-except Exception:  # pragma: no cover
-    run_startup_git_update_check = None  # type: ignore[assignment]
-    run_startup_release_update_check = None  # type: ignore[assignment]
-
-try:
-    from tk_window_scaling import apply_resizable_window, ensure_window_stacking, scaled_int
-except Exception:  # pragma: no cover
     apply_resizable_window = None  # type: ignore[assignment]
     scaled_int = None  # type: ignore[assignment]
     ensure_window_stacking = None  # type: ignore[assignment]
+    run_startup_git_update_check = None  # type: ignore[assignment]
+    run_startup_release_update_check = None  # type: ignore[assignment]
 
 APP_TITLE = "ATAK Device Installer"
 DEFAULT_ATAK_PACKAGE = "com.atakmap.app.civ"
@@ -307,32 +302,15 @@ def load_deploy_env_file() -> None:
 
 
 def ensure_gui_path_for_adb() -> None:
-    """Desktop/EXE launches often have a short PATH; match common dev locations."""
+    """Desktop .desktop launches often have a short PATH; match common dev locations."""
     home = Path.home()
-    if sys.platform == "win32":
-        extras = [
-            str(home / "AppData" / "Local" / "Android" / "Sdk" / "platform-tools"),
-            str(home / "AppData" / "Local" / "atak-pipeline" / "platform-tools"),
-            str(home / "AppData" / "Local" / "Programs" / "platform-tools"),
-            r"C:\platform-tools",
-        ]
-        # Repo-local tools\platform-tools (install_windows.ps1) and tools beside frozen EXE.
-        for base in (
-            Path.cwd(),
-            SCRIPT_DIR.parent,
-            Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else None,
-        ):
-            if base is None:
-                continue
-            extras.append(str(base / "tools" / "platform-tools"))
-    else:
-        extras = [
-            "/usr/local/bin",
-            "/usr/bin",
-            "/bin",
-            str(home / "Android/Sdk/platform-tools"),
-            str(home / "Android/Sdk/cmdline-tools/latest/bin"),
-        ]
+    extras = [
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        str(home / "Android/Sdk/platform-tools"),
+        str(home / "Android/Sdk/cmdline-tools/latest/bin"),
+    ]
     path = os.environ.get("PATH", "")
     parts = [p for p in path.split(os.pathsep) if p]
     merged = path
@@ -375,16 +353,7 @@ def run_adb(args: List[str], serial: Optional[str] = None, timeout: int = 120) -
     if serial:
         cmd += ["-s", serial]
     cmd.extend(args)
-    try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    except FileNotFoundError:
-        return subprocess.CompletedProcess(
-            args=cmd, returncode=127, stdout="", stderr="adb executable not found on PATH"
-        )
-    except subprocess.TimeoutExpired:
-        return subprocess.CompletedProcess(
-            args=cmd, returncode=124, stdout="", stderr=f"adb timed out after {timeout}s"
-        )
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
 
 def adb_available() -> bool:

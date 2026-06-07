@@ -57,6 +57,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Set, Tuple, Optional
 
 import requests
+
+from win_subprocess import run_hidden
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
@@ -149,7 +151,7 @@ from imagery_tile_selection import (  # noqa: E402
 # Load on the main thread only: first-importing ``atak_adb_deploy`` from the download worker
 # pulls in tkinter on a background thread and can abort with Tcl_AsyncDelete on Linux/X11.
 from atak_adb_deploy_win import install_apk, ensure_gui_path_for_adb  # noqa: E402
-from win_subprocess import run_hidden
+from bundled_plugin_install import iter_bundled_addon_apks  # noqa: E402
 
 
 def sanitize_radius_imagery_folder_name(raw: str) -> str:

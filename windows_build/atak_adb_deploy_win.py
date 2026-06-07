@@ -89,6 +89,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import requests
+
 from win_subprocess import run_hidden
 
 try:
@@ -319,30 +321,20 @@ def load_deploy_env_file() -> None:
 def ensure_gui_path_for_adb() -> None:
     """Desktop/EXE launches often have a short PATH; match common dev locations."""
     home = Path.home()
-    if sys.platform == "win32":
-        extras = [
-            str(home / "AppData" / "Local" / "Android" / "Sdk" / "platform-tools"),
-            str(home / "AppData" / "Local" / "atak-pipeline" / "platform-tools"),
-            str(home / "AppData" / "Local" / "Programs" / "platform-tools"),
-            r"C:\platform-tools",
-        ]
-        # Repo-local tools\platform-tools (install_windows.ps1) and tools beside frozen EXE.
-        for base in (
-            Path.cwd(),
-            SCRIPT_DIR.parent,
-            Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else None,
-        ):
-            if base is None:
-                continue
-            extras.append(str(base / "tools" / "platform-tools"))
-    else:
-        extras = [
-            "/usr/local/bin",
-            "/usr/bin",
-            "/bin",
-            str(home / "Android/Sdk/platform-tools"),
-            str(home / "Android/Sdk/cmdline-tools/latest/bin"),
-        ]
+    extras = [
+        str(home / "AppData" / "Local" / "Android" / "Sdk" / "platform-tools"),
+        str(home / "AppData" / "Local" / "atak-pipeline" / "platform-tools"),
+        str(home / "AppData" / "Local" / "Programs" / "platform-tools"),
+        r"C:\platform-tools",
+    ]
+    for base in (
+        Path.cwd(),
+        SCRIPT_DIR.parent,
+        Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else None,
+    ):
+        if base is None:
+            continue
+        extras.append(str(base / "tools" / "platform-tools"))
     path = os.environ.get("PATH", "")
     parts = [p for p in path.split(os.pathsep) if p]
     merged = path

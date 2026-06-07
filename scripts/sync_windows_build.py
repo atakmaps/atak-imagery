@@ -1,9 +1,18 @@
 #!/usr/bin/env python3
-"""Copy Linux scripts/ into windows_build/ with *_win.py names and Windows-specific patches."""
+"""
+Copy Linux scripts/ into windows_build/ — never modify Linux sources for Windows.
+
+Workflow:
+  1. Copy scripts/*.py → windows_build/*_win.py (renames + string substitutions)
+  2. Apply Windows-only patches defined in THIS file
+  3. Copy shared helpers; preserve Windows-only files (tk_window_scaling.py, launchers, win_subprocess.py)
+
+Run before every Windows EXE build:
+  python3 scripts/sync_windows_build.py
+"""
 
 from __future__ import annotations
 
-import re
 import shutil
 from pathlib import Path
 
@@ -11,7 +20,6 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
 WIN = ROOT / "windows_build"
 
-# Linux module → Windows module (content gets name substitutions)
 RENAMED_MODULES = {
     "atak_downloader_finalbuild.py": "atak_downloader_finalbuild_win.py",
     "atak_downloader_from_installer.py": "atak_downloader_from_installer_win.py",
@@ -27,6 +35,7 @@ DIRECT_COPY = (
     "usgs_throughput_probe.py",
 )
 
+# Never overwritten — Windows-specific behavior lives here.
 SKIP_OVERWRITE = frozenset({"tk_window_scaling.py"})
 
 SUBSTITUTIONS = (
@@ -63,6 +72,103 @@ MESHCORE_WIN = (
     "DEFAULT_MESHCORE_PLUGIN_REPO = Path.home() / \"Documents\" / \"ATAK\" / \"Plugins\" / \"MeshcoreAtak\""
 )
 
+_LINUX_ENSURE_GUI_PATH = '''def ensure_gui_path_for_adb() -> None:
+    """Desktop .desktop launches often have a short PATH; match common dev locations."""
+    home = Path.home()
+    extras = [
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        str(home / "Android/Sdk/platform-tools"),
+        str(home / "Android/Sdk/cmdline-tools/latest/bin"),
+    ]
+    path = os.environ.get("PATH", "")
+    parts = [p for p in path.split(os.pathsep) if p]
+    merged = path
+    for e in reversed(extras):
+        if e not in parts and Path(e).is_dir():
+            merged = e + os.pathsep + merged
+            parts.insert(0, e)
+    os.environ["PATH"] = merged'''
+
+_WIN_ENSURE_GUI_PATH = '''def ensure_gui_path_for_adb() -> None:
+    """Desktop/EXE launches often have a short PATH; match common dev locations."""
+    home = Path.home()
+    extras = [
+        str(home / "AppData" / "Local" / "Android" / "Sdk" / "platform-tools"),
+        str(home / "AppData" / "Local" / "atak-pipeline" / "platform-tools"),
+        str(home / "AppData" / "Local" / "Programs" / "platform-tools"),
+        r"C:\\platform-tools",
+    ]
+    for base in (
+        Path.cwd(),
+        SCRIPT_DIR.parent,
+        Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else None,
+    ):
+        if base is None:
+            continue
+        extras.append(str(base / "tools" / "platform-tools"))
+    path = os.environ.get("PATH", "")
+    parts = [p for p in path.split(os.pathsep) if p]
+    merged = path
+    for e in reversed(extras):
+        if e not in parts and Path(e).is_dir():
+            merged = e + os.pathsep + merged
+            parts.insert(0, e)
+    os.environ["PATH"] = merged'''
+
+_LINUX_RUN_ADB_RETURN = "    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)"
+
+_WIN_RUN_ADB_RETURN = """    try:
+        return run_hidden(cmd, capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError:
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=127, stdout="", stderr="adb executable not found on PATH"
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=124, stdout="", stderr=f"adb timed out after {timeout}s"
+        )"""
+
+_LINUX_TK_IMPORT_BLOCK = """try:
+    import tkinter as tk
+    from tkinter import messagebox, scrolledtext, ttk
+
+    from git_update_check import run_startup_git_update_check, run_startup_release_update_check
+    from tk_window_scaling import apply_resizable_window, ensure_window_stacking, scaled_int
+except Exception:  # pragma: no cover
+    tk = None
+    messagebox = None
+    scrolledtext = None
+    ttk = None
+    apply_resizable_window = None  # type: ignore[assignment]
+    scaled_int = None  # type: ignore[assignment]
+    ensure_window_stacking = None  # type: ignore[assignment]
+    run_startup_git_update_check = None  # type: ignore[assignment]
+    run_startup_release_update_check = None  # type: ignore[assignment]"""
+
+_WIN_TK_IMPORT_BLOCK = """try:
+    import tkinter as tk
+    from tkinter import messagebox, scrolledtext, ttk
+except Exception:  # pragma: no cover
+    tk = None
+    messagebox = None
+    scrolledtext = None
+    ttk = None
+
+try:
+    from git_update_check import run_startup_git_update_check, run_startup_release_update_check
+except Exception:  # pragma: no cover
+    run_startup_git_update_check = None  # type: ignore[assignment]
+    run_startup_release_update_check = None  # type: ignore[assignment]
+
+try:
+    from tk_window_scaling import apply_resizable_window, ensure_window_stacking, scaled_int
+except Exception:  # pragma: no cover
+    apply_resizable_window = None  # type: ignore[assignment]
+    scaled_int = None  # type: ignore[assignment]
+    ensure_window_stacking = None  # type: ignore[assignment]"""
+
 
 def _apply_substitutions(text: str) -> str:
     for old, new in SUBSTITUTIONS:
@@ -71,8 +177,44 @@ def _apply_substitutions(text: str) -> str:
     return text
 
 
+def _inject_win_subprocess(text: str) -> str:
+    if "from win_subprocess import run_hidden" in text:
+        return text
+    if "import requests\n" in text:
+        return text.replace(
+            "import requests\n",
+            "import requests\n\nfrom win_subprocess import run_hidden\n",
+            1,
+        )
+    return "from win_subprocess import run_hidden\n\n" + text
+
+
+def _patch_subprocess_calls(text: str) -> str:
+    text = text.replace(_LINUX_RUN_ADB_RETURN, _WIN_RUN_ADB_RETURN)
+    text = text.replace(
+        "        r = subprocess.run(\n            [adb_executable(), \"version\"], capture_output=True, text=True, timeout=10\n        )",
+        "        r = run_hidden(\n            [adb_executable(), \"version\"], capture_output=True, text=True, timeout=10\n        )",
+    )
+    text = text.replace(
+        "        r = subprocess.run(\n            [_adb_executable(), \"version\"], capture_output=True, text=True, timeout=10\n        )",
+        "        r = run_hidden(\n            [_adb_executable(), \"version\"], capture_output=True, text=True, timeout=10\n        )",
+    )
+    for old in (
+        "proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)",
+        "proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)",
+        "proc = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)",
+        "proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)",
+    ):
+        text = text.replace(old, old.replace("subprocess.run", "run_hidden"))
+    return text
+
+
 def _patch_adb_deploy_win(text: str) -> str:
     text = text.replace(MESHCORE_LINUX, MESHCORE_WIN)
+    text = text.replace(_LINUX_TK_IMPORT_BLOCK, _WIN_TK_IMPORT_BLOCK)
+    text = text.replace(_LINUX_ENSURE_GUI_PATH, _WIN_ENSURE_GUI_PATH)
+    text = _inject_win_subprocess(text)
+    text = _patch_subprocess_calls(text)
     text = text.replace(
         "PROJECT_ROOT = SCRIPT_DIR.parent\nDEPLOY_ENV_PATH = PROJECT_ROOT / \"deploy.env\"",
         "if getattr(sys, \"frozen\", False):\n"
@@ -96,7 +238,6 @@ def _patch_adb_deploy_win(text: str) -> str:
         "    if not DEPLOY_ENV_PATH.is_file():\n"
         "        return",
     )
-    # Writable logs on Windows when frozen (AppData, not .local/share).
     old = """    if getattr(sys, "frozen", False):
         d = Path.home() / ".local" / "share" / "atak-pipeline" / "installer_logs"
     else:
@@ -113,6 +254,41 @@ def _patch_adb_deploy_win(text: str) -> str:
     return text
 
 
+def _patch_downloader_win(text: str) -> str:
+    text = _inject_win_subprocess(text)
+    text = _patch_subprocess_calls(text)
+    text = text.replace(
+        "from atak_adb_deploy_win import install_apk  # noqa: E402",
+        "from atak_adb_deploy_win import install_apk, ensure_gui_path_for_adb  # noqa: E402",
+    )
+    text = text.replace(
+        "def _resolve_adb_serial_for_push() -> Tuple[str, List[str]]:\n    devs = list_usb_devices()",
+        "def _resolve_adb_serial_for_push() -> Tuple[str, List[str]]:\n"
+        "    if not adb_available():\n"
+        "        return \"\", []\n"
+        "    devs = list_usb_devices()",
+    )
+    text = text.replace(
+        "def main() -> None:\n    log(\"Startup: beginning git update check...\")",
+        "def main() -> None:\n"
+        "    try:\n"
+        "        ensure_gui_path_for_adb()\n"
+        "    except Exception as exc:\n"
+        "        log(f\"Startup warning: adb PATH setup failed: {exc}\")\n"
+        "    log(\"Startup: beginning git update check...\")",
+    )
+    text = text.replace(
+        "    ensure_window_stacking(parent)\n    text = body if body is not None else DOWNLOADER_NEXT_SQLITE_DIALOG_TEXT",
+        "    text = body if body is not None else DOWNLOADER_NEXT_SQLITE_DIALOG_TEXT",
+    )
+    return text
+
+
+def _patch_dted_win(text: str) -> str:
+    text = _inject_win_subprocess(text)
+    return _patch_subprocess_calls(text)
+
+
 def _sync_renamed_modules() -> list[str]:
     updated: list[str] = []
     for src_name, dst_name in RENAMED_MODULES.items():
@@ -124,6 +300,10 @@ def _sync_renamed_modules() -> list[str]:
         text = _apply_substitutions(text)
         if dst_name == "atak_adb_deploy_win.py":
             text = _patch_adb_deploy_win(text)
+        elif dst_name == "atak_downloader_finalbuild_win.py":
+            text = _patch_downloader_win(text)
+        elif dst_name == "atak_dted_downloader_win.py":
+            text = _patch_dted_win(text)
         dst.write_text(text, encoding="utf-8")
         updated.append(dst_name)
     return updated
@@ -199,9 +379,10 @@ def main() -> None:
     if deploy_example.is_file():
         shutil.copy2(deploy_example, WIN / "deploy.env.example")
         data.append("deploy.env.example")
-    print("Synced windows_build from scripts/:")
+    print("Synced windows_build from scripts/ (Linux sources unchanged):")
     for line in renamed + copied + install_scripts + data:
         print(f"  - {line}")
+    print("Windows-only files preserved: tk_window_scaling.py, win_subprocess.py, windows_launcher.py, ...")
 
 
 if __name__ == "__main__":
