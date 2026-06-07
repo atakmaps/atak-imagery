@@ -130,7 +130,8 @@ Copied from `scripts/` **without** `_win` rename:
 | `windows_build/build_windows_exe.ps1` | PyInstaller dual EXE build + hidden imports + data bundle |
 | `scripts/setup_windows_pipeline.ps1` | Windows machine setup (copied to `windows_build/` for reference) |
 | `install_windows.cmd` | Maintainer setup entry (console — not end-user installer) |
-| `ATAK_Setup.iss` | **Future:** standard Inno Setup wizard for release (post-debugging) |
+| `ATAK_Setup.iss` | End-user Inno Setup wizard (`ATAKSetup-vX.Y.Z.exe`) — packages pre-built `dist\` EXEs |
+| `windows_build/build_windows_installer.ps1` | Compile `ATAK_Setup.iss` after EXE build |
 
 ### Launcher-specific rules (not in Linux)
 
@@ -174,10 +175,30 @@ Not part of `sync_windows_build.py`, but required for working EXEs:
 | B5 | Copy `platform-tools` (adb) to `dist\tools\` |
 | B6 | Copy `deploy.env.example`, `VERSION` beside EXEs |
 | B7 | Explicit `--add-binary libmgrs*.pyd` to `.` and `mgrs/` | Radius MGRS native library | `build_windows_exe.ps1` |
+| B8 | `ATAK_Setup.iss` + `build_windows_installer.ps1` | End-user `ATAKSetup-vX.Y.Z.exe` (Inno Setup 6) |
 
 ---
 
-## 11. TODO — add to sync when needed
+## 13. End-user Windows installer (Inno Setup)
+
+Built **after** both EXEs succeed in `dist\`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File windows_build\build_windows_installer.ps1
+```
+
+(`build_windows_exe.ps1` runs this automatically when Inno Setup 6 is installed.)
+
+| Behavior | Detail |
+|----------|--------|
+| User interaction | None during install (no welcome/dir/ready pages) |
+| Console windows | None (Inno GUI only) |
+| Progress | Status text while copying files + creating shortcuts |
+| Shortcuts | Desktop + Start Menu for both EXEs |
+| Finish message | Run Device Installer first (if needed), then Imagery Downloader |
+| Uninstall | Start Menu → Uninstall ATAK Pipeline |
+
+Output: `installer-dist\ATAKSetup-v{VERSION}.exe`
 
 | # | Gap | When to patch |
 |---|-----|----------------|
@@ -195,7 +216,7 @@ Not part of `sync_windows_build.py`, but required for working EXEs:
 3. If sync fails → Linux file accidentally contains Windows markers → **fix Linux, do not patch around it**  
 4. If new Linux feature needs Windows behavior → add row to sections 2–4 or §11, implement in sync, update this doc  
 5. `py_compile` + test both EXEs on Windows VM  
-6. *(Later)* Build `ATAKSetup.exe` from Inno Setup for end users  
+6. Build `installer-dist\ATAKSetup-vX.Y.Z.exe` (Inno Setup) for end users  
 
 ---
 

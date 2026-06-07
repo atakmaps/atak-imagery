@@ -249,3 +249,19 @@ Write-Host ""
 Write-Host "Build complete (v$Version):"
 Write-Host "  $(Join-Path $DistDir 'ATAKImageryDownloader.exe')"
 Write-Host "  $(Join-Path $DistDir 'ATAKDeviceInstaller.exe')"
+
+$InstallerScript = Join-Path $BuildRoot "build_windows_installer.ps1"
+if (Test-Path $InstallerScript) {
+    $IsccCandidates = @(
+        "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+        "${env:ProgramFiles}\Inno Setup 6\ISCC.exe"
+    ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ($IsccCandidates) {
+        Write-Host ""
+        Write-Host "=== Building end-user setup installer (Inno Setup) ==="
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $InstallerScript
+    } else {
+        Write-Host ""
+        Write-Host "Inno Setup 6 not found - skipped ATAKSetup.exe (install from https://jrsoftware.org/isdl.php)"
+    }
+}
