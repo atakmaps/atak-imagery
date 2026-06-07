@@ -24,7 +24,6 @@ DisableDirPage=yes
 DisableProgramGroupPage=yes
 DisableReadyPage=yes
 DisableWelcomePage=yes
-ShowTasksDialog=no
 WizardStyle=modern
 PrivilegesRequired=lowest
 OutputDir=installer-dist
@@ -32,17 +31,14 @@ OutputBaseFilename=ATAKSetup-v{#MyAppVersion}
 Compression=lzma2
 SolidCompression=yes
 CloseApplications=force
-RestartApplications=no
 SetupLogging=yes
 UninstallDisplayIcon={app}\{#MyInstallerExe}
-ArchitecturesAllowed=x64compatible
-ArchitecturesInstallIn64BitMode=x64compatible
+ArchitecturesAllowed=x64
+ArchitecturesInstallIn64BitMode=x64
 MinVersion=10.0
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
-
-[Tasks]
 
 [Files]
 Source: "dist\{#MyInstallerExe}"; DestDir: "{app}"; Flags: ignoreversion
