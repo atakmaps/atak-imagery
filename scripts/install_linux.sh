@@ -143,6 +143,9 @@ append_deploy_env_defaults() {
     if ! grep -qE "^[[:space:]]*ATAK_PLUGIN_GITHUB_REPO=" "$f" 2>/dev/null; then
         echo "ATAK_PLUGIN_GITHUB_REPO=$ATAK_BUNDLE_PLUGIN_REPO" >> "$f"
     fi
+    if ! grep -qE "^[[:space:]]*ATAK_MESHCORE_PLUGIN_GITHUB_REPO=" "$f" 2>/dev/null; then
+        echo "ATAK_MESHCORE_PLUGIN_GITHUB_REPO=atakmaps/TAK-MESHCORE" >> "$f"
+    fi
     if ! grep -qE "^[[:space:]]*ATAK_ADDON_PLUGIN_GITHUB_REPO=" "$f" 2>/dev/null; then
         echo "ATAK_ADDON_PLUGIN_GITHUB_REPO=atakmaps/atak-imagery" >> "$f"
     fi

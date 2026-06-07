@@ -263,21 +263,6 @@ def _patch_adb_deploy_win(text: str) -> str:
         "    PROJECT_ROOT = SCRIPT_DIR.parent\n"
         "DEPLOY_ENV_PATH = PROJECT_ROOT / \"deploy.env\"",
     )
-    text = text.replace(
-        "def load_deploy_env_file() -> None:\n"
-        "    if not DEPLOY_ENV_PATH.is_file():\n"
-        "        return",
-        "def load_deploy_env_file() -> None:\n"
-        "    if not DEPLOY_ENV_PATH.is_file():\n"
-        "        example = PROJECT_ROOT / \"deploy.env.example\"\n"
-        "        if example.is_file():\n"
-        "            try:\n"
-        "                shutil.copy2(example, DEPLOY_ENV_PATH)\n"
-        "            except OSError:\n"
-        "                pass\n"
-        "    if not DEPLOY_ENV_PATH.is_file():\n"
-        "        return",
-    )
     old = """    if getattr(sys, "frozen", False):
         d = Path.home() / ".local" / "share" / "atak-pipeline" / "installer_logs"
     else:

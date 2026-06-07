@@ -122,6 +122,7 @@ APP_TITLE = "ATAK Device Installer"
 DEFAULT_ATAK_PACKAGE = "com.atakmap.app.civ"
 DEFAULT_PLUGIN_PACKAGE = "com.uvpro.plugin"
 DEFAULT_MESHCORE_PLUGIN_PACKAGE = "com.meshcore.atakplugin"
+DEFAULT_MESHCORE_PLUGIN_GITHUB_REPO = "atakmaps/TAK-MESHCORE"
 DEFAULT_MESHCORE_PLUGIN_REPO = Path.home() / "Documents" / "ATAK" / "Plugins" / "MeshcoreAtak"
 
 # After ATAK APK is installed: show this while the user completes first-run on device.
@@ -290,18 +291,11 @@ def log_startup_context() -> None:
             logger.info("Env %s: %s", k, raw if raw else "(empty)")
 
 
-def load_deploy_env_file() -> None:
-    if not DEPLOY_ENV_PATH.is_file():
-        example = PROJECT_ROOT / "deploy.env.example"
-        if example.is_file():
-            try:
-                shutil.copy2(example, DEPLOY_ENV_PATH)
-            except OSError:
-                pass
-    if not DEPLOY_ENV_PATH.is_file():
+def _apply_deploy_env_file(path: Path, *, only_if_unset: bool = True) -> None:
+    if not path.is_file():
         return
     try:
-        raw = DEPLOY_ENV_PATH.read_text(encoding="utf-8")
+        raw = path.read_text(encoding="utf-8")
     except OSError:
         return
     for line in raw.splitlines():
@@ -319,8 +313,20 @@ def load_deploy_env_file() -> None:
             val = val[1:-1]
         if not key or not val:
             continue
-        if not os.environ.get(key, "").strip():
-            os.environ[key] = val
+        if only_if_unset and os.environ.get(key, "").strip():
+            continue
+        os.environ[key] = val
+
+
+def load_deploy_env_file() -> None:
+    example = PROJECT_ROOT / "deploy.env.example"
+    if not DEPLOY_ENV_PATH.is_file() and example.is_file():
+        try:
+            shutil.copy2(example, DEPLOY_ENV_PATH)
+        except OSError:
+            pass
+    _apply_deploy_env_file(DEPLOY_ENV_PATH)
+    _apply_deploy_env_file(example)
 
 
 def ensure_gui_path_for_adb() -> None:
@@ -930,7 +936,7 @@ def resolve_meshcore_plugin_apk() -> Tuple[Path, str, bool]:
             raise FileNotFoundError(f"ATAK_MESHCORE_PLUGIN_APK is not a file: {p}")
         return p, str(p), False
 
-    gh = env_optional("ATAK_MESHCORE_PLUGIN_GITHUB_REPO")
+    gh = env_optional("ATAK_MESHCORE_PLUGIN_GITHUB_REPO") or DEFAULT_MESHCORE_PLUGIN_GITHUB_REPO
     if gh:
         dl_url, rel_tag, asset_name = github_latest_release_plugin_apk(gh)
         log(
