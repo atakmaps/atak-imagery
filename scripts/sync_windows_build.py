@@ -9,6 +9,9 @@ Workflow:
 
 Run before every Windows EXE build:
   python3 scripts/sync_windows_build.py
+
+Maintainer checklist (every patch documented):
+  windows_build/LINUX_TO_WINDOWS_CONVERSION.md
 """
 
 from __future__ import annotations
