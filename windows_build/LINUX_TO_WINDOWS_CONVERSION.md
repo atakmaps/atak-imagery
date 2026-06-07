@@ -168,6 +168,7 @@ Not part of `sync_windows_build.py`, but required for working EXEs:
 | B3 | Hidden-import all `*_win`, `win_subprocess`, `tk_window_scaling`, helpers |
 | B4 | Copy `platform-tools` (adb) to `dist\tools\` |
 | B5 | Copy `deploy.env.example`, `VERSION` beside EXEs |
+| B6 | `pip install mgrs packaging` (radius MGRS coordinate entry) + PyInstaller `--collect-all mgrs` | `_patch_build_deps` in `build_windows_exe.ps1` |
 
 ---
 

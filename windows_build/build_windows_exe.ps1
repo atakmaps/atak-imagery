@@ -69,7 +69,12 @@ if (Test-Path $VersionFile) {
 
 Write-Host "Build Python: $PythonExe"
 & $PythonExe -m pip install --upgrade pip
-& $PythonExe -m pip install pyinstaller requests
+$WinReq = Join-Path $Root "requirements-windows-build.txt"
+if (Test-Path $WinReq) {
+    & $PythonExe -m pip install -r $WinReq
+} else {
+    & $PythonExe -m pip install pyinstaller requests mgrs packaging
+}
 
 $env:TCL_LIBRARY = $TclDir
 $env:TK_LIBRARY  = $TkDir
@@ -89,6 +94,10 @@ $HiddenImports = @(
     "tk_window_scaling",
     "win_subprocess",
     "usgs_throughput_probe",
+    "mgrs",
+    "mgrs.core",
+    "packaging",
+    "packaging.tags",
     "tkinter",
     "tkinter.filedialog",
     "tkinter.messagebox",
@@ -148,6 +157,8 @@ function Build-OneExe {
     foreach ($hi in $HiddenImports) {
         $pyArgs += @("--hidden-import", $hi)
     }
+    # mgrs uses a platform libmgrs.*.pyd beside the package — must collect binaries.
+    $pyArgs += @("--collect-all", "mgrs")
     $pyArgs += $Launcher
 
     Write-Host ""
