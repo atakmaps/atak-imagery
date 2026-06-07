@@ -27,12 +27,33 @@ function Resolve-Iscc {
         "${env:ProgramFiles}\Inno Setup 6\ISCC.exe",
         "${env:ProgramFiles(x86)}\Inno Setup 7\ISCC.exe",
         "${env:ProgramFiles}\Inno Setup 7\ISCC.exe",
-        (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe")
+        (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"),
+        (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 7\ISCC.exe")
     )) {
         if (Test-Path -LiteralPath $candidate) { return $candidate }
     }
     $cmd = Get-Command ISCC.exe -ErrorAction SilentlyContinue
     if ($cmd -and (Test-Path -LiteralPath $cmd.Source)) { return $cmd.Source }
+
+    foreach ($hive in @("HKLM:\SOFTWARE", "HKLM:\SOFTWARE\WOW6432Node", "HKCU:\SOFTWARE")) {
+        $key = Join-Path $hive "Microsoft\Windows\CurrentVersion\Uninstall\Inno Setup 6_is1"
+        if (Test-Path $key) {
+            $dir = (Get-ItemProperty $key -ErrorAction SilentlyContinue).InstallLocation
+            if ($dir) {
+                $iscc = Join-Path $dir.TrimEnd('\') "ISCC.exe"
+                if (Test-Path -LiteralPath $iscc) { return $iscc }
+            }
+        }
+        $key7 = Join-Path $hive "Microsoft\Windows\CurrentVersion\Uninstall\Inno Setup 7_is1"
+        if (Test-Path $key7) {
+            $dir = (Get-ItemProperty $key7 -ErrorAction SilentlyContinue).InstallLocation
+            if ($dir) {
+                $iscc = Join-Path $dir.TrimEnd('\') "ISCC.exe"
+                if (Test-Path -LiteralPath $iscc) { return $iscc }
+            }
+        }
+    }
+
     foreach ($root in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:LOCALAPPDATA)) {
         if (-not $root -or -not (Test-Path -LiteralPath $root)) { continue }
         $found = Get-ChildItem -Path $root -Filter ISCC.exe -Recurse -Depth 5 -ErrorAction SilentlyContinue |

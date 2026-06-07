@@ -17,9 +17,21 @@ function Find-Iscc {
         "${env:ProgramFiles}\Inno Setup 6\ISCC.exe",
         "${env:ProgramFiles(x86)}\Inno Setup 7\ISCC.exe",
         "${env:ProgramFiles}\Inno Setup 7\ISCC.exe",
-        (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe")
+        (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"),
+        (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 7\ISCC.exe")
     )) {
         if (Test-Path -LiteralPath $candidate) { return $candidate }
+    }
+    foreach ($hive in @("HKLM:\SOFTWARE", "HKLM:\SOFTWARE\WOW6432Node", "HKCU:\SOFTWARE")) {
+        foreach ($suffix in @("Inno Setup 6_is1", "Inno Setup 7_is1")) {
+            $key = Join-Path $hive "Microsoft\Windows\CurrentVersion\Uninstall\$suffix"
+            if (-not (Test-Path $key)) { continue }
+            $dir = (Get-ItemProperty $key -ErrorAction SilentlyContinue).InstallLocation
+            if ($dir) {
+                $iscc = Join-Path $dir.TrimEnd('\') "ISCC.exe"
+                if (Test-Path -LiteralPath $iscc) { return $iscc }
+            }
+        }
     }
     $cmd = Get-Command ISCC.exe -ErrorAction SilentlyContinue
     if ($cmd -and (Test-Path -LiteralPath $cmd.Source)) { return $cmd.Source }
