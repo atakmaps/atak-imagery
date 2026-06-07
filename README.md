@@ -55,15 +55,21 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.3.37` (tag **`v1.3.37`** on GitHub).
+**Linux / source release:** `v1.3.38` (tag **`v1.3.38`** on GitHub).
 
-**Windows:** Same version as Linux (`v1.3.36`). Build on a Windows VM with PyInstaller — see **Windows build** below. Previous packaged release was `2.8`; new builds ship **ATAK Device Installer** and **ATAK Imagery Downloader** together.
+**Windows:** Same version as Linux (`v1.3.38`). Build on a Windows VM with PyInstaller — see **Windows build** below.
 
-Version **1.3.37** highlights:
+Version **1.3.38** highlights:
+
+- **Meshcore out-of-box install:** Device Installer now downloads TAK-MESHCORE from GitHub Releases by default (`atakmaps/TAK-MESHCORE`), matching UV-PRO — no local Plugins folder required.
+- **deploy.env backfill:** missing keys from `deploy.env.example` are merged on startup so existing installs pick up new settings without manual edits.
+- **Linux install defaults:** `install_linux.sh` seeds `ATAK_MESHCORE_PLUGIN_GITHUB_REPO` on first run.
+
+### Previous release (v1.3.37)
 
 - **New Meshcore install options:** Device Installer now includes `ATAK + TAK-MESHCORE plugin` and `TAK-MESHCORE plugin only` in the install-choice screen.
 - **Multi-plugin install routing:** plugin install step now resolves and installs either UV-PRO or Meshcore based on selection while preserving existing wizard step flow.
-- **Meshcore source support:** installer can resolve Meshcore APKs from `ATAK_MESHCORE_PLUGIN_APK`, `ATAK_MESHCORE_PLUGIN_REPO`, or default `/home/paul/Documents/ATAK/Plugins/MeshcoreAtak`.
+- **Meshcore source support:** installer can resolve Meshcore APKs from `ATAK_MESHCORE_PLUGIN_APK`, `ATAK_MESHCORE_PLUGIN_REPO`, or default local Meshcore folder.
 
 ### Previous release (v1.3.36)
 
