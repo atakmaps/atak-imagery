@@ -2,6 +2,7 @@
 """PyInstaller entry: ATAK Device Installer (Windows)."""
 from __future__ import annotations
 
+import multiprocessing
 import os
 import sys
 import traceback
@@ -39,6 +40,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     # Only the frozen EXE may start the GUI (see windows_launcher.py).
     if getattr(sys, "frozen", False):
         main()

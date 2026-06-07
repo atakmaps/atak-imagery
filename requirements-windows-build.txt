@@ -2,3 +2,7 @@ requests
 pyinstaller
 mgrs
 packaging
+certifi
+urllib3
+charset-normalizer
+idna

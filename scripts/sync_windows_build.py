@@ -72,6 +72,7 @@ DIRECT_COPY = (
     "git_update_check.py",
     "bundled_plugin_install.py",
     "usgs_throughput_probe.py",
+    "atak_osmdroid_sqlite_footprint.py",
 )
 
 # Never overwritten — Windows-specific behavior lives here.
@@ -435,6 +436,18 @@ def main() -> None:
     for line in renamed + copied + install_scripts + data:
         print(f"  - {line}")
     print("Windows-only files preserved: tk_window_scaling.py, win_subprocess.py, windows_launcher.py, ...")
+
+    import sys
+
+    sys.path.insert(0, str(SCRIPTS))
+    from windows_bundle_manifest import validate_bundle_tree
+
+    bundle_errors = validate_bundle_tree(ROOT)
+    if bundle_errors:
+        raise RuntimeError(
+            "windows_build bundle incomplete after sync:\n"
+            + "\n".join(f"  - {e}" for e in bundle_errors)
+        )
 
 
 if __name__ == "__main__":

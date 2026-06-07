@@ -15,17 +15,6 @@ $VersionFile = Join-Path $Root "VERSION"
 $ToolsDir = Join-Path $Root "tools"
 $PlatformToolsDir = Join-Path $ToolsDir "platform-tools"
 
-foreach ($req in @(
-    (Join-Path $BuildRoot "windows_launcher.py"),
-    (Join-Path $BuildRoot "windows_installer_launcher.py"),
-    (Join-Path $BuildRoot "atak_adb_deploy_win.py"),
-    (Join-Path $BuildRoot "atak_downloader_finalbuild_win.py")
-)) {
-    if (-not (Test-Path $req)) {
-        throw "Missing required file: $req`nRun: python scripts/sync_windows_build.py (on Linux) or git pull."
-    }
-}
-
 function Resolve-BuildPython {
     param([string]$Preferred)
     if ($Preferred -and (Test-Path $Preferred)) {
@@ -43,10 +32,121 @@ function Resolve-BuildPython {
     throw "Python not found for build."
 }
 
+function Get-WindowsBundleManifest {
+    param([string]$Py, [string]$ScriptsRoot)
+    $raw = & $Py (Join-Path $ScriptsRoot "windows_bundle_manifest.py") --json
+    if ($LASTEXITCODE -ne 0) { throw "windows_bundle_manifest.py --json failed: $raw" }
+    return $raw | ConvertFrom-Json
+}
+
+function Format-PyInstallerAddData {
+    param(
+        [Parameter(Mandatory)][string]$SourcePath,
+        [Parameter(Mandatory)][string]$DestFolder
+    )
+    # PyInstaller on Windows: source;dest  (never use "path\" in double quotes - breaks PS parsing)
+    return ('{0};{1}' -f $SourcePath, $DestFolder)
+}
+
+function Stop-AtakAppProcesses {
+    foreach ($name in @("ATAKImageryDownloader", "ATAKDeviceInstaller", "ATAKPipeline")) {
+        Get-Process -Name $name -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Build-OneExe {
+    param(
+        [string]$Py,
+        [string]$Name,
+        [string]$Launcher,
+        [string]$WorkSubdir,
+        [string]$BuildRootPath,
+        [string]$ScriptsRoot,
+        [string]$DistRoot,
+        [string]$BuildWorkRoot,
+        [string]$TclPath,
+        [string]$TkPath,
+        [string]$DataRoot,
+        [string]$VersionLabel,
+        [array]$HiddenImportList,
+        [array]$ScriptBundleList,
+        [array]$CollectAllList,
+        $MgrsPydFile
+    )
+    $WorkPath = Join-Path $BuildWorkRoot $WorkSubdir
+    $SpecPath = Join-Path $Root "$Name.spec"
+    Remove-Item $WorkPath -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item $SpecPath -Force -ErrorAction SilentlyContinue
+
+    $pyArgs = @(
+        "-m", "PyInstaller",
+        "--noconfirm",
+        "--clean",
+        "--onefile",
+        "--windowed",
+        "--name", $Name,
+        "--paths", $BuildRootPath,
+        "--paths", $ScriptsRoot,
+        "--distpath", $DistRoot,
+        "--workpath", $WorkPath,
+        "--add-data", (Format-PyInstallerAddData -SourcePath $TclPath -DestFolder "_tcl_data"),
+        "--add-data", (Format-PyInstallerAddData -SourcePath $TkPath -DestFolder "_tk_data"),
+        "--add-data", (Format-PyInstallerAddData -SourcePath $DataRoot -DestFolder "scripts/data")
+    )
+    foreach ($scriptName in $ScriptBundleList) {
+        $src = Join-Path $BuildRootPath $scriptName
+        if (-not (Test-Path $src)) { $src = Join-Path $ScriptsRoot $scriptName }
+        if (Test-Path $src) {
+            $pyArgs += @("--add-data", (Format-PyInstallerAddData -SourcePath $src -DestFolder "scripts"))
+        }
+    }
+    foreach ($hi in $HiddenImportList) {
+        $pyArgs += @("--hidden-import", $hi)
+    }
+    foreach ($pkg in $CollectAllList) {
+        $pyArgs += @("--collect-all", $pkg)
+    }
+    if ($MgrsPydFile) {
+        $pyArgs += @("--add-binary", (Format-PyInstallerAddData -SourcePath $MgrsPydFile.FullName -DestFolder "."))
+        $pyArgs += @("--add-binary", (Format-PyInstallerAddData -SourcePath $MgrsPydFile.FullName -DestFolder "mgrs"))
+    }
+    $pyArgs += $Launcher
+
+    Write-Host ""
+    Write-Host "=== Building $Name.exe (v$VersionLabel) ==="
+    Stop-AtakAppProcesses
+    & $Py @pyArgs
+    if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed for $Name (exit $LASTEXITCODE)" }
+    Stop-AtakAppProcesses
+    $out = Join-Path $DistRoot "$Name.exe"
+    if (-not (Test-Path $out)) {
+        throw "Build did not produce $out"
+    }
+    Write-Host "Created: $out"
+}
+
+foreach ($req in @(
+    (Join-Path $BuildRoot "windows_launcher.py"),
+    (Join-Path $BuildRoot "windows_installer_launcher.py"),
+    (Join-Path $BuildRoot "atak_adb_deploy_win.py"),
+    (Join-Path $BuildRoot "atak_downloader_finalbuild_win.py")
+)) {
+    if (-not (Test-Path $req)) {
+        throw "Missing required file: $req`nRun: python scripts/sync_windows_build.py (on Linux) or git pull."
+    }
+}
+
 $PythonExe = Resolve-BuildPython -Preferred $PythonExe
 Write-Host ""
 Write-Host "=== Syncing windows_build from scripts/ (Linux copy + Windows patches) ==="
 & $PythonExe (Join-Path $ScriptsDir "sync_windows_build.py")
+if ($LASTEXITCODE -ne 0) { throw "sync_windows_build.py failed" }
+
+Write-Host "=== Auditing Windows bundle (manifest + py_compile) ==="
+& $PythonExe (Join-Path $ScriptsDir "audit_windows_bundle.py")
+if ($LASTEXITCODE -ne 0) { throw "audit_windows_bundle.py failed - fix missing modules/deps before building" }
+
+$BundleManifest = Get-WindowsBundleManifest -Py $PythonExe -ScriptsRoot $ScriptsDir
 $PythonRoot = Split-Path -Parent $PythonExe
 $TclDir = Join-Path $PythonRoot "tcl\tcl8.6"
 $TkDir  = Join-Path $PythonRoot "tcl\tk8.6"
@@ -73,10 +173,9 @@ $WinReq = Join-Path $Root "requirements-windows-build.txt"
 if (Test-Path $WinReq) {
     & $PythonExe -m pip install -r $WinReq
 } else {
-    & $PythonExe -m pip install pyinstaller requests mgrs packaging
+    & $PythonExe -m pip install pyinstaller requests mgrs packaging certifi urllib3 charset-normalizer idna
 }
 
-# mgrs ships libmgrs.cp313-win_amd64.pyd next to site-packages (not inside mgrs/) — PyInstaller must bundle it explicitly.
 $MgrsNativePyd = $null
 try {
     $sitePackages = (& $PythonExe -c "import site; print(site.getsitepackages()[0])").Trim()
@@ -90,7 +189,7 @@ try {
 if ($MgrsNativePyd) {
     Write-Host "MGRS native library: $($MgrsNativePyd.FullName)"
 } else {
-    Write-Warning "libmgrs*.pyd not found after pip install mgrs — radius MGRS entry will fail in the EXE."
+    Write-Warning "libmgrs*.pyd not found after pip install mgrs - radius MGRS entry will fail in the EXE."
 }
 
 $env:TCL_LIBRARY = $TclDir
@@ -99,104 +198,32 @@ $env:TK_LIBRARY  = $TkDir
 Remove-Item $BuildDir -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
 
-$HiddenImports = @(
-    "atak_downloader_finalbuild_win",
-    "atak_downloader_from_installer_win",
-    "atak_imagery_sqlite_builder_finalbuild_win",
-    "atak_dted_downloader_win",
-    "atak_adb_deploy_win",
-    "bundled_plugin_install",
-    "git_update_check",
-    "imagery_tile_selection",
-    "tk_window_scaling",
-    "win_subprocess",
-    "usgs_throughput_probe",
-    "mgrs",
-    "mgrs.core",
-    "packaging",
-    "packaging.tags",
-    "tkinter",
-    "tkinter.filedialog",
-    "tkinter.messagebox",
-    "tkinter.simpledialog",
-    "tkinter.ttk",
-    "_tkinter"
-)
+Write-Host "=== Smoke-importing bundled modules (Windows build venv) ==="
+& $PythonExe (Join-Path $ScriptsDir "audit_windows_bundle.py") --smoke-imports
+if ($LASTEXITCODE -ne 0) { throw "Import smoke test failed - a runtime module or pip dependency is missing" }
 
-$ScriptBundles = @(
-    "imagery_tile_selection.py",
-    "git_update_check.py",
-    "tk_window_scaling.py",
-    "win_subprocess.py",
-    "bundled_plugin_install.py",
-    "usgs_throughput_probe.py"
-)
+$HiddenImports = @($BundleManifest.hidden_imports)
+$ScriptBundles = @($BundleManifest.script_bundles)
+$CollectAll = @($BundleManifest.collect_all)
 
-function Stop-AtakAppProcesses {
-    foreach ($name in @("ATAKImageryDownloader", "ATAKDeviceInstaller", "ATAKPipeline")) {
-        Get-Process -Name $name -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    }
+$buildCommon = @{
+    Py               = $PythonExe
+    BuildRootPath    = $BuildRoot
+    ScriptsRoot      = $ScriptsDir
+    DistRoot         = $DistDir
+    BuildWorkRoot    = $BuildDir
+    TclPath          = $TclDir
+    TkPath           = $TkDir
+    DataRoot         = $DataDir
+    VersionLabel     = $Version
+    HiddenImportList = $HiddenImports
+    ScriptBundleList = $ScriptBundles
+    CollectAllList   = $CollectAll
+    MgrsPydFile      = $MgrsNativePyd
 }
 
-function Build-OneExe {
-    param(
-        [string]$Name,
-        [string]$Launcher,
-        [string]$WorkSubdir
-    )
-    $WorkPath = Join-Path $BuildDir $WorkSubdir
-    $SpecPath = Join-Path $Root "$Name.spec"
-    Remove-Item $WorkPath -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item $SpecPath -Force -ErrorAction SilentlyContinue
-
-    $pyArgs = @(
-        "-m", "PyInstaller",
-        "--noconfirm",
-        "--clean",
-        "--onefile",
-        "--windowed",
-        "--name", $Name,
-        "--paths", $BuildRoot,
-        "--paths", $ScriptsDir,
-        "--distpath", $DistDir,
-        "--workpath", $WorkPath,
-        "--add-data", "${TclDir};_tcl_data",
-        "--add-data", "${TkDir};_tk_data",
-        "--add-data", "$DataDir;scripts\data"
-    )
-    foreach ($scriptName in $ScriptBundles) {
-        $src = Join-Path $BuildRoot $scriptName
-        if (-not (Test-Path $src)) { $src = Join-Path $ScriptsDir $scriptName }
-        if (Test-Path $src) {
-            $pyArgs += @("--add-data", "${src};scripts\")
-        }
-    }
-    foreach ($hi in $HiddenImports) {
-        $pyArgs += @("--hidden-import", $hi)
-    }
-    # mgrs uses a platform libmgrs.*.pyd beside the package — must collect binaries.
-    $pyArgs += @("--collect-all", "mgrs")
-    if ($MgrsNativePyd) {
-        # Loader checks mgrs/ folder and its parent (_MEIPASS root when frozen).
-        $pyArgs += @("--add-binary", "$($MgrsNativePyd.FullName);.")
-        $pyArgs += @("--add-binary", "$($MgrsNativePyd.FullName);mgrs")
-    }
-    $pyArgs += $Launcher
-
-    Write-Host ""
-    Write-Host "=== Building $Name.exe (v$Version) ==="
-    Stop-AtakAppProcesses
-    & $PythonExe @pyArgs
-    Stop-AtakAppProcesses
-    $out = Join-Path $DistDir "$Name.exe"
-    if (-not (Test-Path $out)) {
-        throw "Build did not produce $out"
-    }
-    Write-Host "Created: $out"
-}
-
-Build-OneExe -Name "ATAKImageryDownloader" -Launcher (Join-Path $BuildRoot "windows_launcher.py") -WorkSubdir "imagery"
-Build-OneExe -Name "ATAKDeviceInstaller" -Launcher (Join-Path $BuildRoot "windows_installer_launcher.py") -WorkSubdir "installer"
+Build-OneExe @buildCommon -Name "ATAKImageryDownloader" -Launcher (Join-Path $BuildRoot "windows_launcher.py") -WorkSubdir "imagery"
+Build-OneExe @buildCommon -Name "ATAKDeviceInstaller" -Launcher (Join-Path $BuildRoot "windows_installer_launcher.py") -WorkSubdir "installer"
 
 $DeployExample = Join-Path $Root "deploy.env.example"
 if (-not (Test-Path $DeployExample)) { $DeployExample = Join-Path $BuildRoot "deploy.env.example" }
@@ -211,7 +238,6 @@ if (Test-Path $VersionFile) {
     Copy-Item $VersionFile (Join-Path $DistDir "VERSION") -Force
 }
 
-# Bundle adb beside EXEs so frozen apps find it without a global PATH install.
 if (Test-Path (Join-Path $PlatformToolsDir "adb.exe")) {
     $distTools = Join-Path $DistDir "tools\platform-tools"
     New-Item -ItemType Directory -Force -Path $distTools | Out-Null
