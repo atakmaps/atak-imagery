@@ -19,12 +19,24 @@ function Write-Step([string]$Msg) {
 
 function Resolve-Iscc {
     param([string]$Preferred)
-    if ($Preferred -and (Test-Path $Preferred)) { return $Preferred }
+    if ($Preferred -and (Test-Path -LiteralPath $Preferred)) {
+        return (Resolve-Path -LiteralPath $Preferred).Path
+    }
     foreach ($candidate in @(
         "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
-        "${env:ProgramFiles}\Inno Setup 6\ISCC.exe"
+        "${env:ProgramFiles}\Inno Setup 6\ISCC.exe",
+        (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe")
     )) {
-        if (Test-Path $candidate) { return $candidate }
+        if (Test-Path -LiteralPath $candidate) { return $candidate }
+    }
+    $cmd = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+    if ($cmd -and (Test-Path -LiteralPath $cmd.Source)) { return $cmd.Source }
+    foreach ($root in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:LOCALAPPDATA)) {
+        if (-not $root -or -not (Test-Path -LiteralPath $root)) { continue }
+        $found = Get-ChildItem -Path $root -Filter ISCC.exe -Recurse -Depth 5 -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match 'Inno Setup' } |
+            Select-Object -First 1 -ExpandProperty FullName
+        if ($found) { return $found }
     }
     return $null
 }
@@ -71,9 +83,21 @@ Write-Step "Checking Inno Setup compiler"
 $Iscc = Resolve-Iscc -Preferred $IsccPath
 if (-not $Iscc) {
     throw @"
-Inno Setup 6 not found. Install from https://jrsoftware.org/isdl.php
-Then rerun:
+Inno Setup 6 is not installed (ISCC.exe not found).
+
+Install it, then rerun this script:
+
+  winget install --id JRSoftware.InnoSetup -e --accept-package-agreements --accept-source-agreements
+
+Or download innosetup-6.x.exe from https://jrsoftware.org/isdl.php and run the installer.
+
+After install, close and reopen PowerShell, then:
+
   powershell -ExecutionPolicy Bypass -File windows_build\build_windows_installer.ps1
+
+If ISCC is installed in a custom location:
+
+  powershell -ExecutionPolicy Bypass -File windows_build\build_windows_installer.ps1 -IsccPath "C:\path\to\ISCC.exe"
 "@
 }
 Write-Host "  ISCC: $Iscc"
