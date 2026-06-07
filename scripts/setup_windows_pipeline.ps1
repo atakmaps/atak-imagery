@@ -132,8 +132,58 @@ function Install-PlatformTools {
     return $adb
 }
 
+function Stop-AdbProcesses {
+    foreach ($name in @("adb")) {
+        Get-Process -Name $name -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    }
+    foreach ($adbPath in @(
+        (Join-Path $InstallDir "tools\platform-tools\adb.exe"),
+        (Join-Path $PlatformToolsDir "adb.exe"),
+        (Join-Path $DistDir "tools\platform-tools\adb.exe")
+    )) {
+        if (Test-Path $adbPath) {
+            try { & $adbPath kill-server 2>$null | Out-Null } catch { }
+        }
+    }
+    $adbCmd = Get-Command adb -ErrorAction SilentlyContinue
+    if ($adbCmd) {
+        try { & adb kill-server 2>$null | Out-Null } catch { }
+    }
+}
+
+function Copy-PlatformTools {
+    param(
+        [string]$SourceDir,
+        [string]$DestDir
+    )
+    if (-not (Test-Path $SourceDir)) { return }
+    New-Item -ItemType Directory -Force -Path $DestDir | Out-Null
+    $maxAttempts = 3
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        try {
+            Copy-Item (Join-Path $SourceDir "*") $DestDir -Recurse -Force -ErrorAction Stop
+            Write-Log "Copied platform-tools to: $DestDir"
+            return
+        } catch {
+            if ($attempt -lt $maxAttempts) {
+                Write-Log "platform-tools copy blocked (attempt $attempt/$maxAttempts); stopping adb and retrying..."
+                Stop-AdbProcesses
+                Start-Sleep -Seconds 2
+            } elseif (Test-Path (Join-Path $DestDir "adb.exe")) {
+                Write-Log "WARNING: Could not refresh platform-tools (adb.exe in use). Keeping existing install copy."
+                return
+            } else {
+                throw
+            }
+        }
+    }
+}
+
 function Install-BuiltPrograms {
     Write-Log "Installing programs to: $InstallDir"
+    Stop-AtakAppProcesses
+    Stop-AdbProcesses
+    Start-Sleep -Seconds 1
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
     foreach ($exe in @("ATAKDeviceInstaller.exe", "ATAKImageryDownloader.exe")) {
@@ -143,11 +193,10 @@ function Install-BuiltPrograms {
     }
 
     $installTools = Join-Path $InstallDir "tools\platform-tools"
-    New-Item -ItemType Directory -Force -Path $installTools | Out-Null
     if (Test-Path (Join-Path $DistDir "tools\platform-tools")) {
-        Copy-Item (Join-Path $DistDir "tools\platform-tools\*") $installTools -Recurse -Force
+        Copy-PlatformTools -SourceDir (Join-Path $DistDir "tools\platform-tools") -DestDir $installTools
     } elseif (Test-Path $PlatformToolsDir) {
-        Copy-Item (Join-Path $PlatformToolsDir "*") $installTools -Recurse -Force
+        Copy-PlatformTools -SourceDir $PlatformToolsDir -DestDir $installTools
     }
 
     $deployExample = Join-Path $Root "deploy.env.example"
