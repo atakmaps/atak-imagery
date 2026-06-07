@@ -52,6 +52,9 @@ Configuration (environment variables — in ``deploy.env`` at the project root):
   among network/manifest sources after the above).
 
   ATAK_MESHCORE_PLUGIN_APK — optional explicit TAK-MESHCORE plugin APK path.
+  ATAK_MESHCORE_PLUGIN_GITHUB_REPO — **recommended**: ``owner/repo`` (e.g. atakmaps/TAK-MESHCORE).
+    Downloads the chosen ``.apk`` from that repo's *Latest* GitHub Release.
+  ATAK_MESHCORE_PLUGIN_APK_URL — optional HTTP(S) URL to a Meshcore ``.apk``.
   ATAK_MESHCORE_PLUGIN_REPO — optional directory containing TAK-MESHCORE APK(s);
     newest .apk is selected. Defaults to
     /home/paul/Documents/ATAK/Plugins/MeshcoreAtak when present.
@@ -257,6 +260,8 @@ def log_startup_context() -> None:
             "ATAK_PLUGIN_APK",
             "ATAK_PLUGIN_APK_URL",
             "ATAK_MESHCORE_PLUGIN_APK",
+            "ATAK_MESHCORE_PLUGIN_GITHUB_REPO",
+            "ATAK_MESHCORE_PLUGIN_APK_URL",
             "ATAK_MESHCORE_PLUGIN_REPO",
             "ATAK_PACKAGE_NAME",
             "ANDROID_SERIAL",
@@ -880,8 +885,10 @@ def resolve_meshcore_plugin_apk() -> Tuple[Path, str, bool]:
 
     Resolution order:
       1. ATAK_MESHCORE_PLUGIN_APK — explicit file
-      2. ATAK_MESHCORE_PLUGIN_REPO — newest .apk under directory
-      3. DEFAULT_MESHCORE_PLUGIN_REPO — newest .apk under directory
+      2. ATAK_MESHCORE_PLUGIN_GITHUB_REPO — GitHub Releases latest .apk
+      3. ATAK_MESHCORE_PLUGIN_APK_URL — download URL
+      4. ATAK_MESHCORE_PLUGIN_REPO — newest .apk under directory
+      5. DEFAULT_MESHCORE_PLUGIN_REPO — newest .apk under directory
     """
     env_apk = env_optional("ATAK_MESHCORE_PLUGIN_APK")
     if env_apk:
@@ -889,6 +896,26 @@ def resolve_meshcore_plugin_apk() -> Tuple[Path, str, bool]:
         if not p.is_file():
             raise FileNotFoundError(f"ATAK_MESHCORE_PLUGIN_APK is not a file: {p}")
         return p, str(p), False
+
+    gh = env_optional("ATAK_MESHCORE_PLUGIN_GITHUB_REPO")
+    if gh:
+        dl_url, rel_tag, asset_name = github_latest_release_plugin_apk(gh)
+        log(
+            f"Meshcore plugin APK from GitHub Releases (latest): {gh} @ {rel_tag} — asset {asset_name!r}"
+        )
+        fd, tmp = tempfile.mkstemp(suffix=".apk")
+        os.close(fd)
+        tmp_path = Path(tmp)
+        download_file(dl_url, tmp_path)
+        return tmp_path, f"github-releases:{gh}@{rel_tag}:{asset_name}", True
+
+    plugin_url = env_optional("ATAK_MESHCORE_PLUGIN_APK_URL")
+    if plugin_url:
+        fd, tmp = tempfile.mkstemp(suffix=".apk")
+        os.close(fd)
+        tmp_path = Path(tmp)
+        download_file(plugin_url, tmp_path)
+        return tmp_path, plugin_url, True
 
     env_repo = env_optional("ATAK_MESHCORE_PLUGIN_REPO")
     for repo in (env_repo, str(DEFAULT_MESHCORE_PLUGIN_REPO)):
@@ -905,9 +932,10 @@ def resolve_meshcore_plugin_apk() -> Tuple[Path, str, bool]:
 
     raise RuntimeError(
         "No TAK-MESHCORE plugin APK source found.\n\n"
-        "Set ATAK_MESHCORE_PLUGIN_APK (explicit file) or ATAK_MESHCORE_PLUGIN_REPO "
-        "(directory containing Meshcore .apk).\n"
-        f"Default search path: {DEFAULT_MESHCORE_PLUGIN_REPO}"
+        "Set ATAK_MESHCORE_PLUGIN_GITHUB_REPO (recommended, e.g. atakmaps/TAK-MESHCORE), "
+        "ATAK_MESHCORE_PLUGIN_APK (explicit file), ATAK_MESHCORE_PLUGIN_APK_URL, "
+        "or ATAK_MESHCORE_PLUGIN_REPO (directory containing Meshcore .apk).\n"
+        f"Default local search path: {DEFAULT_MESHCORE_PLUGIN_REPO}"
     )
 
 
