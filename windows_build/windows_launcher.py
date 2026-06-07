@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import multiprocessing
 import sys
 import os
 import traceback
@@ -37,6 +38,9 @@ def main() -> None:
         raise
 
 if __name__ == "__main__":
+    # Required on Windows frozen EXE: spawn workers re-exec the EXE; without this,
+    # each worker runs main() again and the Welcome screen reappears.
+    multiprocessing.freeze_support()
     # Only the frozen EXE may start the GUI. PyInstaller runs this file as __main__
     # during build with frozen=False — must not open any window then.
     if getattr(sys, "frozen", False):
