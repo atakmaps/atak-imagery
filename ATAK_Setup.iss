@@ -33,8 +33,8 @@ SolidCompression=yes
 CloseApplications=force
 SetupLogging=yes
 UninstallDisplayIcon={app}\{#MyInstallerExe}
-ArchitecturesAllowed=x64
-ArchitecturesInstallIn64BitMode=x64
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
 
 [Languages]
