@@ -13,12 +13,12 @@ $InstallerPath = Join-Path $CacheDir "innosetup-6.7.3.exe"
 
 function Find-Iscc {
     foreach ($candidate in @(
+        (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"),
+        (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 7\ISCC.exe"),
         "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
         "${env:ProgramFiles}\Inno Setup 6\ISCC.exe",
         "${env:ProgramFiles(x86)}\Inno Setup 7\ISCC.exe",
-        "${env:ProgramFiles}\Inno Setup 7\ISCC.exe",
-        (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"),
-        (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 7\ISCC.exe")
+        "${env:ProgramFiles}\Inno Setup 7\ISCC.exe"
     )) {
         if (Test-Path -LiteralPath $candidate) { return $candidate }
     }

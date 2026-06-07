@@ -253,9 +253,13 @@ Write-Host "  $(Join-Path $DistDir 'ATAKDeviceInstaller.exe')"
 $InstallerScript = Join-Path $BuildRoot "build_windows_installer.ps1"
 if (Test-Path $InstallerScript) {
     $IsccCandidates = @(
+        (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"),
+        (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 7\ISCC.exe"),
         "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
-        "${env:ProgramFiles}\Inno Setup 6\ISCC.exe"
-    ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+        "${env:ProgramFiles}\Inno Setup 6\ISCC.exe",
+        "${env:ProgramFiles(x86)}\Inno Setup 7\ISCC.exe",
+        "${env:ProgramFiles}\Inno Setup 7\ISCC.exe"
+    ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
     if ($IsccCandidates) {
         Write-Host ""
         Write-Host "=== Building end-user setup installer (Inno Setup) ==="
