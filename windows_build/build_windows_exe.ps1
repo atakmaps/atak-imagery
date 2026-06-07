@@ -84,6 +84,7 @@ $HiddenImports = @(
     "git_update_check",
     "imagery_tile_selection",
     "tk_window_scaling",
+    "win_subprocess",
     "usgs_throughput_probe",
     "tkinter",
     "tkinter.filedialog",
@@ -97,6 +98,7 @@ $ScriptBundles = @(
     "imagery_tile_selection.py",
     "git_update_check.py",
     "tk_window_scaling.py",
+    "win_subprocess.py",
     "bundled_plugin_install.py",
     "usgs_throughput_probe.py"
 )

@@ -89,7 +89,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import requests
+from win_subprocess import run_hidden
 
 try:
     import tkinter as tk
@@ -386,7 +386,7 @@ def run_adb(args: List[str], serial: Optional[str] = None, timeout: int = 120) -
         cmd += ["-s", serial]
     cmd.extend(args)
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return run_hidden(cmd, capture_output=True, text=True, timeout=timeout)
     except FileNotFoundError:
         return subprocess.CompletedProcess(
             args=cmd, returncode=127, stdout="", stderr="adb executable not found on PATH"
@@ -399,7 +399,7 @@ def run_adb(args: List[str], serial: Optional[str] = None, timeout: int = 120) -
 
 def adb_available() -> bool:
     try:
-        r = subprocess.run(
+        r = run_hidden(
             [adb_executable(), "version"], capture_output=True, text=True, timeout=10
         )
         return r.returncode == 0

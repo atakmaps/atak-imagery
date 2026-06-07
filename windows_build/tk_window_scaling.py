@@ -6,6 +6,7 @@ scales proportionally to the available screen, clamps so the window fits within 
 """
 from __future__ import annotations
 
+import sys
 import tkinter as tk
 from typing import Callable, List, Optional, Tuple
 
@@ -274,6 +275,18 @@ def ensure_window_stacking(
     try:
         top = win.winfo_toplevel()
     except tk.TclError:
+        return
+
+    if sys.platform == "win32":
+        # Linux-style topmost/focus_force pulses flash windows and can require
+        # multiple clicks to dismiss modal dialogs on Windows.
+        try:
+            if above is not None:
+                top.lift(above)
+            else:
+                top.lift()
+        except tk.TclError:
+            pass
         return
 
     # Track pulse timers per toplevel so stale callbacks do not survive teardown.

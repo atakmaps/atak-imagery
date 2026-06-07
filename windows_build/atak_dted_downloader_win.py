@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
-import requests
+from win_subprocess import run_hidden
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog
 
@@ -148,7 +148,7 @@ def query_device_installed_dted_states(log_fn: Optional[Callable[[str], None]] =
     remote_manifest = f"{root.rstrip('/')}/DTED/{_DEVICE_DTED_MANIFEST_FILENAME}"
     cmd = _adb_base_cmd() + ["shell", "cat", remote_manifest]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        proc = run_hidden(cmd, capture_output=True, text=True, timeout=15)
         if proc.returncode != 0:
             _log("DTED device check: no manifest on device (first run or device not connected).")
             return None
@@ -197,7 +197,7 @@ def push_device_dted_manifest(all_installed_states: Set[str], log_fn: Optional[C
             json.dump(payload, tf, indent=2)
             tmp_path = tf.name
         cmd = _adb_base_cmd() + ["push", tmp_path, remote_manifest]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        proc = run_hidden(cmd, capture_output=True, text=True, timeout=30)
         if proc.returncode != 0:
             _log(f"DTED manifest push failed (non-fatal): {(proc.stderr or proc.stdout or '').strip()}")
         else:
@@ -291,7 +291,7 @@ def adb_push_pipeline_outputs(
     for cmd in steps:
         log_lines.append(" ".join(cmd))
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
+            proc = run_hidden(cmd, capture_output=True, text=True, timeout=7200)
         except subprocess.TimeoutExpired:
             return False, "adb timed out during push.\n\n" + "\n".join(log_lines)
         if proc.returncode != 0:
@@ -336,7 +336,7 @@ def adb_restart_atak_civ() -> None:
         log_line = " ".join(cmd)
         log(f"Running: {log_line}")
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            proc = run_hidden(cmd, capture_output=True, text=True, timeout=120)
             if proc.returncode != 0:
                 err = (proc.stderr or proc.stdout or "").strip()
                 log(f"adb exit {proc.returncode}: {err}")

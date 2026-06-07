@@ -149,7 +149,7 @@ from imagery_tile_selection import (  # noqa: E402
 # Load on the main thread only: first-importing ``atak_adb_deploy`` from the download worker
 # pulls in tkinter on a background thread and can abort with Tcl_AsyncDelete on Linux/X11.
 from atak_adb_deploy_win import install_apk, ensure_gui_path_for_adb  # noqa: E402
-from bundled_plugin_install import iter_bundled_addon_apks  # noqa: E402
+from win_subprocess import run_hidden
 
 
 def sanitize_radius_imagery_folder_name(raw: str) -> str:
@@ -285,7 +285,7 @@ def _run_adb(args: List[str], serial: Optional[str] = None, timeout: int = 120) 
         cmd.extend(["-s", serial])
     cmd.extend(args)
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return run_hidden(cmd, capture_output=True, text=True, timeout=timeout)
     except FileNotFoundError:
         return subprocess.CompletedProcess(
             args=cmd, returncode=127, stdout="", stderr="adb executable not found on PATH"
@@ -298,7 +298,7 @@ def _run_adb(args: List[str], serial: Optional[str] = None, timeout: int = 120) 
 
 def adb_available() -> bool:
     try:
-        r = subprocess.run(
+        r = run_hidden(
             [_adb_executable(), "version"], capture_output=True, text=True, timeout=10
         )
         return r.returncode == 0
@@ -1888,7 +1888,6 @@ def run_refresh_addons_only(progress: Any) -> None:
 
 def show_downloader_session_exit_dialog(parent: tk.Tk, body: Optional[str] = None) -> None:
     """After imagery (and optional inline DTED), prompt user before launching the SQLite builder."""
-    ensure_window_stacking(parent)
     text = body if body is not None else DOWNLOADER_NEXT_SQLITE_DIALOG_TEXT
     dlg = tk.Toplevel(parent)
     dlg.title(APP_TITLE)
