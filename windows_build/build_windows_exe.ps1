@@ -76,6 +76,23 @@ if (Test-Path $WinReq) {
     & $PythonExe -m pip install pyinstaller requests mgrs packaging
 }
 
+# mgrs ships libmgrs.cp313-win_amd64.pyd next to site-packages (not inside mgrs/) — PyInstaller must bundle it explicitly.
+$MgrsNativePyd = $null
+try {
+    $sitePackages = (& $PythonExe -c "import site; print(site.getsitepackages()[0])").Trim()
+    if ($sitePackages -and (Test-Path $sitePackages)) {
+        $MgrsNativePyd = Get-ChildItem $sitePackages -Filter "libmgrs*.pyd" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $MgrsNativePyd) {
+            $MgrsNativePyd = Get-ChildItem $sitePackages -Recurse -Filter "libmgrs*.pyd" -ErrorAction SilentlyContinue | Select-Object -First 1
+        }
+    }
+} catch { }
+if ($MgrsNativePyd) {
+    Write-Host "MGRS native library: $($MgrsNativePyd.FullName)"
+} else {
+    Write-Warning "libmgrs*.pyd not found after pip install mgrs — radius MGRS entry will fail in the EXE."
+}
+
 $env:TCL_LIBRARY = $TclDir
 $env:TK_LIBRARY  = $TkDir
 
@@ -159,6 +176,11 @@ function Build-OneExe {
     }
     # mgrs uses a platform libmgrs.*.pyd beside the package — must collect binaries.
     $pyArgs += @("--collect-all", "mgrs")
+    if ($MgrsNativePyd) {
+        # Loader checks mgrs/ folder and its parent (_MEIPASS root when frozen).
+        $pyArgs += @("--add-binary", "$($MgrsNativePyd.FullName);.")
+        $pyArgs += @("--add-binary", "$($MgrsNativePyd.FullName);mgrs")
+    }
     $pyArgs += $Launcher
 
     Write-Host ""

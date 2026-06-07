@@ -65,6 +65,7 @@ Sync **refuses to run** if Linux runtime files contain Windows-only markers (`wi
 | D3 | `_run_adb()` / `adb_available()`: `run_hidden` + soft-fail | Same as A8 | `_patch_subprocess_calls` |
 | D4 | `_resolve_adb_serial_for_push()`: return early if `not adb_available()` | Skip push when no adb | `_patch_downloader_win` |
 | D5 | `show_downloader_session_exit_dialog()`: do **not** call `ensure_window_stacking(parent)` before modal | Windows focus pulse breaks Finish dialog (multi-click) | `_patch_downloader_win` |
+| D6 | `parse_mgrs_to_latlon()`: add `_MEIPASS` to DLL search path when frozen | PyInstaller must find bundled `libmgrs*.pyd` | `_patch_downloader_win` |
 
 **Status:** ✅ all in sync
 
@@ -168,7 +169,7 @@ Not part of `sync_windows_build.py`, but required for working EXEs:
 | B3 | Hidden-import all `*_win`, `win_subprocess`, `tk_window_scaling`, helpers |
 | B4 | Copy `platform-tools` (adb) to `dist\tools\` |
 | B5 | Copy `deploy.env.example`, `VERSION` beside EXEs |
-| B6 | `pip install mgrs packaging` (radius MGRS coordinate entry) + PyInstaller `--collect-all mgrs` | `_patch_build_deps` in `build_windows_exe.ps1` |
+| B6 | `pip install mgrs packaging` + PyInstaller `--collect-all mgrs` + explicit `--add-binary libmgrs*.pyd` to `.` and `mgrs/` | Radius MGRS needs native `.pyd` beside site-packages | `build_windows_exe.ps1` |
 
 ---
 

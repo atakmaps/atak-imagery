@@ -1978,6 +1978,13 @@ def avg_tile_bytes_by_zoom(payload: Dict[str, Any]) -> Dict[int, int]:
 
 
 def parse_mgrs_to_latlon(mgrs_str: str) -> Tuple[float, float]:
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        _mgrs_base = Path(sys._MEIPASS)
+        if hasattr(os, "add_dll_directory"):
+            os.add_dll_directory(str(_mgrs_base))
+        _path = os.environ.get("PATH", "")
+        if str(_mgrs_base) not in _path.split(os.pathsep):
+            os.environ["PATH"] = str(_mgrs_base) + os.pathsep + _path
     import mgrs as _mgrs
 
     s = "".join(mgrs_str.strip().split())

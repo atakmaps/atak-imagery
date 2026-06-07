@@ -320,6 +320,18 @@ def _patch_downloader_win(text: str) -> str:
         "    ensure_window_stacking(parent)\n    text = body if body is not None else DOWNLOADER_NEXT_SQLITE_DIALOG_TEXT",
         "    text = body if body is not None else DOWNLOADER_NEXT_SQLITE_DIALOG_TEXT",
     )
+    text = text.replace(
+        "def parse_mgrs_to_latlon(mgrs_str: str) -> Tuple[float, float]:\n    import mgrs as _mgrs",
+        "def parse_mgrs_to_latlon(mgrs_str: str) -> Tuple[float, float]:\n"
+        "    if getattr(sys, \"frozen\", False) and hasattr(sys, \"_MEIPASS\"):\n"
+        "        _mgrs_base = Path(sys._MEIPASS)\n"
+        "        if hasattr(os, \"add_dll_directory\"):\n"
+        "            os.add_dll_directory(str(_mgrs_base))\n"
+        "        _path = os.environ.get(\"PATH\", \"\")\n"
+        "        if str(_mgrs_base) not in _path.split(os.pathsep):\n"
+        "            os.environ[\"PATH\"] = str(_mgrs_base) + os.pathsep + _path\n"
+        "    import mgrs as _mgrs",
+    )
     return text
 
 
