@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Windows: Device Installer entry for imagery pipeline (see Linux ``atak_downloader_from_installer.py``)."""
+"""
+Imagery pipeline entry **only** for ATAK Device Installer (``atak_adb_deploy``).
+
+The standalone Imagery app is ``atak_downloader_finalbuild_win.py``. This wrapper sets
+``ATAK_DOWNLOADER_LAUNCHED_FROM_DEVICE_INSTALLER`` so the shared core skips the
+standalone USB/adb gate and session Exit dialog (Installer already handled device UX).
+"""
 
 from __future__ import annotations
 

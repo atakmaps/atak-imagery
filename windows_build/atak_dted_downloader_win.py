@@ -32,104 +32,37 @@ APP_TITLE = "ATAK DTED Downloader"
 BASE_URL = "http://31.220.30.74/dted"
 USER_AGENT = "ATAK-DTED-Downloader/1.0"
 
-_DTED_W_DOWNLOAD = 0.55
-_DTED_W_EXTRACT = 0.28
-_DTED_W_BUILD = 0.12
-_DTED_W_CLEANUP = 0.05
 if getattr(sys, "frozen", False):
     RUNTIME_STATE_DIR = Path(sys.executable).resolve().parent
 else:
     RUNTIME_STATE_DIR = Path(__file__).resolve().parent
 
+# Overall progress bar: downloads, extract, build dted2.zip, temp cleanup (must sum to 1.0).
+_DTED_W_DOWNLOAD = 0.55
+_DTED_W_EXTRACT = 0.28
+_DTED_W_BUILD = 0.12
+_DTED_W_CLEANUP = 0.05
 LAST_IMAGERY_ROOT_FILE = RUNTIME_STATE_DIR / ".last_imagery_root.txt"
+# Same file written by the imagery downloader; used to avoid pushing old ATAK_SQL_*.sqlite
+# left in the same-day ATAK_Upload_* folder from earlier runs.
+LAST_IMAGERY_SESSION_STATES_FILE = RUNTIME_STATE_DIR / ".last_imagery_session_states.txt"
 SKIP_STANDALONE_DTED_AFTER_SQLITE = RUNTIME_STATE_DIR / ".skip_standalone_dted_after_sqlite"
 
 
-_DEVICE_DTED_MANIFEST_FILENAME = ".dted_states.json"
-
-
-def _adb_executable() -> str:
-    import shutil as _shutil
-    return _shutil.which("adb") or "adb"
-
-
-def _adb_base_cmd() -> List[str]:
-    cmd = [_adb_executable()]
-    serial = os.environ.get("ANDROID_SERIAL", "").strip()
-    if serial:
-        cmd.extend(["-s", serial])
-    return cmd
-
-
-def query_device_installed_dted_states(log_fn: Optional[Callable[[str], None]] = None) -> Optional[Set[str]]:
-    """
-    Read the DTED state manifest from the connected device via ``adb shell cat``.
-    Returns installed state names, or ``None`` if not available.
-    """
-    _log = log_fn or log
-    root = (os.environ.get("ATAK_DEVICE_FILES_ROOT") or "/sdcard/atak").strip() or "/sdcard/atak"
-    remote_manifest = f"{root.rstrip('/')}/DTED/{_DEVICE_DTED_MANIFEST_FILENAME}"
-    cmd = _adb_base_cmd() + ["shell", "cat", remote_manifest]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-        if proc.returncode != 0:
-            _log("DTED device check: no manifest on device (first run or device not connected).")
-            return None
-        raw = proc.stdout.strip()
-        if not raw:
-            return None
-        data = json.loads(raw)
-        states: List[str] = data.get("states", [])
-        result: Set[str] = {s for s in states if isinstance(s, str) and s.strip()}
-        _log(f"DTED device check: manifest found — {len(result)} state(s) already installed: "
-             f"{', '.join(sorted(result)) if result else '(none)'}")
-        return result
-    except Exception as exc:
-        _log(f"DTED device check: could not query device ({exc}); will download all required states.")
-        return None
-
-
-def push_device_dted_manifest(all_installed_states: Set[str], log_fn: Optional[Callable[[str], None]] = None) -> None:
-    """Push the merged DTED state manifest to the device."""
-    _log = log_fn or log
-    root = (os.environ.get("ATAK_DEVICE_FILES_ROOT") or "/sdcard/atak").strip() or "/sdcard/atak"
-    remote_manifest = f"{root.rstrip('/')}/DTED/{_DEVICE_DTED_MANIFEST_FILENAME}"
-    payload = {
-        "schema_version": 1,
-        "states": sorted(all_installed_states),
-        "last_updated": datetime.now().isoformat(timespec="seconds"),
-    }
-    tmp_path: Optional[str] = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", prefix="atak_dted_manifest_",
-            delete=False, encoding="utf-8",
-        ) as tf:
-            json.dump(payload, tf, indent=2)
-            tmp_path = tf.name
-        cmd = _adb_base_cmd() + ["push", tmp_path, remote_manifest]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        if proc.returncode != 0:
-            _log(f"DTED manifest push failed (non-fatal): {(proc.stderr or proc.stdout or '').strip()}")
-        else:
-            _log(f"DTED device manifest updated: {len(all_installed_states)} state(s) recorded.")
-    except Exception as exc:
-        _log(f"DTED manifest push error (non-fatal): {exc}")
-    finally:
-        if tmp_path:
-            try:
-                os.unlink(tmp_path)
-            except Exception:
-                pass
-
-
 def mark_standalone_dted_skip() -> None:
+    """SQLite builder consumes this to avoid launching the standalone DTED app after inline DTED."""
     SKIP_STANDALONE_DTED_AFTER_SQLITE.write_text(
         datetime.now().isoformat(timespec="seconds"), encoding="utf-8"
     )
 
 
+def peek_standalone_dted_skip_pending() -> bool:
+    """True if the downloader asked the SQLite builder to skip launching standalone DTED."""
+    return SKIP_STANDALONE_DTED_AFTER_SQLITE.is_file()
+
+
 def consume_standalone_dted_skip() -> bool:
+    """Return True if the skip flag was present (and remove it)."""
     if not SKIP_STANDALONE_DTED_AFTER_SQLITE.is_file():
         return False
     try:
@@ -140,6 +73,7 @@ def consume_standalone_dted_skip() -> bool:
 
 
 def bring_window_forward(win: tk.Misc, *, persistent_topmost: bool = False) -> None:
+    """Raise a window above others; on some WMs ``-topmost`` is needed briefly (or kept for modals)."""
     ensure_window_stacking(win, persistent_topmost=persistent_topmost)
 
 
@@ -167,8 +101,302 @@ def _modal_grab(dlg: tk.Toplevel, parent: tk.Misc) -> None:
         pass
 
 
-def peek_standalone_dted_skip_pending() -> bool:
-    return SKIP_STANDALONE_DTED_AFTER_SQLITE.is_file()
+def _session_allowed_atak_sql_filenames() -> Optional[set[str]]:
+    """Basenames ATAK_SQL_<State>.sqlite for states in the last imagery download, or None if no session file."""
+    path = LAST_IMAGERY_SESSION_STATES_FILE
+    if not path.is_file():
+        return None
+    try:
+        names = [ln.strip() for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    except OSError:
+        return None
+    if not names:
+        return None
+    out: set[str] = set()
+    for state_name in names:
+        stem = re.sub(r"[^A-Za-z0-9._-]+", "_", state_name.strip()) or "state"
+        out.add(f"ATAK_SQL_{stem}.sqlite")
+    return out
+
+
+_DEVICE_DTED_MANIFEST_FILENAME = ".dted_states.json"
+
+
+def _adb_executable() -> str:
+    return shutil.which("adb") or "adb"
+
+
+def _adb_base_cmd() -> List[str]:
+    cmd = [_adb_executable()]
+    serial = os.environ.get("ANDROID_SERIAL", "").strip()
+    if serial:
+        cmd.extend(["-s", serial])
+    return cmd
+
+
+def query_device_installed_dted_states(log_fn: Optional[Callable[[str], None]] = None) -> Optional[Set[str]]:
+    """
+    Read the DTED state manifest from the connected device via ``adb shell cat``.
+
+    Returns a ``set`` of state names already installed, or ``None`` if the device
+    is not connected, the manifest doesn't exist yet, or it can't be parsed.
+    When ``None`` is returned the caller should assume all required states need
+    to be downloaded.
+    """
+    _log = log_fn or log
+    root = (os.environ.get("ATAK_DEVICE_FILES_ROOT") or "/sdcard/atak").strip() or "/sdcard/atak"
+    remote_manifest = f"{root.rstrip('/')}/DTED/{_DEVICE_DTED_MANIFEST_FILENAME}"
+    cmd = _adb_base_cmd() + ["shell", "cat", remote_manifest]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        if proc.returncode != 0:
+            _log("DTED device check: no manifest on device (first run or device not connected).")
+            return None
+        raw = proc.stdout.strip()
+        if not raw:
+            return None
+        data = json.loads(raw)
+        states: List[str] = data.get("states", [])
+        result: Set[str] = {s for s in states if isinstance(s, str) and s.strip()}
+        _log(f"DTED device check: manifest found — {len(result)} state(s) already installed: "
+             f"{', '.join(sorted(result)) if result else '(none)'}")
+        return result
+    except subprocess.TimeoutExpired:
+        _log("DTED device check: adb timed out querying manifest; will download all required states.")
+        return None
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        _log(f"DTED device check: manifest unreadable ({exc}); will download all required states.")
+        return None
+    except Exception as exc:
+        _log(f"DTED device check: could not query device ({exc}); will download all required states.")
+        return None
+
+
+def push_device_dted_manifest(all_installed_states: Set[str], log_fn: Optional[Callable[[str], None]] = None) -> None:
+    """
+    Write the merged DTED state manifest to the device via ``adb push``.
+    ``all_installed_states`` must be the *complete* set of states now on the device
+    (previously installed + newly pushed).  Errors are logged and silently swallowed.
+    """
+    _log = log_fn or log
+    root = (os.environ.get("ATAK_DEVICE_FILES_ROOT") or "/sdcard/atak").strip() or "/sdcard/atak"
+    remote_manifest = f"{root.rstrip('/')}/DTED/{_DEVICE_DTED_MANIFEST_FILENAME}"
+    payload = {
+        "schema_version": 1,
+        "states": sorted(all_installed_states),
+        "last_updated": datetime.now().isoformat(timespec="seconds"),
+    }
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".json",
+            prefix="atak_dted_manifest_",
+            delete=False,
+            encoding="utf-8",
+        ) as tf:
+            json.dump(payload, tf, indent=2)
+            tmp_path = tf.name
+        cmd = _adb_base_cmd() + ["push", tmp_path, remote_manifest]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if proc.returncode != 0:
+            _log(f"DTED manifest push failed (non-fatal): {(proc.stderr or proc.stdout or '').strip()}")
+        else:
+            _log(f"DTED device manifest updated: {len(all_installed_states)} state(s) recorded on device.")
+    except Exception as exc:
+        _log(f"DTED manifest push error (non-fatal): {exc}")
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
+
+def _find_atak_sqlite_files(upload_dir: Path) -> List[Path]:
+    """All per-state ATAK_SQL*.sqlite under upload_dir, or from the best-matching sibling ATAK_Upload_* folder."""
+
+    def sorted_in_dir(dirpath: Path) -> List[Path]:
+        if not dirpath.is_dir():
+            return []
+        return sorted(dirpath.glob("ATAK_SQL*.sqlite"), key=lambda p: p.name.lower())
+
+    direct = sorted_in_dir(upload_dir)
+    if direct:
+        return direct
+
+    parent = upload_dir.parent
+    if not parent.is_dir():
+        return []
+
+    all_sql = list(parent.glob("ATAK_Upload_*/ATAK_SQL*.sqlite"))
+    if not all_sql:
+        return []
+
+    by_folder: Dict[Path, List[Path]] = {}
+    for p in all_sql:
+        by_folder.setdefault(p.parent, []).append(p)
+
+    def folder_peak_mtime(paths: List[Path]) -> float:
+        return max(x.stat().st_mtime for x in paths)
+
+    best_folder = max(by_folder.items(), key=lambda item: folder_peak_mtime(item[1]))[0]
+    return sorted(by_folder[best_folder], key=lambda p: p.name.lower())
+
+
+def adb_push_pipeline_outputs(
+    upload_dir: Path,
+    final_dted_zip: Path,
+    *,
+    states_in_zip: Optional[List[str]] = None,
+) -> Tuple[bool, str]:
+    """Push imagery SQLite DB file(s) and DTED zip to the device (default /sdcard/atak/imagery and .../DTED).
+
+    ``states_in_zip`` lists the DTED states contained in *this* push.  When provided,
+    the existing device manifest is read, merged with ``states_in_zip``, and the
+    updated manifest is pushed to the device after a successful transfer.
+    """
+    sqlite_paths = _find_atak_sqlite_files(upload_dir)
+    allowed_names = _session_allowed_atak_sql_filenames()
+    if allowed_names is not None and sqlite_paths:
+        filtered = [p for p in sqlite_paths if p.name in allowed_names]
+        skipped = [p.name for p in sqlite_paths if p.name not in allowed_names]
+        if skipped:
+            log(
+                "Skipping SQLite file(s) not in the last imagery download session "
+                f"(delete them from your ATAK_Upload_* folder or remove "
+                f"{LAST_IMAGERY_SESSION_STATES_FILE.name} to push everything): "
+                + ", ".join(sorted(skipped))
+            )
+        if not filtered:
+            return False, (
+                "No ATAK_SQL*.sqlite matched the last imagery session.\n\n"
+                f"Session list: {LAST_IMAGERY_SESSION_STATES_FILE}\n"
+                f"SQLite files found: {', '.join(p.name for p in sqlite_paths)}"
+            )
+        sqlite_paths = filtered
+    if not sqlite_paths:
+        return False, f"No ATAK_SQL*.sqlite found (looked in {upload_dir} and sibling upload folders)."
+    if not final_dted_zip.is_file():
+        return False, f"DTED zip not found: {final_dted_zip}"
+
+    root = (os.environ.get("ATAK_DEVICE_FILES_ROOT") or "/sdcard/atak").strip() or "/sdcard/atak"
+    remote_imagery = f"{root.rstrip('/')}/imagery"
+    remote_dted = f"{root.rstrip('/')}/DTED"
+
+    steps: List[List[str]] = [_adb_base_cmd() + ["shell", "mkdir", "-p", remote_imagery, remote_dted]]
+    for p in sqlite_paths:
+        steps.append(_adb_base_cmd() + ["push", str(p), f"{remote_imagery}/"])
+    steps.append(_adb_base_cmd() + ["push", str(final_dted_zip), f"{remote_dted}/"])
+
+    log_lines: List[str] = []
+    for cmd in steps:
+        log_lines.append(" ".join(cmd))
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
+        except subprocess.TimeoutExpired:
+            return False, "adb timed out during push.\n\n" + "\n".join(log_lines)
+        if proc.returncode != 0:
+            err = (proc.stderr or proc.stdout or "").strip()
+            return False, f"{err}\n\n" + "\n".join(log_lines)
+
+    names = ", ".join(p.name for p in sqlite_paths)
+
+    # Update device manifest: combine states_in_zip (explicit) with sidecar file next to zip.
+    effective_states: List[str] = list(states_in_zip or [])
+    sidecar = final_dted_zip.with_suffix(".states.json")
+    if sidecar.is_file():
+        try:
+            sidecar_data = json.loads(sidecar.read_text(encoding="utf-8"))
+            sidecar_states: List[str] = sidecar_data.get("states", [])
+            for s in sidecar_states:
+                if s not in effective_states:
+                    effective_states.append(s)
+        except Exception:
+            pass
+    if effective_states:
+        existing = query_device_installed_dted_states() or set()
+        merged = existing | set(effective_states)
+        push_device_dted_manifest(merged)
+
+    return True, (
+        f"Pushed imagery DB file(s) to {remote_imagery}/: {names}\n"
+        f"Pushed DTED archive to {remote_dted}/{final_dted_zip.name}"
+    )
+
+
+ATAK_CIV_PACKAGE = "com.atakmap.app.civ"
+
+
+def adb_restart_atak_civ() -> None:
+    """Force-stop and relaunch ATAK CIv via adb monkey (best-effort)."""
+    steps = [
+        _adb_base_cmd() + ["shell", "am", "force-stop", ATAK_CIV_PACKAGE],
+        _adb_base_cmd() + ["shell", "monkey", "-p", ATAK_CIV_PACKAGE, "1"],
+    ]
+    for cmd in steps:
+        log_line = " ".join(cmd)
+        log(f"Running: {log_line}")
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            if proc.returncode != 0:
+                err = (proc.stderr or proc.stdout or "").strip()
+                log(f"adb exit {proc.returncode}: {err}")
+        except subprocess.TimeoutExpired:
+            log("adb command timed out")
+        except Exception as exc:
+            log(f"adb command failed: {exc}")
+
+
+def ask_delete_raw_imagery(parent: tk.Tk, imagery_root: Path, *, dted_complete: bool) -> bool:
+    """True = delete raw imagery, False = keep. Buttons labeled Yes / No."""
+    result: Dict[str, bool] = {"delete": False}
+
+    dlg = tk.Toplevel(parent)
+    dlg.title(APP_TITLE)
+    dlg.configure(cursor="arrow")
+    dlg.transient(parent)
+    dlg.resizable(False, False)
+
+    if dted_complete:
+        lead = (
+            "Imagery SQLite cache and DTED package are ready.\n\n"
+            "ATAK only needs the final SQLite and DTED outputs on your device.\n\n"
+        )
+    else:
+        lead = (
+            "The DTED step finished without packages for your selection.\n\n"
+            "You can still delete raw downloaded imagery from this computer to free space.\n\n"
+        )
+    text = lead + f"Delete raw downloaded imagery now?\n\n{imagery_root}"
+    tk.Label(dlg, text=text, justify="left", wraplength=520).pack(padx=16, pady=(16, 8))
+
+    btn_row = tk.Frame(dlg)
+    btn_row.pack(pady=(8, 16))
+
+    def on_yes() -> None:
+        result["delete"] = True
+        try:
+            dlg.grab_release()
+        except tk.TclError:
+            pass
+        dlg.destroy()
+
+    def on_no() -> None:
+        result["delete"] = False
+        try:
+            dlg.grab_release()
+        except tk.TclError:
+            pass
+        dlg.destroy()
+
+    tk.Button(btn_row, text="Yes", width=10, command=on_yes).pack(side="left", padx=6)
+    tk.Button(btn_row, text="No", width=10, command=on_no).pack(side="left", padx=6)
+
+    dlg.update_idletasks()
+    bring_window_forward(parent, persistent_topmost=False)
+    bring_window_forward(dlg, persistent_topmost=True)
+    _modal_grab(dlg, parent)
+    parent.wait_window(dlg)
+    return result["delete"]
 
 
 STATE_ABBR_TO_NAME = {
@@ -194,7 +422,7 @@ CONTIGUOUS_48 = sorted(
 
 class Logger:
     def __init__(self) -> None:
-        self.script_dir = RUNTIME_STATE_DIR
+        self.script_dir = Path(__file__).resolve().parent
         self.log_dir = self.script_dir / "logs"
         self.log_dir.mkdir(exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -260,6 +488,7 @@ def find_latest_dted_zip(upload_dir: Path) -> Optional[Path]:
 
 
 def resolve_dted_zip_for_upload_dir(upload_dir: Path) -> Optional[Path]:
+    """Newest dted2_*.zip in upload_dir, or under any sibling ATAK_Upload_* next to it."""
     z = find_latest_dted_zip(upload_dir)
     if z is not None:
         return z
@@ -272,51 +501,7 @@ def resolve_dted_zip_for_upload_dir(upload_dir: Path) -> Optional[Path]:
     return max(all_z, key=lambda p: p.stat().st_mtime)
 
 
-def ask_delete_raw_imagery_win(parent: tk.Tk, imagery_root: Path, *, dted_complete: bool) -> bool:
-    result: Dict[str, bool] = {"delete": False}
-
-    dlg = tk.Toplevel(parent)
-    dlg.title(APP_TITLE)
-    dlg.configure(cursor="arrow")
-    dlg.transient(parent)
-    dlg.resizable(False, False)
-
-    if dted_complete:
-        lead = (
-            "Imagery SQLite cache and DTED package are ready.\n\n"
-            "ATAK only needs the final SQLite and DTED outputs on your device.\n\n"
-        )
-    else:
-        lead = (
-            "The DTED step finished without packages for your selection.\n\n"
-            "You can still delete raw downloaded imagery from this computer to free space.\n\n"
-        )
-    text = lead + f"Delete raw downloaded imagery now?\n\n{imagery_root}"
-    tk.Label(dlg, text=text, justify="left", wraplength=520).pack(padx=16, pady=(16, 8))
-
-    btn_row = tk.Frame(dlg)
-    btn_row.pack(pady=(8, 16))
-
-    def on_yes() -> None:
-        result["delete"] = True
-        dlg.destroy()
-
-    def on_no() -> None:
-        result["delete"] = False
-        dlg.destroy()
-
-    tk.Button(btn_row, text="Yes", width=10, command=on_yes).pack(side="left", padx=6)
-    tk.Button(btn_row, text="No", width=10, command=on_no).pack(side="left", padx=6)
-
-    dlg.update_idletasks()
-    bring_window_forward(parent, persistent_topmost=False)
-    bring_window_forward(dlg, persistent_topmost=True)
-    _modal_grab(dlg, parent)
-    parent.wait_window(dlg)
-    return result["delete"]
-
-
-def show_exit_ready_dialog_win(parent: tk.Tk) -> None:
+def show_imagery_loaded_exit_dialog(parent: tk.Tk) -> None:
     dlg = tk.Toplevel(parent)
     dlg.title(APP_TITLE)
     dlg.configure(cursor="arrow")
@@ -324,11 +509,7 @@ def show_exit_ready_dialog_win(parent: tk.Tk) -> None:
     dlg.resizable(False, False)
     tk.Label(
         dlg,
-        text=(
-            "ATAK build outputs are ready in the upload folder.\n"
-            "Copy files to your Android device if needed, then relaunch ATAK.\n\n"
-            "You may now exit the program."
-        ),
+        text="Imagery has been loaded on your device.\n\nYou may now exit the program.",
         justify="center",
     ).pack(padx=24, pady=(20, 12))
 
@@ -343,46 +524,201 @@ def show_exit_ready_dialog_win(parent: tk.Tk) -> None:
     parent.wait_window(dlg)
 
 
-def finalize_imagery_cleanup_and_exit_win(
+def _set_parent_status(parent: tk.Misc, msg: str) -> None:
+    if hasattr(parent, "set_status"):
+        parent.set_status(msg)
+    elif hasattr(parent, "status_var"):
+        try:
+            parent.status_var.set(msg)
+        except Exception:
+            pass
+    try:
+        parent.update_idletasks()
+    except tk.TclError:
+        pass
+
+
+def _show_working_message_dialog(parent: tk.Misc, body: str, *, title: Optional[str] = None) -> Callable[[], None]:
+    """
+    Small modal notice while work runs on a background thread.
+    Call the returned closer on the Tk main thread when the work finishes.
+    """
+    dlg_title = title or APP_TITLE
+    busy = tk.Toplevel(parent)
+    busy.title(dlg_title)
+    busy.configure(cursor="watch")
+    busy.transient(parent)
+    busy.resizable(False, False)
+    tk.Label(busy, text=body, justify="center", wraplength=440).pack(padx=28, pady=28)
+    busy.protocol("WM_DELETE_WINDOW", lambda: None)
+    busy.update_idletasks()
+    bring_window_forward(parent, persistent_topmost=False)
+    bring_window_forward(busy, persistent_topmost=False)
+    _modal_grab(busy, parent)
+
+    def close_working_message() -> None:
+        try:
+            busy.grab_release()
+        except tk.TclError:
+            pass
+        try:
+            busy.destroy()
+        except tk.TclError:
+            pass
+
+    return close_working_message
+
+
+def _open_upload_output_folder(upload_dir: Optional[Path]) -> None:
+    if upload_dir and upload_dir.exists():
+        try:
+            if sys.platform.startswith("linux"):
+                subprocess.Popen(["xdg-open", str(upload_dir)])
+            elif sys.platform.startswith("win"):
+                os.startfile(str(upload_dir))
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(upload_dir)])
+        except Exception as open_exc:
+            log(f"WARNING: failed to open upload folder: {open_exc}")
+
+
+def complete_device_deploy_and_imagery_cleanup(
     parent: tk.Tk,
     upload_dir: Optional[Path],
+    final_dted_zip: Optional[Path],
     imagery_root: Optional[Path],
     *,
     dted_complete: bool,
+    on_finished: Optional[Callable[[], None]] = None,
 ) -> None:
-    """Delete/keep raw imagery, reveal upload folder, then Exit dialog (no adb on this build)."""
-    if imagery_root and imagery_root.is_dir() and LAST_IMAGERY_ROOT_FILE.is_file():
-        try:
-            if hasattr(parent, "set_status"):
-                parent.set_status("Choose whether to delete raw downloaded imagery on this computer.")
-                parent.update_idletasks()
-            bring_window_forward(parent, persistent_topmost=False)
-            cleanup = ask_delete_raw_imagery_win(parent, imagery_root, dted_complete=dted_complete)
-            if cleanup:
-                shutil.rmtree(imagery_root)
-                log(f"Deleted raw imagery folder: {imagery_root}")
+    """
+    Push SQLite + DTED via adb, prompt to delete raw imagery, open the upload folder,
+    restart ATAK on device, then show the final Exit dialog.
+
+    ``adb push`` and deleting raw imagery run off the Tk thread so the UI stays responsive.
+    ``on_finished`` runs after the final Exit dialog is dismissed (used to destroy host windows).
+    """
+    fz = final_dted_zip if (final_dted_zip and final_dted_zip.is_file()) else None
+    if fz is None and upload_dir and upload_dir.is_dir():
+        fz = resolve_dted_zip_for_upload_dir(upload_dir)
+
+    needs_push = bool(dted_complete and upload_dir and upload_dir.is_dir() and fz is not None)
+
+    def run_finalize_phase() -> None:
+        _open_upload_output_folder(upload_dir)
+        if dted_complete:
+            adb_restart_atak_civ()
+        show_imagery_loaded_exit_dialog(parent)
+        if on_finished is not None:
+            on_finished()
+
+    def run_after_delete_choice(wants_delete: bool, root_for_delete: Optional[Path]) -> None:
+        if not wants_delete:
+            if root_for_delete is not None:
+                log(f"Raw imagery retained: {root_for_delete}")
+            run_finalize_phase()
+            return
+        assert root_for_delete is not None
+        close_cleanup_dialog = _show_working_message_dialog(
+            parent,
+            "Cleaning up extra files…\n\n"
+            "Removing downloaded imagery from this computer. Large folders can take a minute.",
+        )
+        _set_parent_status(parent, "Cleaning up extra files…")
+        bring_window_forward(parent, persistent_topmost=False)
+        err_box: List[Optional[BaseException]] = [None]
+
+        def delete_worker() -> None:
+            try:
+                shutil.rmtree(root_for_delete)
+                log(f"Deleted raw imagery folder: {root_for_delete}")
                 try:
                     LAST_IMAGERY_ROOT_FILE.unlink()
                     log(f"Deleted saved imagery path file: {LAST_IMAGERY_ROOT_FILE}")
                 except OSError as cleanup_exc:
                     log(f"Warning: saved imagery path file removal failed: {cleanup_exc}")
-            else:
-                log(f"Raw imagery retained: {imagery_root}")
-        except Exception as cleanup_exc:
-            log(f"Warning: raw imagery cleanup failed: {cleanup_exc}")
+            except Exception as exc:
+                err_box[0] = exc
+                log(f"Warning: raw imagery cleanup failed: {exc}")
+
+        def on_delete_done() -> None:
+            close_cleanup_dialog()
+            if err_box[0] is not None:
+                try:
+                    bring_window_forward(parent, persistent_topmost=False)
+                    messagebox.showwarning(APP_TITLE, f"Raw imagery cleanup failed:\n{err_box[0]}", parent=parent)
+                except Exception:
+                    pass
+            run_finalize_phase()
+
+        def delete_thread_main() -> None:
+            delete_worker()
+            parent.after(0, on_delete_done)
+
+        threading.Thread(target=delete_thread_main, daemon=True).start()
+
+    def run_imagery_prompt() -> None:
+        if imagery_root and imagery_root.is_dir() and LAST_IMAGERY_ROOT_FILE.is_file():
             try:
+                _set_parent_status(parent, "Choose whether to delete raw imagery on this computer.")
                 bring_window_forward(parent, persistent_topmost=False)
-                messagebox.showwarning(APP_TITLE, f"Raw imagery cleanup failed:\n{cleanup_exc}", parent=parent)
-            except Exception:
-                pass
+                cleanup = ask_delete_raw_imagery(parent, imagery_root, dted_complete=dted_complete)
+                run_after_delete_choice(cleanup, imagery_root)
+            except Exception as cleanup_exc:
+                log(f"Warning: raw imagery cleanup failed: {cleanup_exc}")
+                try:
+                    bring_window_forward(parent, persistent_topmost=False)
+                    messagebox.showwarning(APP_TITLE, f"Raw imagery cleanup failed:\n{cleanup_exc}", parent=parent)
+                except Exception:
+                    pass
+                run_finalize_phase()
+        else:
+            run_finalize_phase()
 
-    if upload_dir and upload_dir.exists():
-        try:
-            os.startfile(str(upload_dir))
-        except Exception as open_exc:
-            log(f"WARNING: failed to open upload folder: {open_exc}")
+    close_adb_work_dialog: List[Callable[[], None]] = [lambda: None]
 
-    show_exit_ready_dialog_win(parent)
+    def continue_after_adb(ok: bool, detail: str) -> None:
+        close_adb_work_dialog[0]()
+        close_adb_work_dialog[0] = lambda: None
+        if needs_push:
+            if ok:
+                log("adb push completed successfully")
+            else:
+                log(f"adb push failed: {detail}")
+                try:
+                    bring_window_forward(parent, persistent_topmost=False)
+                    messagebox.showwarning(
+                        APP_TITLE,
+                        "Could not push files to the device via adb:\n\n"
+                        f"{detail}\n\n"
+                        "You can copy files from the upload folder manually.",
+                        parent=parent,
+                    )
+                except Exception:
+                    pass
+        elif dted_complete:
+            log("Skipping adb push: missing upload folder or DTED zip.")
+        run_imagery_prompt()
+
+    if needs_push:
+        close_adb_work_dialog[0] = _show_working_message_dialog(
+            parent,
+            "Copying to your device…\n\n"
+            "Pushing SQLite and DTED over USB. This may take several minutes.",
+        )
+        _set_parent_status(
+            parent,
+            "Pushing SQLite and DTED to your device via adb… (this can take several minutes)",
+        )
+        bring_window_forward(parent, persistent_topmost=False)
+
+        def adb_worker() -> None:
+            push_ok, push_detail = adb_push_pipeline_outputs(upload_dir, fz)
+            parent.after(0, lambda o=push_ok, d=push_detail: continue_after_adb(o, d))
+
+        threading.Thread(target=adb_worker, daemon=True).start()
+    else:
+        continue_after_adb(True, "")
 
 
 def clean_name(value: str) -> str:
@@ -394,8 +730,14 @@ def derive_package_folder_name(package_name: str) -> str:
     return f"atak_{clean_name(package_name)}"
 
 
+def server_state_slug(state_name: str) -> str:
+    """Map human state name to DTED server folder/file naming."""
+    return re.sub(r"\s+", "_", state_name.strip())
+
+
 def state_url(state_name: str) -> str:
-    return f"{BASE_URL}/{state_name}/{state_name}.zip"
+    slug = server_state_slug(state_name)
+    return f"{BASE_URL}/{slug}/{slug}.zip"
 
 
 def ask_output_parent() -> str:
@@ -652,7 +994,10 @@ def download_file(
     out_path: Path,
     log_fn: Optional[Callable[[str], None]] = None,
     progress_cb: Optional[Callable[[int, int], None]] = None,
+    cancel_check: Optional[Callable[[], None]] = None,
 ) -> str:
+    """Download url to out_path.  cancel_check() is called each chunk; if it
+    raises, the exception propagates immediately (not caught as a failure)."""
     _log = log_fn or log
     size_hint = remote_file_size(session, url)
     if size_hint < 0:
@@ -665,9 +1010,10 @@ def download_file(
     tmp_path = out_path.with_suffix(out_path.suffix + ".part")
 
     last_emit = 0.0
+    _cancel_exc: Optional[BaseException] = None
 
     def _emit_progress(read: int, total_known: int, *, force: bool = False) -> None:
-        nonlocal last_emit
+        nonlocal last_emit, _cancel_exc
         if not progress_cb:
             return
         now = time.monotonic()
@@ -688,6 +1034,12 @@ def download_file(
             read = 0
             with open(tmp_path, "wb") as f:
                 for chunk in r.iter_content(chunk_size=1024 * 256):
+                    if cancel_check:
+                        try:
+                            cancel_check()
+                        except BaseException as ce:
+                            _cancel_exc = ce
+                            raise
                     if chunk:
                         f.write(chunk)
                         read += len(chunk)
@@ -695,14 +1047,18 @@ def download_file(
             _emit_progress(read, total_bytes if total_bytes > 0 else read, force=True)
         tmp_path.replace(out_path)
         return "downloaded"
-    except Exception as exc:
-        _log(f"ERROR downloading {url}: {exc}")
+    except BaseException as exc:
         try:
             if tmp_path.exists():
                 tmp_path.unlink()
         except Exception:
             pass
-        return "failed"
+        if _cancel_exc is not None:
+            raise _cancel_exc
+        if isinstance(exc, Exception):
+            _log(f"ERROR downloading {url}: {exc}")
+            return "failed"
+        raise
 
 
 def extract_state_zip(
@@ -722,17 +1078,62 @@ def extract_state_zip(
         zf.extractall(state_extract_dir)
 
 
+_LON_DIR_RE = re.compile(r"^([ew])(\d{3})$", re.IGNORECASE)
+_LAT_FILE_RE = re.compile(r"^([ns])(\d{2})\.dt[012]$", re.IGNORECASE)
+
+
+def _dted_cell_bounds_from_arcname(arc_posix: str) -> Optional[Tuple[float, float, float, float]]:
+    """
+    Parse DTED cell bounds from archive path like ``w111/n32.dt2``.
+
+    Returns (west, south, east, north) in lon/lat degrees, or None when
+    the path is not a DTED cell file.
+    """
+    parts = Path(arc_posix).parts
+    if len(parts) < 2:
+        return None
+    lon_part = parts[-2]
+    lat_part = parts[-1]
+    m_lon = _LON_DIR_RE.match(lon_part)
+    m_lat = _LAT_FILE_RE.match(lat_part)
+    if not m_lon or not m_lat:
+        return None
+
+    lon_hemi, lon_deg_s = m_lon.groups()
+    lat_hemi, lat_deg_s = m_lat.groups()
+    lon_deg = int(lon_deg_s)
+    lat_deg = int(lat_deg_s)
+
+    west = -lon_deg if lon_hemi.lower() == "w" else lon_deg
+    south = -lat_deg if lat_hemi.lower() == "s" else lat_deg
+    east = west + 1.0
+    north = south + 1.0
+    return west, south, east, north
+
+
+def _bbox_overlaps(
+    a_w: float, a_s: float, a_e: float, a_n: float,
+    b_w: float, b_s: float, b_e: float, b_n: float,
+) -> bool:
+    return not (a_e < b_w or b_e < a_w or a_n < b_s or b_n < a_s)
+
+
 def build_final_dted_zip(
     extract_root: Path,
     final_zip_path: Path,
     log_fn: Optional[Callable[[str], None]] = None,
     on_packed: Optional[Callable[[int, int], None]] = None,
+    radius_bbox_lonlat: Optional[Tuple[float, float, float, float]] = None,
 ) -> None:
     _log = log_fn or log
     if final_zip_path.exists():
         final_zip_path.unlink()
 
     entries: List[Tuple[Path, str]] = []
+    filtered_out = 0
+    radius_filter_enabled = radius_bbox_lonlat is not None
+    if radius_filter_enabled:
+        rw, rs, re_, rn = radius_bbox_lonlat  # type: ignore[misc]
     for state_dir in sorted(extract_root.iterdir(), key=lambda p: p.name.lower()):
         if not state_dir.is_dir():
             continue
@@ -740,9 +1141,22 @@ def build_final_dted_zip(
             if not item.is_file():
                 continue
             arcname = item.relative_to(state_dir)
-            entries.append((item, arcname.as_posix()))
+            arc_posix = arcname.as_posix()
+            if radius_filter_enabled:
+                cell = _dted_cell_bounds_from_arcname(arc_posix)
+                if cell is not None:
+                    cw, cs, ce, cn = cell
+                    if not _bbox_overlaps(cw, cs, ce, cn, rw, rs, re_, rn):
+                        filtered_out += 1
+                        continue
+            entries.append((item, arc_posix))
 
     _log(f"Building final ATAK zip: {final_zip_path} ({len(entries)} files)")
+    if radius_filter_enabled:
+        _log(
+            "DTED radius clip applied: "
+            f"kept {len(entries)} file(s), filtered {filtered_out} outside radius bbox."
+        )
 
     nf = len(entries)
     with zipfile.ZipFile(final_zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=5) as zf:
@@ -762,7 +1176,16 @@ def run_dted_inline_for_states(
     log_sink: Callable[[str], None],
     progress: object,
     local_state_zip_root: Optional[Path] = None,
+    radius_bbox_lonlat: Optional[Tuple[float, float, float, float]] = None,
 ) -> Optional[Path]:
+    """
+    Download DTED state ZIPs for the given states into upload_dir, same server/layout as the DTED app.
+    Uses progress.wait_if_paused / set_status / set_progress_fraction / set_stat; optional set_speed_eta cleared when present.
+    Returns path to dted2_*.zip or None if nothing could be produced.
+
+    When ``local_state_zip_root`` is set, looks for ``chosen_folder/StateName/StateName.zip`` first and copies it
+    before using HTTP (offline-friendly if you mirror the server tree).
+    """
     import tempfile
 
     if not selected_states:
@@ -772,6 +1195,8 @@ def run_dted_inline_for_states(
     stats = {"downloaded": 0, "existing": 0, "failed": 0, "missing": 0}
     for key in stats:
         progress.set_stat(key, 0)
+    if hasattr(progress, "set_speed_eta"):
+        progress.set_speed_eta(0.0, None)
 
     ts = datetime.now().strftime("%H%M%S")
     temp_root = Path(tempfile.mkdtemp(prefix="atak_dted_inline_"))
@@ -839,11 +1264,19 @@ def run_dted_inline_for_states(
                     log_sink(f"DTED: local copy failed ({exc}); trying network")
                     progress.set_status(f"DTED: downloading {state_name}…")
                     log_sink(f"DTED: GET {url}")
-                    result = download_file(session, url, out_path, log_fn=log_sink, progress_cb=dl_progress)
+                    result = download_file(
+                        session, url, out_path,
+                        log_fn=log_sink, progress_cb=dl_progress,
+                        cancel_check=progress.wait_if_paused,
+                    )
             else:
                 progress.set_status(f"DTED: downloading {state_name}…")
                 log_sink(f"DTED: GET {url}")
-                result = download_file(session, url, out_path, log_fn=log_sink, progress_cb=dl_progress)
+                result = download_file(
+                    session, url, out_path,
+                    log_fn=log_sink, progress_cb=dl_progress,
+                    cancel_check=progress.wait_if_paused,
+                )
             stats[result] += 1
             completed += 1
             set_overall(_DTED_W_DOWNLOAD * ((idx + 1) / n_states), f"{int(_DTED_W_DOWNLOAD * (idx + 1) / n_states * 100)}% · state {idx + 1} / {total}")
@@ -884,7 +1317,13 @@ def run_dted_inline_for_states(
             set_overall(fr, f"{int(fr * 100)}% · packing {cur} / {tot}")
 
         progress.set_status("DTED: building dted2.zip…")
-        build_final_dted_zip(extract_root, final_zip_path, log_fn=log_sink, on_packed=on_packed)
+        build_final_dted_zip(
+            extract_root,
+            final_zip_path,
+            log_fn=log_sink,
+            on_packed=on_packed,
+            radius_bbox_lonlat=radius_bbox_lonlat,
+        )
         set_overall(base_b + _DTED_W_BUILD, f"{int((base_b + _DTED_W_BUILD) * 100)}% · finishing…")
 
         # Write a sidecar listing which states are in this zip so the
@@ -1058,13 +1497,30 @@ def pump_gui_logs(window: ProgressWindow) -> None:
                     imagery_root = ir
 
             if is_full_dted:
-                log(msg)
                 ud = getattr(window, "upload_dir", None)
+                fz = getattr(window, "final_dted_zip", None)
+                log(msg)
                 if hasattr(window, "set_status"):
-                    window.set_status("Build finished. Next: optional cleanup and upload folder.")
+                    window.set_status("DTED build finished. Next: push to device, then optional cleanup.")
                     window.update_idletasks()
-                bring_window_forward(window, persistent_topmost=False)
-                finalize_imagery_cleanup_and_exit_win(window, ud, imagery_root, dted_complete=True)
+
+                def _close_dted_progress_window() -> None:
+                    window.closed = True
+                    try:
+                        window.quit()
+                        window.destroy()
+                    except Exception:
+                        pass
+
+                complete_device_deploy_and_imagery_cleanup(
+                    window,
+                    ud,
+                    fz,
+                    imagery_root,
+                    dted_complete=True,
+                    on_finished=_close_dted_progress_window,
+                )
+                return
             else:
                 if hasattr(window, "set_status"):
                     window.set_status("Showing summary — next: optional raw imagery cleanup.")
@@ -1073,14 +1529,14 @@ def pump_gui_logs(window: ProgressWindow) -> None:
                 messagebox.showinfo(APP_TITLE, msg, parent=window)
                 if imagery_root is not None:
                     try:
-                        cleanup = ask_delete_raw_imagery_win(window, imagery_root, dted_complete=False)
+                        cleanup = ask_delete_raw_imagery(window, imagery_root, dted_complete=False)
                         if cleanup:
                             shutil.rmtree(imagery_root)
                             log(f"Deleted raw imagery folder: {imagery_root}")
                             try:
                                 LAST_IMAGERY_ROOT_FILE.unlink()
                                 log(f"Deleted saved imagery path file: {LAST_IMAGERY_ROOT_FILE}")
-                            except Exception as cleanup_exc:
+                            except OSError as cleanup_exc:
                                 log(f"Warning: saved imagery path file removal failed: {cleanup_exc}")
                         else:
                             log(f"Raw imagery retained: {imagery_root}")
@@ -1095,7 +1551,12 @@ def pump_gui_logs(window: ProgressWindow) -> None:
                 upload_dir = getattr(window, "upload_dir", None)
                 if upload_dir and upload_dir.exists():
                     try:
-                        os.startfile(str(upload_dir))
+                        if sys.platform.startswith("linux"):
+                            subprocess.Popen(["xdg-open", str(upload_dir)])
+                        elif sys.platform.startswith("win"):
+                            os.startfile(str(upload_dir))
+                        elif sys.platform == "darwin":
+                            subprocess.Popen(["open", str(upload_dir)])
                     except Exception as open_exc:
                         log(f"WARNING: failed to open upload folder: {open_exc}")
 

@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
+"""PyInstaller entry: ATAK Device Installer (Windows)."""
 from __future__ import annotations
 
-import sys
 import os
+import sys
 import traceback
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent
-SCRIPTS_DIR = BASE / "scripts"
-if SCRIPTS_DIR.exists():
-    sys.path.insert(0, str(SCRIPTS_DIR))
+if BASE.exists():
+    sys.path.insert(0, str(BASE))
 
 
 def _configure_frozen_tk() -> None:
@@ -21,8 +21,8 @@ def _configure_frozen_tk() -> None:
 def main() -> None:
     try:
         _configure_frozen_tk()
-        import atak_downloader_finalbuild as imagery
-        imagery.main()
+        import atak_adb_deploy_win as installer
+        installer.main()
     except Exception as exc:
         tb = traceback.format_exc()
         try:
@@ -31,13 +31,15 @@ def main() -> None:
             root = tk.Tk()
             root.configure(cursor="arrow")
             root.withdraw()
-            messagebox.showerror("ATAK Imagery Downloader", f"{exc}\n\n{tb}")
+            messagebox.showerror("ATAK Device Installer", f"{exc}\n\n{tb}")
             root.destroy()
         except Exception:
             pass
         raise
 
+
 if __name__ == "__main__":
+    # Only the frozen EXE may start the GUI (see windows_launcher.py).
     if getattr(sys, "frozen", False):
         main()
     elif os.environ.get("ATAK_ALLOW_DEV_LAUNCH") == "1":

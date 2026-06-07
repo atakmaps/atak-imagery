@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ATAK + plugin install over ADB, then launch the imagery pipeline via
-``atak_downloader_from_installer.py`` (not the standalone Imagery Downloader entry).
+``atak_downloader_from_installer_win.py`` (not the standalone Imagery Downloader entry).
 
 Configuration (environment variables — in ``deploy.env`` at the project root):
 
@@ -117,7 +117,7 @@ APP_TITLE = "ATAK Device Installer"
 DEFAULT_ATAK_PACKAGE = "com.atakmap.app.civ"
 DEFAULT_PLUGIN_PACKAGE = "com.uvpro.plugin"
 DEFAULT_MESHCORE_PLUGIN_PACKAGE = "com.meshcore.atakplugin"
-DEFAULT_MESHCORE_PLUGIN_REPO = Path("/home/paul/Documents/ATAK/Plugins/MeshcoreAtak")
+DEFAULT_MESHCORE_PLUGIN_REPO = Path.home() / "Documents" / "ATAK" / "Plugins" / "MeshcoreAtak"
 
 # After ATAK APK is installed: show this while the user completes first-run on device.
 ATAK_POST_INSTALL_SETUP_INSTRUCTIONS = (
@@ -153,12 +153,15 @@ if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
 else:
     SCRIPT_DIR = Path(__file__).resolve().parent
 
-DOWNLOADER = SCRIPT_DIR / "atak_downloader_from_installer.py"
+DOWNLOADER = SCRIPT_DIR / "atak_downloader_from_installer_win.py"
 MOBILE_XML_DIR = SCRIPT_DIR / "data" / "mobile_xml"
 MOBILE_XML_DEVICE_PATH = "/sdcard/atak/imagery/mobile/mapsources"
 MOBILE_IMPORT_DEVICE_PATH = "/sdcard/atak/tools/import"
 USER_AGENT = "ATAK-Pipeline-Deploy/1.0"
-PROJECT_ROOT = SCRIPT_DIR.parent
+if getattr(sys, "frozen", False):
+    PROJECT_ROOT = Path(sys.executable).resolve().parent
+else:
+    PROJECT_ROOT = SCRIPT_DIR.parent
 DEPLOY_ENV_PATH = PROJECT_ROOT / "deploy.env"
 
 _INSTALLER_LOG: Optional[Path] = None
@@ -170,14 +173,14 @@ _SENSITIVE_ENV_SUBSTR = ("TOKEN", "SECRET", "PASSWORD", "KEY", "CREDENTIAL")
 def installer_log_dir() -> Path:
     """Writable log directory (PyInstaller bundle dir is often read-only)."""
     if getattr(sys, "frozen", False):
-        d = Path.home() / ".local" / "share" / "atak-pipeline" / "installer_logs"
+        d = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "atak-pipeline" / "installer_logs"
     else:
         d = SCRIPT_DIR / "logs"
     try:
         d.mkdir(parents=True, exist_ok=True)
         return d
     except OSError:
-        alt = Path.home() / ".local" / "share" / "atak-pipeline" / "installer_logs"
+        alt = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "atak-pipeline" / "installer_logs"
         alt.mkdir(parents=True, exist_ok=True)
         return alt
 
@@ -281,6 +284,13 @@ def log_startup_context() -> None:
 
 
 def load_deploy_env_file() -> None:
+    if not DEPLOY_ENV_PATH.is_file():
+        example = PROJECT_ROOT / "deploy.env.example"
+        if example.is_file():
+            try:
+                shutil.copy2(example, DEPLOY_ENV_PATH)
+            except OSError:
+                pass
     if not DEPLOY_ENV_PATH.is_file():
         return
     try:

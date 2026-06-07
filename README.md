@@ -57,7 +57,7 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 **Linux / source release:** `v1.3.37` (tag **`v1.3.37`** on GitHub).
 
-**Windows:** A new Windows packaged build is **not** included in this cycle. **Use Windows release `2.8`** until a newer Windows installer is published. Source copies under `windows_build/` include the same startup behaviors when run with Python.
+**Windows:** Same version as Linux (`v1.3.36`). Build on a Windows VM with PyInstaller — see **Windows build** below. Previous packaged release was `2.8`; new builds ship **ATAK Device Installer** and **ATAK Imagery Downloader** together.
 
 Version **1.3.37** highlights:
 
@@ -258,12 +258,29 @@ Primary Linux/source scripts:
 - `scripts/git_update_check.py` — optional startup update offer for git clones (`origin/main`)
 - `scripts/tk_window_scaling.py` — scales Tk geometry to the display
 
-Windows-specific build copies:
+Windows-specific build copies (synced from `scripts/` via `scripts/sync_windows_build.py`):
 
+- `windows_build/atak_adb_deploy_win.py` — Device Installer
 - `windows_build/atak_downloader_finalbuild_win.py`
 - `windows_build/atak_downloader_from_installer_win.py`
 - `windows_build/atak_imagery_sqlite_builder_finalbuild_win.py`
 - `windows_build/atak_dted_downloader_win.py`
+
+### Windows build (maintainer / VM)
+
+**One-click setup for a fresh Windows PC** — from repo root, double-click or run:
+
+```cmd
+install_windows.cmd
+```
+
+Automated steps: Python → adb → build both EXEs → install to **`%LOCALAPPDATA%\Programs\ATAK Pipeline\`** → Desktop icons for **Device Installer** and **Imagery Downloader**.
+
+Log: `setup_windows.log`. Chooser: `Run_ATAK_Pipeline.cmd`.
+
+After `git pull`, rerun `install_windows.cmd` to refresh.
+
+**Rebuild EXEs only** (deps already installed):
 
 ---
 

@@ -14,7 +14,10 @@ Builds or updates an ATAK/osmdroid-style SQLite tile cache from a folder tree:
 
 Behavior:
 - Imports ALL numeric zoom folders present under the selected source folder
-- Writes a single .sqlite output file
+- When multiple state folders are present under the imagery root, writes one
+  ATAK_SQL_<State>.sqlite per state under ATAK_Upload_<date>/ (no time in filenames)
+- If .last_imagery_session_states.txt exists (written by the imagery downloader), only
+  those state folders are built so old Imagery/<State>/ trees do not create extra SQL files.
 - Safe to re-run: duplicate tiles are replaced, not duplicated
 - GUI-first workflow with folder dialogs and a live log window
 - GUI auto-creates an ATAK export folder named atak_<StateName>
@@ -318,7 +321,7 @@ class Builder:
         batch_catalog: List[Tuple[int, int, int, int]] = []
         progress_counter = 0
         now_ms = int(time.time() * 1000)
-        expiration_ms = now_ms + (365 * 24 * 60 * 60 * 1000)
+        expiration_ms = now_ms + (365 * 24 * 60 * 60 * 1000)  # 1 year placeholder
 
         self.logger.info("Beginning tile import")
         for z, x, y, tile_file in iter_tiles(self.config.source_dir, zooms, self.logger):
@@ -402,6 +405,7 @@ def derive_atak_folder_name(source_dir: Path) -> str:
     return f"atak_{cleaned}"
 
 
+
 def find_state_imagery_dirs(imagery_root: Path) -> List[Path]:
     results: List[Path] = []
     if not imagery_root.is_dir():
@@ -413,6 +417,12 @@ def find_state_imagery_dirs(imagery_root: Path) -> List[Path]:
 
 
 def filter_state_dirs_for_last_imagery_session(state_dirs: List[Path]) -> Tuple[List[Path], Optional[str]]:
+    """
+    After a downloader run, .last_imagery_session_states.txt lists state folder names
+    that were selected. If present, build SQLite only for those names so leftover
+    Imagery/<OtherState>/ trees from older tests do not produce extra ATAK_SQL_*.sqlite files.
+    Delete the file next to this script to build every folder under Imagery/ again.
+    """
     path = LAST_IMAGERY_SESSION_STATES_FILE
     if not path.is_file():
         return state_dirs, None
@@ -458,7 +468,6 @@ def ask_directory_linux_native(title: str) -> Optional[Path]:
 
     selected = filedialog.askdirectory(title=title)
     return Path(selected) if selected else None
-
 
 class App:
     def __init__(self):
@@ -522,6 +531,8 @@ class App:
         self.text.configure(state="disabled")
 
     def _poll_logs(self) -> None:
+        # Show completion/error as soon as it is set; do not drain a huge backlog first
+        # (that blocked the UI for a long time after the status already said "Build complete").
         if self.completion_message:
             msg = self.completion_message
             self.completion_message = None
@@ -530,8 +541,8 @@ class App:
                 skip_inline_dted = False
                 try:
                     from atak_dted_downloader_win import (
+                        complete_device_deploy_and_imagery_cleanup,
                         consume_standalone_dted_skip,
-                        finalize_imagery_cleanup_and_exit_win,
                         peek_standalone_dted_skip_pending,
                     )
 
@@ -541,18 +552,24 @@ class App:
 
                 if skip_inline_dted and self.imagery_root and self._last_upload_dir:
                     consume_standalone_dted_skip()
-                    finalize_imagery_cleanup_and_exit_win(
+
+                    def _finish_after_device_deploy() -> None:
+                        try:
+                            self.root.quit()
+                            self.root.destroy()
+                        except Exception:
+                            pass
+                        sys.exit(0)
+
+                    complete_device_deploy_and_imagery_cleanup(
                         self.root,
                         self._last_upload_dir,
+                        None,
                         self.imagery_root,
                         dted_complete=True,
+                        on_finished=_finish_after_device_deploy,
                     )
-                    try:
-                        self.root.quit()
-                        self.root.destroy()
-                    except Exception:
-                        pass
-                    sys.exit(0)
+                    return
 
                 if skip_inline_dted:
                     consume_standalone_dted_skip()
@@ -560,7 +577,7 @@ class App:
                     messagebox.showwarning(
                         "Build complete",
                         "Inline DTED was used earlier, but the upload folder could not be determined.\n\n"
-                        "Copy SQLite and DTED from the ATAK_Upload_* folder manually, then exit.",
+                        "Push SQLite and DTED from the ATAK_Upload_* folder manually, then exit.",
                         parent=self.root,
                     )
                     try:
@@ -655,7 +672,6 @@ class App:
         self.append_log(f"Starting build at {datetime.now().isoformat(timespec='seconds')}")
         self.append_log(f"Imagery root: {imagery_root}")
         self.append_log(f"Output parent: {out_parent}")
-        self.append_log(f"Saved imagery path file: {LAST_IMAGERY_ROOT_FILE}")
         self.append_log(f"States detected: {', '.join(p.name for p in state_dirs)}")
         self.append_log(f"Log file: {log_file}")
         self.append_log("=" * 80)
@@ -669,6 +685,7 @@ class App:
             total = len(state_dirs)
             built = 0
 
+            from datetime import datetime
             date_str = datetime.now().strftime("%Y%m%d")
 
             upload_dir = out_parent / f"ATAK_Upload_{date_str}"

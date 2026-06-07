@@ -148,7 +148,7 @@ from imagery_tile_selection import (  # noqa: E402
 
 # Load on the main thread only: first-importing ``atak_adb_deploy`` from the download worker
 # pulls in tkinter on a background thread and can abort with Tcl_AsyncDelete on Linux/X11.
-from atak_adb_deploy import install_apk  # noqa: E402
+from atak_adb_deploy import install_apk, ensure_gui_path_for_adb  # noqa: E402
 from bundled_plugin_install import iter_bundled_addon_apks  # noqa: E402
 
 
@@ -284,7 +284,16 @@ def _run_adb(args: List[str], serial: Optional[str] = None, timeout: int = 120) 
     if serial:
         cmd.extend(["-s", serial])
     cmd.extend(args)
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError:
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=127, stdout="", stderr="adb executable not found on PATH"
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=124, stdout="", stderr=f"adb timed out after {timeout}s"
+        )
 
 
 def adb_available() -> bool:
@@ -1724,6 +1733,8 @@ def _ask_plugin_actions(progress: Any, title: str, plugin_rows: List[Dict[str, A
 
 
 def _resolve_adb_serial_for_push() -> Tuple[str, List[str]]:
+    if not adb_available():
+        return "", []
     devs = list_usb_devices()
     env_ser = (os.environ.get("ANDROID_SERIAL") or "").strip()
     if env_ser:
@@ -4211,6 +4222,10 @@ def pump_gui_logs(window: ProgressWindow) -> None:
 
 
 def main() -> None:
+    try:
+        ensure_gui_path_for_adb()
+    except Exception as exc:
+        log(f"Startup warning: adb PATH setup failed: {exc}")
     log("Startup: beginning git update check...")
     try:
         run_startup_git_update_check(app_title=APP_TITLE, script_path=Path(__file__).resolve())

@@ -37,4 +37,9 @@ def main() -> None:
         raise
 
 if __name__ == "__main__":
-    main()
+    # Only the frozen EXE may start the GUI. PyInstaller runs this file as __main__
+    # during build with frozen=False — must not open any window then.
+    if getattr(sys, "frozen", False):
+        main()
+    elif os.environ.get("ATAK_ALLOW_DEV_LAUNCH") == "1":
+        main()

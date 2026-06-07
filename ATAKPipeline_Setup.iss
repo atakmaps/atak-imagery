@@ -23,4 +23,4 @@ Name: "{userprograms}\{#MyAppName}"; Filename: "{app}\ATAKPipeline.exe"; Working
 Name: "{userdesktop}\{#MyAppName}"; Filename: "{app}\ATAKPipeline.exe"; WorkingDir: "{app}"
 
 [Run]
-Filename: "{app}\ATAKPipeline.exe"; Description: "Launch ATAK Imagery Downloader"; Flags: nowait postinstall
+; Intentionally empty — installer must not launch any program after setup.

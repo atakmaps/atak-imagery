@@ -1,49 +1,66 @@
 #!/usr/bin/env python3
 """
-ATAK USGS Orthophoto Downloader (shared core, Windows)
+ATAK USGS Orthophoto Downloader (shared core)
 
-**Two entry points:**
+**Two entry points** (do not fold into one script — different first/last UI):
 
-- **Standalone:** ``atak_downloader_finalbuild_win.py`` / launcher (full intro + Exit dialog).
-- **After Device Installer:** ``atak_downloader_from_installer_win.py`` (skips USB/adb intro only; 
-  same handoff dialog and SQLite builder as standalone).
+- **Standalone Imagery app:** run ``atak_downloader_finalbuild_win.py`` / desktop launcher.
+  Full intro (ATAK + USB/adb), session Exit dialog, then SQLite builder.
+- **After Device Installer:** run ``atak_downloader_from_installer_win.py`` only (set by
+  ``atak_adb_deploy``). Skips the standalone USB/adb intro; same download, SQLite handoff dialog, and builder chain.
 
 - Download scope first (entire state(s) vs fixed radius) and optional raw tile tree
 - State selection or radius center second
 - Zoom selection third
 - Zoom screen: storage estimates, background USGS throughput probe, ETA vs selection
 - Summary confirmation before output folder picker
+- Zenity folder picker on Linux with Tk fallback
 - Progress bar during download
 - Safe re-run: skips tiles that already exist
+- After download: pushes map/import files (`data/mobile_xml/`) and installs add-on plugin APKs sourced from release assets (with local fallback) when adb serial is set.
 
 Output structure:
     <selected parent>/Imagery/<state or radius name>/zoom/x/y.jpg
     Radius name is chosen on the download-scope screen; each name gets its own folder and SQLite file.
 """
 
-import importlib.util
 import json
 import math
 import multiprocessing
 import re
 import os
 import queue
-from concurrent.futures import FIRST_COMPLETED, CancelledError, ThreadPoolExecutor, wait
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import warnings
+import zipfile
+
+# Suppress the benign "leaked semaphore" warning from Python's resource_tracker
+# subprocess on hard exit (os._exit). The env var propagates to child processes;
+# warnings.filterwarnings covers the main process.
+import os as _os
+_os.environ.setdefault("PYTHONWARNINGS", "ignore::UserWarning:multiprocessing.resource_tracker")
+warnings.filterwarnings(
+    "ignore",
+    message="resource_tracker.*leaked semaphore",
+    category=UserWarning,
+)
 import traceback
+from collections import deque
+from concurrent.futures import FIRST_COMPLETED, CancelledError, ThreadPoolExecutor, wait
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Set, Tuple, Optional
 
 import requests
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from git_update_check import run_startup_git_update_check
+from git_update_check import run_startup_git_update_check, run_startup_release_update_check
 from tk_window_scaling import (
     apply_fixed_size_window,
     apply_resizable_window,
@@ -59,6 +76,7 @@ from tk_window_scaling import (
 
 APP_TITLE = "ATAK Imagery Downloader"
 
+# Set to "1" by scripts/atak_downloader_from_installer_win.py (Device Installer post-step only).
 LAUNCHED_FROM_DEVICE_INSTALLER_ENV = "ATAK_DOWNLOADER_LAUNCHED_FROM_DEVICE_INSTALLER"
 
 
@@ -79,65 +97,59 @@ USER_AGENT = "ATAK-Ortho-Downloader/1.1"
 USGS_MAPSERVER_BASE_URL = "https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer"
 DTED_SERVER_BASE_URL = "http://31.220.30.74/dted"
 OFFLINE_MISSING_DATA_MSG = "Internet unreachable to download missing data."
-# Parallel HTTP tile fetches. Match Linux: scale with CPU count (cap 48).
+# Parallel HTTP tile fetches (thread pool). Network-bound — not the same as CPU cores;
+# imagery_tile_selection uses processes for the heavy *tile plan* bbox scan on large states.
 MAX_DOWNLOAD_WORKERS = min(48, max(8, (os.cpu_count() or 4) * 4))
-
-
-def _shutdown_executor_pool(executor: ThreadPoolExecutor) -> None:
-    try:
-        executor.shutdown(wait=False, cancel_futures=True)
-    except TypeError:
-        executor.shutdown(wait=False)
-
-
 if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-    BUNDLED_SCRIPT_DIR = Path(sys._MEIPASS) / "scripts"
-else:
-    BUNDLED_SCRIPT_DIR = Path(__file__).resolve().parent
-
-if getattr(sys, "frozen", False):
+    SCRIPT_DIR = Path(sys._MEIPASS) / "scripts"
+    # Writable, persistent location for .last_imagery_root.txt (MEIPASS itself is temporary).
     RUNTIME_STATE_DIR = Path(sys.executable).resolve().parent
 else:
-    RUNTIME_STATE_DIR = Path(__file__).resolve().parent
+    SCRIPT_DIR = Path(__file__).resolve().parent
+    RUNTIME_STATE_DIR = SCRIPT_DIR
 
-DATA_DIR = BUNDLED_SCRIPT_DIR / "data"
+DATA_DIR = SCRIPT_DIR / "data"
 ZOOM_ESTIMATE_PATH = DATA_DIR / "zoom_estimates_z10_z16.json"
 STATE_GEOJSON_PATH = DATA_DIR / "us_states.geojson"
 TILE_PLAN_DIR = DATA_DIR / "tile_plans" / "v1"
 MOBILE_ASSET_DIR = DATA_DIR / "mobile_xml"
 BUNDLED_PLUGIN_DIR = DATA_DIR / "bundled_plugins"
+ADDON_PLUGIN_ASSET_CACHE_DIR = RUNTIME_STATE_DIR / ".addon_plugin_asset_cache"
+ADDON_PLUGIN_GITHUB_REPO = (os.environ.get("ATAK_ADDON_PLUGIN_GITHUB_REPO") or "atakmaps/atak-imagery").strip()
+ADDON_PLUGIN_RELEASE_TAG = (os.environ.get("ATAK_ADDON_PLUGIN_RELEASE_TAG") or "").strip()
+ADDON_PLUGIN_APK_URLS = (os.environ.get("ATAK_ADDON_PLUGIN_APK_URLS") or "").strip()
+PROTECTED_IMPORT_ASSET_CACHE_DIR = RUNTIME_STATE_DIR / ".protected_import_asset_cache"
+PROTECTED_IMPORT_GITHUB_REPO = (
+    (os.environ.get("ATAK_PROTECTED_IMPORT_GITHUB_REPO") or ADDON_PLUGIN_GITHUB_REPO or "atakmaps/atak-imagery")
+    .strip()
+)
+PROTECTED_IMPORT_RELEASE_TAG = (os.environ.get("ATAK_PROTECTED_IMPORT_RELEASE_TAG") or "").strip()
+PROTECTED_IMPORT_ASSET_NAMES = [
+    s.strip()
+    for s in (os.environ.get("ATAK_PROTECTED_IMPORT_ASSET_NAMES") or "AmRRON-Default-v1.0.csv.zip").split(",")
+    if s.strip()
+]
 MOBILE_XML_DEVICE_PATH = "/sdcard/atak/imagery/mobile/mapsources"
 MOBILE_IMPORT_DEVICE_PATH = "/sdcard/atak/tools/import"
 MOBILE_OVERLAY_DEVICE_PATH = "/sdcard/Download"
 LAST_IMAGERY_ROOT_FILE = RUNTIME_STATE_DIR / ".last_imagery_root.txt"
+# Written after each successful imagery download: state folder names (for SQLite builder filter).
 LAST_IMAGERY_SESSION_STATES_FILE = RUNTIME_STATE_DIR / ".last_imagery_session_states.txt"
 
+from imagery_tile_selection import (  # noqa: E402
+    STATE_BOUNDARY_BUFFER_MILES,
+    RADIUS_REGION_FOLDER,
+    build_tiles_for_state_result,
+    compute_tiles_for_radius,
+    lonlat_to_tile,
+    square_lonlat_footprint_for_radius_miles,
+    state_names_intersecting_geodesic_circle,
+)
 
-def _load_imagery_tile_selection():
-    paths: List[Path] = []
-    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-        paths.append(Path(sys._MEIPASS) / "scripts" / "imagery_tile_selection.py")
-    here = Path(__file__).resolve().parent
-    paths.extend([here / "imagery_tile_selection.py", here.parent / "scripts" / "imagery_tile_selection.py"])
-    for path in paths:
-        if path.is_file():
-            spec = importlib.util.spec_from_file_location("imagery_tile_selection", path)
-            mod = importlib.util.module_from_spec(spec)
-            assert spec.loader is not None
-            spec.loader.exec_module(mod)
-            return mod
-    raise ImportError("imagery_tile_selection.py not found (bundle next to downloader or under scripts/)")
-
-
-_its = _load_imagery_tile_selection()
-lonlat_to_tile = _its.lonlat_to_tile
-build_tiles_for_state = _its.build_tiles_for_state
-build_tiles_for_state_result = _its.build_tiles_for_state_result
-STATE_BOUNDARY_BUFFER_MILES = _its.STATE_BOUNDARY_BUFFER_MILES
-RADIUS_REGION_FOLDER = _its.RADIUS_REGION_FOLDER
-compute_tiles_for_radius = _its.compute_tiles_for_radius
-square_lonlat_footprint_for_radius_miles = _its.square_lonlat_footprint_for_radius_miles
-state_names_intersecting_geodesic_circle = _its.state_names_intersecting_geodesic_circle
+# Load on the main thread only: first-importing ``atak_adb_deploy`` from the download worker
+# pulls in tkinter on a background thread and can abort with Tcl_AsyncDelete on Linux/X11.
+from atak_adb_deploy_win import install_apk, ensure_gui_path_for_adb  # noqa: E402
+from bundled_plugin_install import iter_bundled_addon_apks  # noqa: E402
 
 
 def sanitize_radius_imagery_folder_name(raw: str) -> str:
@@ -154,25 +166,12 @@ def sanitize_radius_imagery_folder_name(raw: str) -> str:
     return cleaned
 
 
-_wb = Path(__file__).resolve().parent
-if str(_wb) not in sys.path:
-    sys.path.insert(0, str(_wb))
-if not getattr(sys, "frozen", False):
-    _repo_scripts = _wb.parent / "scripts"
-    if _repo_scripts.is_dir():
-        _rs = str(_repo_scripts.resolve())
-        if _rs not in sys.path:
-            sys.path.insert(0, _rs)
-else:
-    _bd = str(BUNDLED_SCRIPT_DIR.resolve())
-    if _bd not in sys.path:
-        sys.path.insert(0, _bd)
+def _shutdown_executor_pool(executor: ThreadPoolExecutor) -> None:
+    try:
+        executor.shutdown(wait=False, cancel_futures=True)
+    except TypeError:
+        executor.shutdown(wait=False)
 
-from atak_adb_deploy import install_apk
-from bundled_plugin_install import (
-    install_bundled_addon_apks as install_bundled_addon_plugins,
-    iter_bundled_addon_apks,
-)
 
 # -----------------------------
 # Logging
@@ -239,6 +238,7 @@ def install_excepthook() -> None:
         log("FATAL: Unhandled exception")
         tb = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
         log(tb)
+        # Never call Tk from a background thread — causes Tcl_AsyncDelete / abort.
         if threading.current_thread() is not threading.main_thread():
             return
         try:
@@ -256,7 +256,7 @@ def _await_cancel_scheduled_after_on_main(progress: Any, *, timeout: float = 30.
 
     ``ensure_window_stacking`` schedules ``after`` nudges on the progress window; overlapping
     those with worker-driven updates after adb work has been observed to trigger
-    ``Tcl_AsyncDelete: async handler deleted by the wrong thread`` on Linux/X11.
+    ``Tcl_AsyncDelete: async handler deleted by the wrong thread`` on Linux.
     """
     if threading.current_thread() is threading.main_thread():
         cancel_all_scheduled_after(progress)
@@ -284,7 +284,16 @@ def _run_adb(args: List[str], serial: Optional[str] = None, timeout: int = 120) 
     if serial:
         cmd.extend(["-s", serial])
     cmd.extend(args)
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError:
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=127, stdout="", stderr="adb executable not found on PATH"
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=124, stdout="", stderr=f"adb timed out after {timeout}s"
+        )
 
 
 def adb_available() -> bool:
@@ -415,33 +424,380 @@ def _shell_single_quote(value: str) -> str:
 
 def _mobile_asset_targets() -> List[Tuple[Path, str]]:
     xml_files = sorted(MOBILE_ASSET_DIR.rglob("*.xml"))
+    kml_files = sorted(MOBILE_ASSET_DIR.rglob("*.kml"))
     kmz_files = sorted(MOBILE_ASSET_DIR.rglob("*.kmz"))
     zip_files = sorted(MOBILE_ASSET_DIR.rglob("*.zip"))
     out: List[Tuple[Path, str]] = []
     out.extend((f, MOBILE_XML_DEVICE_PATH) for f in xml_files)
-    # Put KMZ/ZIP in Download for manual ATAK import.
+    # Put KML/KMZ/ZIP in Download for manual ATAK import.
+    out.extend((f, MOBILE_OVERLAY_DEVICE_PATH) for f in kml_files)
     out.extend((f, MOBILE_OVERLAY_DEVICE_PATH) for f in kmz_files)
     out.extend((f, MOBILE_OVERLAY_DEVICE_PATH) for f in zip_files)
     return out
 
 
-def _adb_list_dir_filenames(serial: str, device_dir: str) -> Set[str]:
-    cmd = f"ls -1 {_shell_single_quote(device_dir)} 2>/dev/null || true"
-    r = _run_adb(["shell", "sh", "-c", cmd], serial=serial, timeout=25)
+def _format_asset_label_for_display(src: Path, device_dir: str) -> str:
+    try:
+        rel = src.relative_to(MOBILE_ASSET_DIR)
+        return f"{rel} -> {device_dir}"
+    except ValueError:
+        if device_dir == MOBILE_OVERLAY_DEVICE_PATH:
+            return f"{src.name} (from ZIP contents) -> {device_dir}"
+        return f"{src.name} -> {device_dir}"
+
+
+def _is_uvpro_apk_filename(name: str) -> bool:
+    compact = name.lower().replace("_", "").replace("-", "").replace(" ", "")
+    return "uvpro" in compact or "takuvpro" in compact
+
+
+def _download_addon_apk_file(
+    url: str,
+    dest: Path,
+    *,
+    progress_cb: Optional[Callable[[int, int], None]] = None,
+) -> Path:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    session = requests.Session()
+    session.headers.update({"User-Agent": USER_AGENT})
+    with session.get(url, timeout=120, stream=True) as r:
+        r.raise_for_status()
+        try:
+            total_bytes = int(r.headers.get("content-length") or 0)
+        except Exception:
+            total_bytes = 0
+        downloaded_bytes = 0
+        last_emit = 0.0
+        if progress_cb:
+            try:
+                progress_cb(0, total_bytes)
+            except Exception:
+                pass
+        with open(tmp, "wb") as f:
+            for chunk in r.iter_content(chunk_size=1024 * 64):
+                if chunk:
+                    f.write(chunk)
+                    downloaded_bytes += len(chunk)
+                    if progress_cb:
+                        now = time.monotonic()
+                        if (now - last_emit) >= 0.06:
+                            try:
+                                progress_cb(downloaded_bytes, total_bytes)
+                            except Exception:
+                                pass
+                            last_emit = now
+        if progress_cb:
+            try:
+                progress_cb(downloaded_bytes, total_bytes)
+            except Exception:
+                pass
+    tmp.replace(dest)
+    return dest
+
+
+def _download_file_with_progress(
+    url: str,
+    dest: Path,
+    *,
+    progress_cb: Optional[Callable[[int, int], None]] = None,
+) -> Path:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    session = requests.Session()
+    session.headers.update({"User-Agent": USER_AGENT})
+    with session.get(url, timeout=120, stream=True) as r:
+        r.raise_for_status()
+        try:
+            total_bytes = int(r.headers.get("content-length") or 0)
+        except Exception:
+            total_bytes = 0
+        downloaded_bytes = 0
+        last_emit = 0.0
+        if progress_cb:
+            try:
+                progress_cb(0, total_bytes)
+            except Exception:
+                pass
+        with open(tmp, "wb") as f:
+            for chunk in r.iter_content(chunk_size=1024 * 64):
+                if chunk:
+                    f.write(chunk)
+                    downloaded_bytes += len(chunk)
+                    if progress_cb:
+                        now = time.monotonic()
+                        if (now - last_emit) >= 0.06:
+                            try:
+                                progress_cb(downloaded_bytes, total_bytes)
+                            except Exception:
+                                pass
+                            last_emit = now
+        if progress_cb:
+            try:
+                progress_cb(downloaded_bytes, total_bytes)
+            except Exception:
+                pass
+    tmp.replace(dest)
+    return dest
+
+
+def _addon_package_cache_path() -> Path:
+    return ADDON_PLUGIN_ASSET_CACHE_DIR / "package_names.json"
+
+
+def _load_addon_package_cache() -> Dict[str, str]:
+    p = _addon_package_cache_path()
+    if not p.is_file():
+        return {}
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            return {str(k): str(v) for k, v in raw.items() if str(k).strip() and str(v).strip()}
+    except Exception:
+        pass
+    return {}
+
+
+def _save_addon_package_cache(cache: Dict[str, str]) -> None:
+    try:
+        ADDON_PLUGIN_ASSET_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        _addon_package_cache_path().write_text(json.dumps(cache, indent=2, sort_keys=True), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _addon_candidate_cache_key(name: str, url: str) -> str:
+    return f"{name}|{url}"
+
+
+def _addon_plugin_candidates_from_github_assets(log_sink: Callable[[str], None]) -> List[Dict[str, Any]]:
+    owner_repo = ADDON_PLUGIN_GITHUB_REPO.strip()
+    if not owner_repo:
+        return []
+    if owner_repo.count("/") != 1:
+        log_sink(f"Warning: ATAK_ADDON_PLUGIN_GITHUB_REPO must be owner/repo, got {owner_repo!r}")
+        return []
+
+    owner, repo = owner_repo.split("/", 1)
+    if ADDON_PLUGIN_RELEASE_TAG:
+        api = f"https://api.github.com/repos/{owner}/{repo}/releases/tags/{ADDON_PLUGIN_RELEASE_TAG}"
+    else:
+        api = f"https://api.github.com/repos/{owner}/{repo}/releases/latest"
+
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": USER_AGENT}
+    token = (os.environ.get("GITHUB_TOKEN") or os.environ.get("ATAK_GITHUB_TOKEN") or "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    r = requests.get(api, headers=headers, timeout=30)
+    r.raise_for_status()
+    payload = r.json() or {}
+    tag = str(payload.get("tag_name") or "latest")
+    assets = payload.get("assets") or []
+    package_manifest_url = ""
+    apk_assets: List[Tuple[str, str, int]] = []
+    for a in assets:
+        name = str(a.get("name") or "")
+        dl = str(a.get("browser_download_url") or "")
+        if name == "addon_plugin_packages.json" and dl.startswith(("http://", "https://")):
+            package_manifest_url = dl
+            continue
+        try:
+            size_bytes = int(a.get("size") or 0)
+        except Exception:
+            size_bytes = 0
+        if not name.lower().endswith(".apk"):
+            continue
+        if _is_uvpro_apk_filename(name):
+            continue
+        if not dl.startswith("http://") and not dl.startswith("https://"):
+            continue
+        apk_assets.append((name, dl, size_bytes))
+    if not apk_assets:
+        return []
+
+    manifest_map: Dict[str, str] = {}
+    if package_manifest_url:
+        try:
+            rr = requests.get(package_manifest_url, headers=headers, timeout=20)
+            rr.raise_for_status()
+            payload_map = rr.json()
+            if isinstance(payload_map, dict):
+                for k, v in payload_map.items():
+                    ks = str(k).strip()
+                    vs = str(v).strip()
+                    if ks and vs:
+                        manifest_map[ks] = vs
+        except Exception as exc:
+            log_sink(f"Warning: could not read add-on package manifest asset: {exc}")
+
+    release_cache = ADDON_PLUGIN_ASSET_CACHE_DIR / f"{owner}_{repo}_{tag}"
+    pkg_cache = _load_addon_package_cache()
+    out: List[Dict[str, Any]] = []
+    for name, dl, size_bytes in apk_assets:
+        dest = release_cache / name
+        key = _addon_candidate_cache_key(name, dl)
+        pkg_name = pkg_cache.get(key) or manifest_map.get(name)
+        out.append(
+            {
+                "name": name,
+                "label": name,
+                "apk_path": dest if dest.is_file() else None,
+                "cache_path": dest,
+                "download_url": dl,
+                "size_bytes": size_bytes if size_bytes > 0 else (int(dest.stat().st_size) if dest.is_file() else 0),
+                "package_name": pkg_name,
+                "cache_key": key,
+            }
+        )
+    return out
+
+
+def _resolve_addon_plugin_apks(log_sink: Callable[[str], None]) -> List[Dict[str, Any]]:
+    if ADDON_PLUGIN_APK_URLS:
+        urls = [u.strip() for u in ADDON_PLUGIN_APK_URLS.split(",") if u.strip()]
+        out: List[Dict[str, Any]] = []
+        custom_cache = ADDON_PLUGIN_ASSET_CACHE_DIR / "custom_urls"
+        pkg_cache = _load_addon_package_cache()
+        for i, url in enumerate(urls, 1):
+            filename = Path(url.split("?", 1)[0]).name or f"addon_{i}.apk"
+            if not filename.lower().endswith(".apk") or _is_uvpro_apk_filename(filename):
+                continue
+            dest = custom_cache / filename
+            key = _addon_candidate_cache_key(filename, url)
+            out.append(
+                {
+                    "name": filename,
+                    "label": filename,
+                    "apk_path": dest if dest.is_file() else None,
+                    "cache_path": dest,
+                    "download_url": url,
+                    "size_bytes": int(dest.stat().st_size) if dest.is_file() else 0,
+                    "package_name": pkg_cache.get(key),
+                    "cache_key": key,
+                }
+            )
+        if out:
+            return out
+
+    try:
+        candidates = _addon_plugin_candidates_from_github_assets(log_sink)
+        if candidates:
+            return candidates
+    except Exception as exc:
+        log_sink(f"Warning: could not fetch add-on plugin assets from GitHub release: {exc}")
+
+    # Backward-compatible fallback for older local builds.
+    local_apks = iter_bundled_addon_apks(BUNDLED_PLUGIN_DIR)
+    if local_apks:
+        log_sink("Using local bundled add-on plugin APKs (legacy fallback).")
+    out_local: List[Dict[str, Any]] = []
+    for apk in local_apks:
+        out_local.append(
+            {
+                "name": apk.name,
+                "label": _plugin_label_for_display(apk),
+                "apk_path": apk,
+                "cache_path": apk,
+                "download_url": "",
+                "size_bytes": int(apk.stat().st_size) if apk.is_file() else 0,
+                "package_name": _extract_apk_package_name(apk),
+                "cache_key": "",
+            }
+        )
+    return out_local
+
+
+def _protected_import_plain_name(asset_name: str) -> str:
+    lower = asset_name.lower()
+    if lower.endswith(".zip"):
+        return Path(asset_name).stem
+    if lower.endswith(".enc"):
+        return Path(asset_name).stem
+    return Path(asset_name).name
+
+
+def _protected_import_asset_specs() -> List[Dict[str, str]]:
+    owner_repo = PROTECTED_IMPORT_GITHUB_REPO.strip()
+    if not owner_repo or owner_repo.count("/") != 1:
+        return []
+    owner, repo = owner_repo.split("/", 1)
+    specs: List[Dict[str, str]] = []
+    for asset_name in PROTECTED_IMPORT_ASSET_NAMES:
+        if PROTECTED_IMPORT_RELEASE_TAG:
+            url = f"https://github.com/{owner}/{repo}/releases/download/{PROTECTED_IMPORT_RELEASE_TAG}/{asset_name}"
+        else:
+            url = f"https://github.com/{owner}/{repo}/releases/latest/download/{asset_name}"
+        specs.append(
+            {
+                "asset_name": asset_name,
+                "plain_name": _protected_import_plain_name(asset_name),
+                "url": url,
+            }
+        )
+    return specs
+
+
+def _missing_protected_import_specs(serial: str) -> List[Dict[str, str]]:
+    out: List[Dict[str, str]] = []
+    for spec in _protected_import_asset_specs():
+        plain_name = spec.get("plain_name") or ""
+        if not plain_name:
+            continue
+        device_path = f"{MOBILE_IMPORT_DEVICE_PATH}/{plain_name}"
+        if _adb_device_file_exists(serial, device_path):
+            continue
+        out.append(spec)
+    return out
+
+
+def _prompt_protected_import_password(parent: tk.Misc) -> Optional[str]:
+    ensure_window_stacking(parent)
+    try:
+        pw = simpledialog.askstring(
+            APP_TITLE,
+            "Enter password to install protected import file(s):",
+            parent=parent,
+            show="*",
+        )
+    except Exception:
+        return None
+    if pw is None:
+        return None
+    pw = pw.strip()
+    return pw or None
+
+
+def _extract_password_zip_single(zip_path: Path, password: str, out_dir: Path) -> Path:
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        members = [i for i in zf.infolist() if not i.is_dir()]
+        if not members:
+            raise RuntimeError("encrypted asset zip is empty")
+        member = members[0]
+        out_name = Path(member.filename).name or "protected_import.csv"
+        out_path = out_dir / out_name
+        with zf.open(member, "r", pwd=password.encode("utf-8")) as src, open(out_path, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+        return out_path
+
+
+def _plugin_label_for_display(apk: Path) -> str:
+    try:
+        return str(apk.relative_to(BUNDLED_PLUGIN_DIR))
+    except Exception:
+        return apk.name
+
+
+def _adb_device_file_exists(serial: str, device_path: str) -> bool:
+    # Avoid ``sh -c`` probes here: Android shell argument handling can vary by build.
+    # ``adb shell ls <file>`` is a reliable existence check.
+    r = _run_adb(["shell", "ls", device_path], serial=serial, timeout=20)
+    if r.returncode != 0:
+        return False
     out = (r.stdout or "").strip()
-    names: Set[str] = set()
     if not out:
-        return names
-    for line in out.splitlines():
-        name = line.strip()
-        if not name:
-            continue
-        # Defensive filtering for occasional shell diagnostics.
-        lower = name.lower()
-        if lower.startswith("ls: ") or "no such file" in lower:
-            continue
-        names.add(name)
-    return names
+        return False
+    return "No such file" not in out
 
 
 def _installed_plugin_package_names(serial: str) -> Set[str]:
@@ -480,30 +836,49 @@ def _extract_apk_package_name(apk_path: Path) -> Optional[str]:
     return None
 
 
-def _missing_addon_items_for_device(serial: str) -> List[str]:
-    missing: List[str] = []
-    dir_inventory: Dict[str, Set[str]] = {}
-    for _src, device_dir in _mobile_asset_targets():
-        if device_dir not in dir_inventory:
-            dir_inventory[device_dir] = _adb_list_dir_filenames(serial, device_dir)
+def _build_addons_plan(
+    serial: str,
+    plugin_candidates: List[Dict[str, Any]],
+) -> Tuple[List[Tuple[Path, str]], List[Dict[str, Any]]]:
+    missing_assets: List[Tuple[Path, str]] = []
+    plugin_rows: List[Dict[str, Any]] = []
 
     for src, device_dir in _mobile_asset_targets():
-        device_names = dir_inventory.get(device_dir, set())
-        if src.name not in device_names:
-            rel = src.relative_to(MOBILE_ASSET_DIR)
-            missing.append(f"Add-on file: {rel} -> {device_dir}")
+        device_path = f"{device_dir}/{src.name}"
+        if not _adb_device_file_exists(serial, device_path):
+            missing_assets.append((src, device_dir))
 
     installed_pkgs = _installed_plugin_package_names(serial)
-    for apk in iter_bundled_addon_apks(BUNDLED_PLUGIN_DIR):
-        package_name = _extract_apk_package_name(apk)
-        rel = apk.relative_to(BUNDLED_PLUGIN_DIR)
-        if package_name:
-            if package_name not in installed_pkgs:
-                missing.append(f"Plugin APK: {rel} ({package_name})")
-        else:
-            missing.append(f"Plugin APK: {rel} (package check unavailable; will install)")
+    for candidate in plugin_candidates:
+        apk_path = candidate.get("apk_path")
+        package_name = str(candidate.get("package_name") or "").strip() or None
+        if package_name is None and isinstance(apk_path, Path) and apk_path.is_file():
+            package_name = _extract_apk_package_name(apk_path)
+        installed = bool(package_name and package_name in installed_pkgs)
+        try:
+            size_bytes = int(candidate.get("size_bytes") or 0)
+        except Exception:
+            size_bytes = 0
+        if size_bytes <= 0 and isinstance(apk_path, Path) and apk_path.is_file():
+            try:
+                size_bytes = int(apk_path.stat().st_size)
+            except Exception:
+                size_bytes = 0
+        plugin_rows.append(
+            {
+                "apk_path": apk_path if isinstance(apk_path, Path) else None,
+                "cache_path": candidate.get("cache_path"),
+                "download_url": str(candidate.get("download_url") or ""),
+                "cache_key": str(candidate.get("cache_key") or ""),
+                "label": str(candidate.get("label") or ""),
+                "name": str(candidate.get("name") or ""),
+                "package_name": package_name,
+                "installed": installed,
+                "size_bytes": size_bytes,
+            }
+        )
 
-    return missing
+    return missing_assets, plugin_rows
 
 
 def _force_stop_atak(serial: str, log_fn: Callable[[str], None]) -> None:
@@ -528,13 +903,18 @@ def _restart_atak(serial: str, log_fn: Callable[[str], None]) -> None:
         log_fn(f"Warning: failed to restart ATAK ({pkg}): {stderr or 'unknown error'}")
 
 
-def push_mobile_assets(log_fn=None) -> None:
+def push_mobile_assets(
+    log_fn=None,
+    *,
+    selected_targets: Optional[List[Tuple[Path, str]]] = None,
+    step_cb: Optional[Callable[[str], None]] = None,
+) -> None:
     """Push bundled mobile add-on files to the device (additive — never deletes device files)."""
     if not MOBILE_ASSET_DIR.is_dir():
         return
 
     serial: Optional[str] = os.environ.get("ANDROID_SERIAL") or None
-    targets = _mobile_asset_targets()
+    targets = selected_targets if selected_targets is not None else _mobile_asset_targets()
     total = len(targets)
     if total == 0:
         return
@@ -544,270 +924,333 @@ def push_mobile_assets(log_fn=None) -> None:
         _run_adb(["shell", "mkdir", "-p", device_dir], serial=serial, timeout=30)
 
     for src, device_dir in targets:
-        rel = src.relative_to(MOBILE_ASSET_DIR)
+        try:
+            rel = src.relative_to(MOBILE_ASSET_DIR)
+        except ValueError:
+            rel = Path(src.name)
         if log_fn:
             log_fn(f"Pushing {rel} to {device_dir}…")
         r = _run_adb(["push", str(src), f"{device_dir}/{src.name}"], serial=serial, timeout=120)
         if r.returncode != 0 and log_fn:
             log_fn(f"Warning: failed to push {src.name}: {r.stderr}")
+        if step_cb:
+            try:
+                step_cb(f"Pushed {src.name}")
+            except Exception:
+                pass
 
     if log_fn:
         log_fn(f"Mobile assets pushed to device ({total} file copies).")
 
 
-CONNECT_DEVICE_FOR_ADDONS_TEXT = (
-    "This build includes map sources / import files (XML, KMZ, ZIP) and/or bundled ATAK plugins "
-    "for your device.\n\n"
-    "Connect your phone with USB debugging on and USB mode set to File Transfer.\n\n"
-    "Click OK when the correct device is connected."
-)
+def _ensure_plugin_row_apk(
+    row: Dict[str, Any],
+    log_sink: Callable[[str], None],
+    *,
+    progress_cb: Optional[Callable[[int, int], None]] = None,
+) -> Optional[Path]:
+    apk_path = row.get("apk_path")
+    if isinstance(apk_path, Path) and apk_path.is_file():
+        return apk_path
 
-ADDONS_PRE_DOWNLOAD_DONE_TEXT = (
-    "Plug ins/Addons installation complete.  You may now disconnect your device."
-)
+    url = str(row.get("download_url") or "").strip()
+    if not url:
+        return None
 
+    name = str(row.get("name") or Path(url.split("?", 1)[0]).name or "addon.apk")
+    if _is_uvpro_apk_filename(name):
+        return None
 
-def bundled_addons_available() -> bool:
-    """True if we ship files under data/mobile_xml or data/bundled_plugins to deploy over adb."""
-    if MOBILE_ASSET_DIR.is_dir():
-        if (
-            any(MOBILE_ASSET_DIR.rglob("*.xml"))
-            or any(MOBILE_ASSET_DIR.rglob("*.kmz"))
-            or any(MOBILE_ASSET_DIR.rglob("*.zip"))
-        ):
-            return True
-    if BUNDLED_PLUGIN_DIR.is_dir():
-        if iter_bundled_addon_apks(BUNDLED_PLUGIN_DIR):
-            return True
-    return False
-
-
-def _wait_for_device_ready_dialog(progress: Any, prompt_text: str) -> None:
-    if threading.current_thread() is threading.main_thread():
-        ensure_window_stacking(progress)
-        messagebox.showinfo(APP_TITLE, prompt_text, parent=progress)
-        cancel_all_scheduled_after(progress)
-        return
-    progress.device_ready_event = threading.Event()
-    progress.device_ready_prompt = prompt_text
-    while True:
-        progress.wait_if_paused()
-        evt = progress.device_ready_event
-        if evt is None or evt.is_set():
-            break
-        time.sleep(0.1)
-
-
-def _show_addons_install_plan_dialog(parent: tk.Misc, title: str, items: List[str]) -> bool:
-    decision = {"ok": False}
-    dlg = tk.Toplevel(parent)
-    dlg.title(title)
-    dlg.configure(cursor="arrow")
-    dlg.transient(parent)
-    dlg.grab_set()
-
-    scale = apply_fixed_size_window(dlg, 760, 520)
-    wrap_w = scaled_int(700, scale)
-
-    tk.Label(
-        dlg,
-        text="Install missing add-ons",
-        font=("Arial", 12, "bold"),
-        justify="left",
-    ).pack(anchor="w", padx=18, pady=(14, 6))
-    tk.Label(
-        dlg,
-        text="The following items are missing and will be installed:",
-        justify="left",
-        wraplength=wrap_w,
-    ).pack(anchor="w", padx=18, pady=(0, 8))
-
-    frame = tk.Frame(dlg, padx=18, pady=0)
-    frame.pack(fill="both", expand=True)
-    text = tk.Text(frame, wrap="word", height=14)
-    scroll = tk.Scrollbar(frame, command=text.yview)
-    text.configure(yscrollcommand=scroll.set)
-    text.pack(side="left", fill="both", expand=True)
-    scroll.pack(side="right", fill="y")
-
-    text.insert("1.0", "\n".join(f"{i + 1}. {item}" for i, item in enumerate(items)))
-    text.configure(state="disabled")
-
-    btn_row = tk.Frame(dlg, padx=18, pady=14)
-    btn_row.pack(fill="x")
-
-    def _close(ok: bool) -> None:
-        decision["ok"] = ok
-        cancel_all_scheduled_after(dlg)
-        dlg.destroy()
-
-    tk.Button(btn_row, text="OK", width=12, command=lambda: _close(True)).pack(side="left")
-    tk.Button(btn_row, text="Cancel", width=12, command=lambda: _close(False)).pack(side="left", padx=(10, 0))
-
-    ensure_window_stacking(dlg, above=parent)
-    parent.wait_window(dlg)
-    return bool(decision["ok"])
-
-
-def _ask_ok_cancel(progress: Any, title: str, items: List[str]) -> bool:
-    if threading.current_thread() is threading.main_thread():
-        return _show_addons_install_plan_dialog(progress, title, items)
-
-    progress.confirm_result = False
-    progress.confirm_prompt = (title, items)
-    progress.confirm_event = threading.Event()
-    while True:
-        progress.wait_if_paused()
-        evt = progress.confirm_event
-        if evt is None or evt.is_set():
-            break
-        time.sleep(0.1)
-    return bool(progress.confirm_result)
-
-
-def _resolve_adb_serial_for_push() -> Tuple[str, List[str]]:
-    devs = list_usb_devices()
-    env_ser = (os.environ.get("ANDROID_SERIAL") or "").strip()
-    if env_ser:
-        return env_ser, devs
-    if len(devs) == 1:
-        os.environ["ANDROID_SERIAL"] = devs[0]
-        return devs[0], devs
-    return "", devs
-
-
-def deploy_bundled_addons_to_device(progress: Any, log_sink: Callable[[str], None]) -> None:
-    """Push data/mobile_xml assets and install data/bundled_plugins APKs when adb target is available."""
-    if not bundled_addons_available():
-        log_sink("No bundled map/import or plugin add-ons in this install — skipping device push.")
-        return
-    ser_resolved, devs = _resolve_adb_serial_for_push()
-    if not ser_resolved:
-        progress.set_status("Connect device for map add-ons and plugins…")
-        log_sink("Bundled map/import files or plugins are present — waiting for USB device…")
-        _wait_for_device_ready_dialog(progress, CONNECT_DEVICE_FOR_ADDONS_TEXT)
-        ser_resolved, devs = _resolve_adb_serial_for_push()
-    if not ser_resolved:
-        if len(devs) > 1:
-            log_sink(
-                "Multiple adb devices — set ANDROID_SERIAL to the target id (see \"adb devices\"). "
-                "Map ZIP/KMZ/XML and bundled plugins were not installed."
-            )
-        else:
-            log_sink(
-                "No adb device in the \"device\" state after OK — map add-ons and bundled plugins "
-                "were not installed. Enable USB debugging, accept the RSA prompt, then re-run this step "
-                "or copy files manually."
-            )
-        return
+    cache_key = str(row.get("cache_key") or _addon_candidate_cache_key(name, url))
+    cp = row.get("cache_path")
+    if isinstance(cp, Path):
+        dest = cp
+    else:
+        dest = ADDON_PLUGIN_ASSET_CACHE_DIR / "runtime" / name
+    log_sink(f"Downloading selected add-on plugin: {name}")
+    downloaded = _download_addon_apk_file(url, dest, progress_cb=progress_cb)
+    row["apk_path"] = downloaded
     try:
-        progress.set_status("Pushing map sources and import files to device…")
-        push_mobile_assets(log_fn=log_sink)
-    except Exception as exc:
-        log_sink(f"Warning: mobile asset push failed — {exc}")
-    _await_cancel_scheduled_after_on_main(progress)
-    try:
+        row["size_bytes"] = int(downloaded.stat().st_size)
+    except Exception:
+        pass
 
-        def ui_addon(msg: str) -> None:
-            progress.set_status(msg)
-
-        progress.set_status("Installing bundled add-on plugins…")
-        install_bundled_addon_plugins(
-            ser_resolved, log_sink, ui_addon, install_apk, plugin_root=BUNDLED_PLUGIN_DIR
-        )
-    except Exception as exc:
-        log_sink(f"Warning: bundled add-on plugin install failed — {exc}")
+    pkg = _extract_apk_package_name(downloaded)
+    if pkg:
+        row["package_name"] = pkg
+        if cache_key:
+            cache = _load_addon_package_cache()
+            cache[cache_key] = pkg
+            _save_addon_package_cache(cache)
+    return downloaded
 
 
-def _refresh_addons_only_for_device(
-    progress: Any, log_sink: Callable[[str], None], *, addons_only: bool = True
+def _install_selected_plugin_apks(
+    serial: str,
+    plugin_rows: List[Dict[str, Any]],
+    progress: Any,
+    log_sink: Callable[[str], None],
+    *,
+    step_cb: Optional[Callable[[str], None]] = None,
+    download_progress_cb: Optional[Callable[[str, int, int], None]] = None,
 ) -> None:
-    ser_resolved, devs = _resolve_adb_serial_for_push()
-    if not ser_resolved:
-        progress.set_status("Connect device for map add-ons and plugins…")
-        log_sink("Bundled map/import files or plugins are present — waiting for USB device…")
-        _wait_for_device_ready_dialog(progress, CONNECT_DEVICE_FOR_ADDONS_TEXT)
-        ser_resolved, devs = _resolve_adb_serial_for_push()
-    if not ser_resolved:
-        if len(devs) > 1:
-            progress.error_message = (
-                "Multiple adb devices are connected.\n\n"
-                "Set ANDROID_SERIAL to the target device id from \"adb devices\" and re-run."
-            )
+    if not plugin_rows:
+        log_sink("No bundled add-on plugins need install.")
+        return
+    log_sink(f"Installing {len(plugin_rows)} selected add-on plugin(s)…")
+    for row in plugin_rows:
+        had_local_apk = isinstance(row.get("apk_path"), Path) and row.get("apk_path").is_file()
+        row_name = str(row.get("name") or row.get("label") or "plugin.apk")
+        if not had_local_apk and str(row.get("download_url") or "").strip():
+            progress.set_status(f"Downloading add-on: {row_name}…")
+            if download_progress_cb:
+                try:
+                    hinted_total = int(row.get("size_bytes") or 0)
+                except Exception:
+                    hinted_total = 0
+                try:
+                    download_progress_cb(row_name, 0, max(0, hinted_total))
+                except Exception:
+                    pass
+        apk = _ensure_plugin_row_apk(
+            row,
+            log_sink,
+            progress_cb=(
+                (lambda done, total, name=row_name: download_progress_cb(name, done, total))
+                if download_progress_cb
+                else None
+            ),
+        )
+        if apk is None:
+            log_sink(f"Warning: could not resolve APK for {row_name}")
+            continue
+        if not had_local_apk and step_cb:
+            try:
+                step_cb(f"Downloaded {apk.name}")
+            except Exception:
+                pass
+            if download_progress_cb:
+                try:
+                    file_size = int(apk.stat().st_size)
+                except Exception:
+                    file_size = 0
+                try:
+                    download_progress_cb(row_name, file_size, file_size)
+                except Exception:
+                    pass
+        rel = _plugin_label_for_display(apk)
+        progress.set_status(f"Add-on: {apk.name}…")
+        log_sink(f"Installing bundled add-on: {rel}")
+        install_apk(serial, apk, progress.set_status, package_name=None)
+        if step_cb:
+            try:
+                step_cb(f"Installed {apk.name}")
+            except Exception:
+                pass
+
+
+def _remove_selected_plugin_packages(
+    serial: str,
+    package_names: List[str],
+    progress: Any,
+    log_sink: Callable[[str], None],
+    *,
+    step_cb: Optional[Callable[[str], None]] = None,
+) -> None:
+    if not package_names:
+        return
+    unique = sorted({p for p in package_names if p})
+    if not unique:
+        return
+    log_sink(f"Removing {len(unique)} selected plugin(s)…")
+    for pkg in unique:
+        progress.set_status(f"Removing plugin: {pkg}…")
+        r = _run_adb(["uninstall", pkg], serial=serial, timeout=120)
+        if r.returncode == 0:
+            log_sink(f"Removed plugin: {pkg}")
         else:
-            progress.error_message = (
-                "No adb device in the \"device\" state after confirmation.\n\n"
-                "Enable USB debugging, accept the RSA prompt, and re-run."
-            )
-        return
+            msg = (r.stderr or r.stdout or "").strip()
+            log_sink(f"Warning: failed to remove {pkg}: {msg or 'unknown error'}")
+        if step_cb:
+            try:
+                step_cb(f"Removed {pkg}")
+            except Exception:
+                pass
 
-    _force_stop_atak(ser_resolved, log_sink)
-    progress.set_status("Checking existing add-ons on device…")
-    missing = _missing_addon_items_for_device(ser_resolved)
-    if not missing:
-        log_sink("Device already has all required add-ons.")
-        if addons_only:
-            progress.completion_log_summary = "Add-ons refresh skipped — device already current."
-            progress.completion_message = ADDONS_DEVICE_CURRENT_TEXT
-            progress.skip_sqlite_builder_after_session = True
-        return
 
-    if not _ask_ok_cancel(progress, APP_TITLE, missing):
-        log_sink("Add-ons refresh cancelled by user before install.")
-        progress.user_cancelled = True
-        return
+def _deploy_selected_addons_to_device(
+    progress: Any,
+    log_sink: Callable[[str], None],
+    serial: str,
+    *,
+    missing_assets: List[Tuple[Path, str]],
+    install_plugins: List[Dict[str, Any]],
+    remove_packages: List[str],
+    protected_import_specs: Optional[List[Dict[str, str]]] = None,
+) -> None:
+    def _plugin_needs_download(row: Dict[str, Any]) -> bool:
+        apk = row.get("apk_path")
+        if isinstance(apk, Path) and apk.is_file():
+            return False
+        return bool(str(row.get("download_url") or "").strip())
+
+    remove_total = len(sorted({p for p in remove_packages if p}))
+    download_total = sum(1 for row in install_plugins if _plugin_needs_download(row))
+    install_total = len(install_plugins)
+    push_total = len(missing_assets)
+    protected_total = len(protected_import_specs or [])
+    total_steps = max(1, remove_total + download_total + install_total + push_total + protected_total)
+    completed_steps = 0
+    progress.set_progress(0, total_steps)
+
+    def _counter_detail(virtual_completed: float) -> str:
+        pct_f = (max(0.0, min(float(virtual_completed), float(total_steps))) / float(total_steps)) * 100.0
+        if total_steps >= 1000:
+            dec = 3
+        elif total_steps >= 100:
+            dec = 2
+        else:
+            dec = 1
+        return f"{int(completed_steps)} / {total_steps} add-on steps ({pct_f:.{dec}f}%)"
+
+    def _set_fraction_in_current_step(step_frac: float, counter_suffix: str = "") -> None:
+        frac_in_step = max(0.0, min(1.0, float(step_frac)))
+        virtual_completed = float(completed_steps) + frac_in_step
+        overall_frac = virtual_completed / float(total_steps)
+        detail = _counter_detail(virtual_completed)
+        if counter_suffix:
+            detail = f"{detail} | {counter_suffix}"
+        progress.set_progress_fraction(overall_frac, detail)
+
+    def _download_progress(name: str, downloaded: int, total: int) -> None:
+        if total > 0:
+            step_frac = max(0.0, min(1.0, float(downloaded) / float(total)))
+            suffix = f"Downloading {name} ({human_bytes(downloaded)} / {human_bytes(total)})"
+        else:
+            # Unknown content length (chunked transfer) — keep progress moving visually.
+            step_frac = 0.25
+            suffix = f"Downloading {name} ({human_bytes(max(0, downloaded))})"
+        _set_fraction_in_current_step(step_frac, suffix)
+        progress.set_status(f"Downloading add-on: {name}…")
+
+    def _step_done(status: str) -> None:
+        nonlocal completed_steps
+        completed_steps += 1
+        progress.set_progress(completed_steps, total_steps)
+        progress.set_status(status)
+
+    try:
+        progress.set_status("Removing selected add-on plugins…")
+        _remove_selected_plugin_packages(serial, remove_packages, progress, log_sink, step_cb=_step_done)
+    except Exception as exc:
+        log_sink(f"Warning: add-on plugin remove failed — {exc}")
 
     # Start with plugin installs first, then push map/import files.
     try:
-        from atak_adb_deploy import install_apk
-        from bundled_plugin_install import install_bundled_addon_apks as install_bundled_addon_plugins
-
-        def ui_addon(msg: str) -> None:
-            progress.set_status(msg)
-
         progress.set_status("Installing bundled add-on plugins…")
-        install_bundled_addon_plugins(
-            ser_resolved, log_sink, ui_addon, install_apk, plugin_root=BUNDLED_PLUGIN_DIR
+        _install_selected_plugin_apks(
+            serial,
+            install_plugins,
+            progress,
+            log_sink,
+            step_cb=_step_done,
+            download_progress_cb=_download_progress,
         )
     except Exception as exc:
         log_sink(f"Warning: bundled add-on plugin install failed — {exc}")
 
+    if missing_assets:
+        try:
+            progress.set_status("Pushing map sources and import files to device…")
+            push_mobile_assets(log_fn=log_sink, selected_targets=missing_assets, step_cb=_step_done)
+        except Exception as exc:
+            log_sink(f"Warning: mobile asset push failed — {exc}")
+    else:
+        log_sink("No mobile XML/KMZ/ZIP files need push.")
+
     try:
-        progress.set_status("Pushing map sources and import files to device…")
-        push_mobile_assets(log_fn=log_sink)
+        _install_protected_import_assets(
+            serial,
+            progress,
+            log_sink,
+            specs=protected_import_specs,
+            step_cb=_step_done,
+            download_progress_cb=_download_progress,
+        )
     except Exception as exc:
-        log_sink(f"Warning: mobile asset push failed — {exc}")
-    if addons_only:
-        progress.completion_log_summary = "Add-ons refresh complete."
-        progress.completion_message = ADDONS_REFRESH_COMPLETE_TEXT
-        progress.skip_sqlite_builder_after_session = True
-        progress.restart_atak_serial = ser_resolved
+        log_sink(f"Warning: protected import install failed — {exc}")
+
+    _await_cancel_scheduled_after_on_main(progress)
 
 
-def run_refresh_addons_only(progress: Any) -> None:
-    try:
-        log("Add-ons refresh mode — skipping map download.")
-        progress.wait_if_paused()
-        if not bundled_addons_available():
-            msg = (
-                "No bundled add-ons found under data/mobile_xml or data/bundled_plugins "
-                "in this install. Nothing to refresh."
-            )
-            log(msg)
-            progress.completion_log_summary = "Add-ons refresh skipped — no bundled add-ons in this build."
-            progress.completion_message = msg
-            progress.skip_sqlite_builder_after_session = True
-            progress.set_status("Complete")
-            return
-        _refresh_addons_only_for_device(progress, log)
-        if getattr(progress, "user_cancelled", False) or getattr(progress, "error_message", None):
-            return
-        progress.set_status("Complete")
-    except Exception as e:
-        tb = traceback.format_exc()
-        log(f"ERROR: {e}")
-        log(tb)
-        progress.error_message = f"Error:\n{e}\n\nLog file:\n{LOGGER.log_file}"
+def _install_protected_import_assets(
+    serial: str,
+    progress: Any,
+    log_sink: Callable[[str], None],
+    *,
+    specs: Optional[List[Dict[str, str]]] = None,
+    step_cb: Optional[Callable[[str], None]] = None,
+    download_progress_cb: Optional[Callable[[str, int, int], None]] = None,
+) -> None:
+    pending_specs = list(specs or _missing_protected_import_specs(serial))
+    if not pending_specs:
+        return
+
+    password = _prompt_protected_import_password(progress)
+    if not password:
+        log_sink("Protected import install skipped (no password entered).")
+        return
+
+    _run_adb(["shell", "mkdir", "-p", MOBILE_IMPORT_DEVICE_PATH], serial=serial, timeout=30)
+    for spec in pending_specs:
+        asset_name = spec.get("asset_name") or ""
+        plain_name = spec.get("plain_name") or ""
+        url = spec.get("url") or ""
+        if not asset_name or not plain_name or not url:
+            continue
+
+        progress.set_status(f"Downloading protected import: {plain_name}…")
+        if download_progress_cb:
+            try:
+                download_progress_cb(plain_name, 0, 0)
+            except Exception:
+                pass
+
+        enc_path = PROTECTED_IMPORT_ASSET_CACHE_DIR / asset_name
+        _download_file_with_progress(
+            url,
+            enc_path,
+            progress_cb=(
+                (lambda done, total, name=plain_name: download_progress_cb(name, done, total))
+                if download_progress_cb
+                else None
+            ),
+        )
+
+        with tempfile.TemporaryDirectory(prefix="atak_protected_import_") as td:
+            tmp_dir = Path(td)
+            try:
+                extracted = _extract_password_zip_single(enc_path, password, tmp_dir)
+            except RuntimeError:
+                log_sink(f"Protected import password incorrect for {plain_name}; file was not installed.")
+                return
+            except zipfile.BadZipFile:
+                log_sink(f"Protected import asset is not a valid zip: {asset_name}")
+                continue
+
+            device_target = f"{MOBILE_IMPORT_DEVICE_PATH}/{plain_name}"
+            progress.set_status(f"Installing protected import: {plain_name}…")
+            r = _run_adb(["push", str(extracted), device_target], serial=serial, timeout=120)
+            if r.returncode != 0:
+                msg = (r.stderr or r.stdout or "").strip()
+                log_sink(f"Warning: failed to push protected import {plain_name}: {msg or 'unknown error'}")
+                continue
+            log_sink(f"Installed protected import file: {plain_name}")
+            if step_cb:
+                try:
+                    step_cb(f"Installed protected import: {plain_name}")
+                except Exception:
+                    pass
 
 
 def verify_adb_device_for_imagery_downloader(parent: tk.Tk) -> Tuple[bool, Optional[str], str]:
@@ -864,7 +1307,7 @@ def show_downloader_intro_and_verify_device() -> bool:
     s = scale_factor(root)
     proceed = {"ok": False}
 
-    tk.Label(root, text="Before you begin", font=("Arial", 12, "bold")).pack(anchor="w", padx=16, pady=(16, 6))
+    tk.Label(root, text="Before you begin", font=("TkDefaultFont", 12, "bold")).pack(anchor="w", padx=16, pady=(16, 6))
 
     intro_lbl = tk.Label(
         root,
@@ -925,16 +1368,21 @@ def show_downloader_intro_and_verify_device() -> bool:
     return bool(proceed["ok"])
 
 
-def show_downloader_welcome() -> Tuple[bool, bool]:
-    """Return (do_maps, do_addons). User must pick at least one; Quit returns (False, False)."""
+def show_downloader_welcome() -> Tuple[bool, bool, str]:
+    """Return (do_maps, do_addons, exit_reason)."""
     root = tk.Tk()
     root.title(APP_TITLE)
     root.configure(cursor="arrow")
     root.update_idletasks()
     s = scale_factor(root)
-    state: Dict[str, Any] = {"maps": True, "addons": True, "accepted": False}
+    state: Dict[str, Any] = {
+        "maps": True,
+        "addons": True,
+        "accepted": False,
+        "exit_reason": "unknown",
+    }
 
-    tk.Label(root, text="Welcome", font=("Arial", 12, "bold")).pack(anchor="w", padx=16, pady=(16, 6))
+    tk.Label(root, text="Welcome", font=("TkDefaultFont", 12, "bold")).pack(anchor="w", padx=16, pady=(16, 6))
     intro_lbl = tk.Label(
         root,
         text="Choose what to run. You can select both options.",
@@ -968,6 +1416,12 @@ def show_downloader_welcome() -> Tuple[bool, bool]:
 
     def on_quit() -> None:
         state["accepted"] = False
+        state["exit_reason"] = "quit_button"
+        root.destroy()
+
+    def on_window_close() -> None:
+        state["accepted"] = False
+        state["exit_reason"] = "window_close"
         root.destroy()
 
     def on_continue() -> None:
@@ -981,6 +1435,7 @@ def show_downloader_welcome() -> Tuple[bool, bool]:
             )
             return
         state["accepted"] = True
+        state["exit_reason"] = "continue"
         root.destroy()
 
     tk.Button(btn_row, text="Continue", width=12, command=on_continue).pack(side="left", padx=6)
@@ -1002,11 +1457,11 @@ def show_downloader_welcome() -> Tuple[bool, bool]:
     refit_toplevel_geometry(root, 520, 400)
     _sync_wrap()
 
-    root.protocol("WM_DELETE_WINDOW", on_quit)
+    root.protocol("WM_DELETE_WINDOW", on_window_close)
     root.mainloop()
     if not state["accepted"]:
-        return False, False
-    return bool(state["maps"]), bool(state["addons"])
+        return False, False, str(state.get("exit_reason") or "unknown")
+    return bool(state["maps"]), bool(state["addons"]), str(state.get("exit_reason") or "continue")
 
 
 DOWNLOADER_NEXT_SQLITE_DIALOG_TEXT = (
@@ -1024,6 +1479,411 @@ ADDONS_REFRESH_COMPLETE_TEXT = (
 )
 
 ADDONS_DEVICE_CURRENT_TEXT = "Your device is current."
+
+CONNECT_DEVICE_BEFORE_DTED_TEXT = (
+    "Imagery Download Complete.\n\n"
+    "Please connect your device now and ensure you have USB debugging on. "
+    "Then select USB for File Transfer.\n\n"
+    "If you do not get this notification: Swipe down from top, expand the Android "
+    "System Notification, tap 'Charging this device via USB' before you select USB "
+    "File Transfer.\n\n"
+    "Click OK when your device is connected and ready."
+)
+
+CONNECT_DEVICE_FOR_ADDONS_TEXT = (
+    "This build includes map sources / import files (XML, KMZ, ZIP) and/or bundled ATAK plugins "
+    "for your device.\n\n"
+    "Connect your phone with USB debugging on and USB mode set to File Transfer.\n\n"
+    "Click OK when the correct device is connected."
+)
+
+ADDONS_PRE_DOWNLOAD_DONE_TEXT = (
+    "Plug ins/Addons installation complete.  You may now disconnect your device."
+)
+
+
+def bundled_addons_available() -> bool:
+    """True if map/import add-ons or any add-on plugin source is configured."""
+    if MOBILE_ASSET_DIR.is_dir():
+        if (
+            any(MOBILE_ASSET_DIR.rglob("*.xml"))
+            or any(MOBILE_ASSET_DIR.rglob("*.kml"))
+            or any(MOBILE_ASSET_DIR.rglob("*.kmz"))
+            or any(MOBILE_ASSET_DIR.rglob("*.zip"))
+        ):
+            return True
+    if BUNDLED_PLUGIN_DIR.is_dir():
+        if iter_bundled_addon_apks(BUNDLED_PLUGIN_DIR):
+            return True
+    if ADDON_PLUGIN_APK_URLS.strip():
+        return True
+    if ADDON_PLUGIN_GITHUB_REPO.strip():
+        return True
+    return False
+
+
+def _wait_for_device_ready_dialog(progress: Any, prompt_text: str) -> None:
+    if threading.current_thread() is threading.main_thread():
+        ensure_window_stacking(progress)
+        messagebox.showinfo(APP_TITLE, prompt_text, parent=progress)
+        cancel_all_scheduled_after(progress)
+        return
+    progress.device_ready_event = threading.Event()
+    progress.device_ready_prompt = prompt_text
+    while True:
+        progress.wait_if_paused()
+        evt = progress.device_ready_event
+        if evt is None or evt.is_set():
+            break
+        time.sleep(0.1)
+
+
+def _format_size_mb(size_bytes: int) -> str:
+    return f"{(max(0, int(size_bytes)) / (1024 * 1024)):.2f} MB"
+
+
+def _show_plugin_actions_dialog(
+    parent: tk.Misc,
+    title: str,
+    plugin_rows: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    decision: Dict[str, Any] = {
+        "ok": False,
+        "install": [],
+        "remove": [],
+        "install_count": 0,
+        "remove_count": 0,
+        "install_bytes": 0,
+    }
+    dlg = tk.Toplevel(parent)
+    dlg.title(title)
+    dlg.configure(cursor="arrow")
+    dlg.transient(parent)
+    dlg.grab_set()
+    dlg.resizable(True, True)
+    dlg.geometry("980x620")
+    dlg.minsize(820, 460)
+    scale = scale_factor(dlg)
+    wrap_w = scaled_int(940, scale)
+
+    tk.Label(
+        dlg,
+        text="Plugin add-ons",
+        font=("TkDefaultFont", 12, "bold"),
+        justify="left",
+    ).pack(anchor="w", padx=18, pady=(14, 4))
+    tk.Label(
+        dlg,
+        text=(
+            "Installed plugins show a check mark under Install.\n"
+            "For missing plugins, choose Install with checkboxes.\n"
+            "Use Remove to uninstall currently installed plugins."
+        ),
+        justify="left",
+        wraplength=wrap_w,
+    ).pack(anchor="w", padx=18, pady=(0, 10))
+
+    table_outer = tk.Frame(dlg, padx=18)
+    table_outer.pack(fill="both", expand=True)
+
+    canvas = tk.Canvas(table_outer, highlightthickness=0)
+    vbar = tk.Scrollbar(table_outer, orient="vertical", command=canvas.yview)
+    inner = tk.Frame(canvas)
+    inner.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+    canvas.create_window((0, 0), window=inner, anchor="nw")
+    canvas.configure(yscrollcommand=vbar.set)
+    canvas.pack(side="left", fill="both", expand=True)
+    vbar.pack(side="right", fill="y")
+
+    tk.Label(inner, text="Plugin", font=("TkDefaultFont", 10, "bold")).grid(
+        row=0, column=0, sticky="w", padx=(2, 12), pady=(2, 8)
+    )
+    tk.Label(inner, text="Remove", font=("TkDefaultFont", 10, "bold")).grid(
+        row=0, column=1, sticky="w", padx=(4, 16), pady=(2, 8)
+    )
+    tk.Label(inner, text="Install", font=("TkDefaultFont", 10, "bold")).grid(
+        row=0, column=2, sticky="w", padx=(4, 4), pady=(2, 8)
+    )
+
+    install_vars: Dict[int, tk.BooleanVar] = {}
+    remove_vars: Dict[int, tk.BooleanVar] = {}
+    total_var = tk.StringVar(value="0 plugins to be installed, 0 plugins to be removed, Total size = 0.00 MB")
+
+    def _recompute_total() -> None:
+        count = 0
+        remove_count = 0
+        total = 0
+        for idx, row in enumerate(plugin_rows):
+            installed = bool(row.get("installed"))
+            if installed:
+                rv = remove_vars.get(idx)
+                if rv is not None and bool(rv.get()):
+                    remove_count += 1
+                continue
+            var = install_vars.get(idx)
+            if var is not None and bool(var.get()):
+                count += 1
+                total += int(row.get("size_bytes") or 0)
+        total_var.set(
+            f"{count} plugins to be installed, {remove_count} plugins to be removed, Total size = {_format_size_mb(total)}"
+        )
+
+    grid_row = 1
+    for idx, row in enumerate(plugin_rows):
+        name = str(row.get("name") or row.get("label") or "plugin.apk")
+        pkg = str(row.get("package_name") or "").strip()
+        installed = bool(row.get("installed"))
+        size_bytes = int(row.get("size_bytes") or 0)
+
+        plugin_text = name if not pkg else f"{name} ({pkg})"
+        tk.Label(inner, text=plugin_text, justify="left", anchor="w", wraplength=scaled_int(680, scale)).grid(
+            row=grid_row, column=0, sticky="w", padx=(2, 12), pady=(2, 0)
+        )
+
+        if installed and pkg:
+            remove_var = tk.BooleanVar(value=False)
+            remove_vars[idx] = remove_var
+            tk.Checkbutton(inner, variable=remove_var).grid(
+                row=grid_row, column=1, sticky="w", padx=(4, 16), pady=(2, 0)
+            )
+            remove_var.trace_add("write", lambda *_args: _recompute_total())
+            tk.Label(inner, text="✓", fg="#1fa64a", font=("TkDefaultFont", 12, "bold")).grid(
+                row=grid_row, column=2, sticky="w", padx=(4, 4), pady=(2, 0)
+            )
+        else:
+            tk.Label(inner, text="").grid(row=grid_row, column=1, sticky="w", padx=(4, 16), pady=(2, 0))
+            install_var = tk.BooleanVar(value=True)
+            install_vars[idx] = install_var
+            tk.Checkbutton(inner, variable=install_var, command=_recompute_total).grid(
+                row=grid_row, column=2, sticky="w", padx=(4, 4), pady=(2, 0)
+            )
+
+        grid_row += 1
+        tk.Label(
+            inner,
+            text=f"Size: {_format_size_mb(size_bytes)}",
+            fg="#666666",
+            justify="left",
+            anchor="w",
+        ).grid(row=grid_row, column=0, sticky="w", padx=(24, 12), pady=(0, 6))
+        grid_row += 1
+
+    _recompute_total()
+
+    summary = tk.Label(dlg, textvariable=total_var, font=("TkDefaultFont", 10, "bold"), justify="left")
+    summary.pack(anchor="w", padx=18, pady=(8, 4))
+
+    btn_row = tk.Frame(dlg, padx=18, pady=10)
+    btn_row.pack(fill="x")
+
+    def _close(ok: bool) -> None:
+        if ok:
+            install_rows: List[Dict[str, Any]] = []
+            remove_packages: List[str] = []
+            install_count = 0
+            install_bytes = 0
+            for idx, row in enumerate(plugin_rows):
+                installed = bool(row.get("installed"))
+                pkg = str(row.get("package_name") or "").strip()
+                if installed:
+                    if pkg and idx in remove_vars and bool(remove_vars[idx].get()):
+                        remove_packages.append(pkg)
+                    continue
+                if idx in install_vars and bool(install_vars[idx].get()):
+                    install_rows.append(dict(row))
+                    install_count += 1
+                    install_bytes += int(row.get("size_bytes") or 0)
+            decision.update(
+                {
+                    "ok": True,
+                    "install": install_rows,
+                    "remove": remove_packages,
+                    "install_count": install_count,
+                    "remove_count": len(remove_packages),
+                    "install_bytes": install_bytes,
+                }
+            )
+        cancel_all_scheduled_after(dlg)
+        dlg.destroy()
+
+    tk.Button(btn_row, text="OK", width=12, command=lambda: _close(True)).pack(side="left")
+    tk.Button(btn_row, text="Cancel", width=12, command=lambda: _close(False)).pack(side="left", padx=(10, 0))
+    dlg.protocol("WM_DELETE_WINDOW", lambda: _close(False))
+
+    dlg.lift(parent)
+    dlg.focus_set()
+    parent.wait_window(dlg)
+    return decision if decision.get("ok") else None
+
+
+def _ask_plugin_actions(progress: Any, title: str, plugin_rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if threading.current_thread() is threading.main_thread():
+        return _show_plugin_actions_dialog(progress, title, plugin_rows)
+
+    progress.plugin_action_result = None
+    evt = threading.Event()
+    progress.plugin_action_event = evt
+    progress.plugin_action_prompt = (title, plugin_rows)
+    while True:
+        progress.wait_if_paused()
+        if evt.is_set():
+            break
+        time.sleep(0.1)
+    return getattr(progress, "plugin_action_result", None)
+
+
+def _resolve_adb_serial_for_push() -> Tuple[str, List[str]]:
+    if not adb_available():
+        return "", []
+    devs = list_usb_devices()
+    env_ser = (os.environ.get("ANDROID_SERIAL") or "").strip()
+    if env_ser:
+        return env_ser, devs
+    if len(devs) == 1:
+        os.environ["ANDROID_SERIAL"] = devs[0]
+        return devs[0], devs
+    return "", devs
+
+
+def deploy_bundled_addons_to_device(progress: Any, log_sink: Callable[[str], None]) -> None:
+    """Push data/mobile_xml assets and install add-on plugin APKs when adb target is available."""
+    if not bundled_addons_available():
+        log_sink("No bundled map/import or plugin add-ons in this install — skipping device push.")
+        return
+    ser_resolved, devs = _resolve_adb_serial_for_push()
+    if not ser_resolved:
+        progress.set_status("Connect device for map add-ons and plugins…")
+        log_sink("Bundled map/import files or plugins are present — waiting for USB device…")
+        _wait_for_device_ready_dialog(progress, CONNECT_DEVICE_FOR_ADDONS_TEXT)
+        ser_resolved, devs = _resolve_adb_serial_for_push()
+    if not ser_resolved:
+        if len(devs) > 1:
+            log_sink(
+                "Multiple adb devices — set ANDROID_SERIAL to the target id (see \"adb devices\"). "
+                "Map ZIP/KMZ/XML and bundled plugins were not installed."
+            )
+        else:
+            log_sink(
+                "No adb device in the \"device\" state after OK — map add-ons and bundled plugins "
+                "were not installed. Enable USB debugging, accept the RSA prompt, then re-run this step "
+                "or copy files manually."
+            )
+        return
+    try:
+        progress.set_status("Pushing map sources and import files to device…")
+        push_mobile_assets(log_fn=log_sink)
+    except Exception as exc:
+        log_sink(f"Warning: mobile asset push failed — {exc}")
+    _await_cancel_scheduled_after_on_main(progress)
+    try:
+        plugin_apks = _resolve_addon_plugin_apks(log_sink)
+        progress.set_status("Installing bundled add-on plugins…")
+        _install_selected_plugin_apks(ser_resolved, plugin_apks, progress, log_sink)
+    except Exception as exc:
+        log_sink(f"Warning: bundled add-on plugin install failed — {exc}")
+
+
+def _refresh_addons_only_for_device(
+    progress: Any, log_sink: Callable[[str], None], *, addons_only: bool = True
+) -> None:
+    ser_resolved, devs = _resolve_adb_serial_for_push()
+    if not ser_resolved:
+        progress.set_status("Connect device for map add-ons and plugins…")
+        log_sink("Bundled map/import files or plugins are present — waiting for USB device…")
+        _wait_for_device_ready_dialog(progress, CONNECT_DEVICE_FOR_ADDONS_TEXT)
+        ser_resolved, devs = _resolve_adb_serial_for_push()
+    if not ser_resolved:
+        if len(devs) > 1:
+            progress.error_message = (
+                "Multiple adb devices are connected.\n\n"
+                "Set ANDROID_SERIAL to the target device id from \"adb devices\" and re-run."
+            )
+        else:
+            progress.error_message = (
+                "No adb device in the \"device\" state after confirmation.\n\n"
+                "Enable USB debugging, accept the RSA prompt, and re-run."
+            )
+        return
+
+    _force_stop_atak(ser_resolved, log_sink)
+    progress.set_status("Checking existing add-ons on device…")
+    plugin_apks = _resolve_addon_plugin_apks(log_sink)
+    missing_assets, plugin_rows = _build_addons_plan(ser_resolved, plugin_apks)
+    if not missing_assets and not plugin_rows:
+        log_sink("No add-on files or plugin assets were found for this build.")
+        if addons_only:
+            progress.completion_log_summary = "Add-ons refresh skipped — no add-ons available."
+            progress.completion_message = "No add-ons are available in this build."
+            progress.skip_sqlite_builder_after_session = True
+        return
+
+    selected = _ask_plugin_actions(progress, APP_TITLE, plugin_rows)
+    if not selected:
+        log_sink("Add-ons refresh cancelled by user before install.")
+        progress.user_cancelled = True
+        return
+
+    install_plugins = list(selected.get("install") or [])
+    remove_packages = list(selected.get("remove") or [])
+    install_count = int(selected.get("install_count") or 0)
+    remove_count = int(selected.get("remove_count") or len(remove_packages))
+    install_bytes = int(selected.get("install_bytes") or 0)
+    protected_import_specs = _missing_protected_import_specs(ser_resolved)
+    protected_count = len(protected_import_specs)
+    log_sink(
+        f"{install_count} plugins to install, {remove_count} plugins to remove, "
+        f"Total size = {_format_size_mb(install_bytes)}"
+    )
+    if protected_count:
+        log_sink(f"{protected_count} protected import file(s) pending install to {MOBILE_IMPORT_DEVICE_PATH}.")
+    if not missing_assets and not install_plugins and not remove_packages and not protected_import_specs:
+        log_sink("Device already has all required add-ons.")
+        if addons_only:
+            progress.completion_log_summary = "Add-ons refresh skipped — device already current."
+            progress.completion_message = ADDONS_DEVICE_CURRENT_TEXT
+            progress.skip_sqlite_builder_after_session = True
+        return
+
+    _deploy_selected_addons_to_device(
+        progress,
+        log_sink,
+        ser_resolved,
+        missing_assets=missing_assets,
+        install_plugins=install_plugins,
+        remove_packages=remove_packages,
+        protected_import_specs=protected_import_specs,
+    )
+    if addons_only:
+        progress.completion_log_summary = "Add-ons refresh complete."
+        progress.completion_message = ADDONS_REFRESH_COMPLETE_TEXT
+        progress.skip_sqlite_builder_after_session = True
+        progress.restart_atak_serial = ser_resolved
+
+
+def run_refresh_addons_only(progress: Any) -> None:
+    try:
+        log("Add-ons refresh mode — skipping map download.")
+        progress.wait_if_paused()
+        if not bundled_addons_available():
+            msg = (
+                "No add-ons configured (mobile XML/KMZ/ZIP or add-on plugin asset source). "
+                "Nothing to refresh."
+            )
+            log(msg)
+            progress.completion_log_summary = "Add-ons refresh skipped — no bundled add-ons in this build."
+            progress.completion_message = msg
+            progress.skip_sqlite_builder_after_session = True
+            progress.set_status("Complete")
+            return
+        _refresh_addons_only_for_device(progress, log)
+        if getattr(progress, "user_cancelled", False) or getattr(progress, "error_message", None):
+            return
+        progress.set_status("Complete")
+    except Exception as e:
+        tb = traceback.format_exc()
+        log(f"ERROR: {e}")
+        log(tb)
+        progress.error_message = f"Error:\n{e}\n\nLog file:\n{LOGGER.log_file}"
 
 
 def show_downloader_session_exit_dialog(parent: tk.Tk, body: Optional[str] = None) -> None:
@@ -1050,6 +1910,8 @@ def show_downloader_session_exit_dialog(parent: tk.Tk, body: Optional[str] = Non
     dlg.protocol("WM_DELETE_WINDOW", on_next)
     tk.Button(dlg, text="Next", width=12, command=on_next).pack(pady=(0, 20))
     parent.wait_window(dlg)
+    # ensure_window_stacking() schedules after() pulses on parent; clear them before
+    # the download worker continues touching the UI via pending status updates.
     cancel_all_scheduled_after(parent)
 
 # -----------------------------
@@ -1093,7 +1955,7 @@ def read_zoom_estimates_file(path: Path = ZOOM_ESTIMATE_PATH) -> Dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError(
             f"Missing zoom estimate file:\n{path}\n\n"
-            f"Copy windows_build/data/ into this build source or bundle it first."
+            f"Copy scripts/data/ into this fresh repo or generate it first."
         )
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -1173,7 +2035,7 @@ def bundled_state_geojson_path() -> Path:
     if not STATE_GEOJSON_PATH.is_file():
         raise FileNotFoundError(
             f"Missing state boundaries file:\n{STATE_GEOJSON_PATH}\n\n"
-            f"Ensure data/us_states.geojson is present next to zoom estimates."
+            f"Ensure scripts/data/us_states.geojson is present (same folder as zoom_estimates)."
         )
     log(f"Using bundled state boundaries: {STATE_GEOJSON_PATH}")
     return STATE_GEOJSON_PATH
@@ -1403,18 +2265,11 @@ class DownloadScopeDialog(tk.Tk):
         ).pack(anchor="w", pady=(0, 4))
         _add_wrapped(
             scroll_inner,
-            text="Note: This data must be stored in this format:",
+            text="Note: This data must be stored in this format: State name/State name.zip",
             justify="left",
             wraplength=_scope_wrap,
             anchor="w",
-        ).pack(anchor="w", pady=(0, 2))
-        tk.Label(
-            scroll_inner,
-            text="State name/State name.zip",
-            justify="left",
-            anchor="w",
-            font=("Courier", 10),
-        ).pack(anchor="w", padx=(_fmt_indent, 0), pady=(0, 6))
+        ).pack(anchor="w", pady=(0, 6))
         _add_wrapped(
             scroll_inner,
             text=(
@@ -1441,6 +2296,7 @@ class DownloadScopeDialog(tk.Tk):
         tk.Button(dted_row, text="Browse…", command=browse_dted).grid(row=0, column=1, sticky="e")
 
         apply_resizable_window(self, 740, 780, (560, 300))
+
         self.bind("<Configure>", lambda e: _sync_scroll_wrap())
         refit_toplevel_geometry(self, 740, 780)
         _sync_scroll_wrap()
@@ -1714,6 +2570,7 @@ class ZoomDialog(tk.Tk):
         radius_miles: Optional[float] = None,
         radius_imagery_folder: Optional[str] = None,
         avg_tile_bytes_by_zoom: Optional[Dict[int, int]] = None,
+        precomputed_radius_tiles: Optional[Dict[int, int]] = None,
     ) -> None:
         super().__init__()
         # Hide until layout + radius tile counts finish; otherwise a blank Tk flashes for seconds
@@ -1867,7 +2724,11 @@ class ZoomDialog(tk.Tk):
             total_tiles = 0
             total_bytes = 0
             if download_scope == "radius":
-                if radius_center is not None and radius_miles is not None:
+                if precomputed_radius_tiles is not None:
+                    n = precomputed_radius_tiles.get(z, 0)
+                    total_tiles = n
+                    total_bytes = n * int(avgs.get(z, 25000))
+                elif radius_center is not None and radius_miles is not None:
                     tiles = compute_tiles_for_radius(radius_center[0], radius_center[1], radius_miles, z)
                     n = len(tiles)
                     avg_b = int(avgs.get(z, 25000))
@@ -2095,10 +2956,14 @@ class ProgressWindow(tk.Tk):
         self.status_var = tk.StringVar(value="Initializing...")
         self.counter_var = tk.StringVar(value="0 / 0")
         self.detail_var = tk.StringVar(value=f"Log: {log_path}")
+        self.speed_var = tk.StringVar(value="Speed: --")
+        self.eta_var = tk.StringVar(value="ETA: --")
 
         tk.Label(top, textvariable=self.status_var, font=("Arial", 11, "bold")).pack(anchor="w")
         tk.Label(top, textvariable=self.counter_var).pack(anchor="w", pady=(4, 0))
-        tk.Label(top, textvariable=self.detail_var, fg="gray30").pack(anchor="w", pady=(4, 8))
+        tk.Label(top, textvariable=self.detail_var, fg="gray30").pack(anchor="w", pady=(4, 4))
+        tk.Label(top, textvariable=self.speed_var, font=("Arial", 10, "bold"), fg="darkgreen").pack(anchor="w")
+        tk.Label(top, textvariable=self.eta_var, font=("Arial", 10, "bold"), fg="darkblue").pack(anchor="w", pady=(0, 8))
 
         self.canvas = tk.Canvas(top, height=24, bg="white", highlightthickness=1, highlightbackground="gray70")
         self.canvas.configure(cursor="arrow")
@@ -2110,6 +2975,7 @@ class ProgressWindow(tk.Tk):
         self._pending_progress: Optional[Tuple[int, int]] = None
         self._pending_status: Optional[str] = None
         self._pending_stats: Optional[Dict[str, int]] = None
+        self._pending_speed: Optional[Tuple[float, Optional[float]]] = None
         self._pending_progress_fraction: Optional[Tuple[float, Optional[str]]] = None
         self._progress_canvas_mode = "none"
         self._progress_canvas_count: Tuple[int, int] = (0, 1)
@@ -2159,9 +3025,9 @@ class ProgressWindow(tk.Tk):
         self.skip_sqlite_builder_after_session = False
         self.device_ready_prompt: Optional[str] = None
         self.device_ready_event: Optional[threading.Event] = None
-        self.confirm_prompt: Optional[Tuple[str, List[str]]] = None
-        self.confirm_event: Optional[threading.Event] = None
-        self.confirm_result: bool = False
+        self.plugin_action_prompt: Optional[Tuple[str, List[Dict[str, Any]]]] = None
+        self.plugin_action_event: Optional[threading.Event] = None
+        self.plugin_action_result: Optional[Dict[str, Any]] = None
         self.restart_atak_serial: Optional[str] = None
 
     def append_log(self, line: str) -> None:
@@ -2180,6 +3046,7 @@ class ProgressWindow(tk.Tk):
             pp = self._pending_progress
             ps = self._pending_status
             pst = self._pending_stats.copy() if self._pending_stats else None
+            sp = self._pending_speed
             pf = self._pending_progress_fraction
         if pp is not None:
             self._set_progress_ui(*pp)
@@ -2188,6 +3055,8 @@ class ProgressWindow(tk.Tk):
         if pst is not None:
             for k, v in pst.items():
                 self._set_stat_ui(k, v)
+        if sp is not None:
+            self._set_speed_eta_ui(*sp)
         if pf is not None:
             self._set_progress_fraction_ui(*pf)
 
@@ -2267,6 +3136,27 @@ class ProgressWindow(tk.Tk):
         self.status_var.set(text)
         self.update_idletasks()
 
+    def _set_speed_eta_ui(self, speed_bps: float, eta_seconds: Optional[float]) -> None:
+        if speed_bps and speed_bps > 0:
+            self.speed_var.set(f"Speed: {human_bytes(int(speed_bps))}/s")
+        else:
+            self.speed_var.set("Speed: --")
+
+        if eta_seconds is None or eta_seconds < 0 or not math.isfinite(eta_seconds):
+            self.eta_var.set("ETA: --")
+        else:
+            total_seconds = int(max(0, eta_seconds))
+            hours, rem = divmod(total_seconds, 3600)
+            minutes, seconds = divmod(rem, 60)
+            if hours > 0:
+                self.eta_var.set(f"ETA: {hours}h {minutes}m {seconds}s")
+            elif minutes > 0:
+                self.eta_var.set(f"ETA: {minutes}m {seconds}s")
+            else:
+                self.eta_var.set(f"ETA: {seconds}s")
+
+        self.update_idletasks()
+
     def _set_stat_ui(self, key: str, value: int) -> None:
         label = key.capitalize()
         self.stats_vars[key].set(f"{label}: {value}")
@@ -2298,6 +3188,13 @@ class ProgressWindow(tk.Tk):
                 self._pending_status = text
             return
         self._set_status_ui(text)
+
+    def set_speed_eta(self, speed_bps: float, eta_seconds: Optional[float]) -> None:
+        if not self._on_gui_thread():
+            with self._ui_lock:
+                self._pending_speed = (speed_bps, eta_seconds)
+            return
+        self._set_speed_eta_ui(speed_bps, eta_seconds)
 
     def set_stat(self, key: str, value: int) -> None:
         if not self._on_gui_thread():
@@ -2365,6 +3262,54 @@ class ProgressWindow(tk.Tk):
 # Workflow helpers
 # -----------------------------
 
+def run_with_busy_dialog(message: str, fn: Callable[[], None]) -> None:
+    """Run ``fn`` while showing a foreground modal busy dialog (main thread only)."""
+    owner = tk._default_root
+    dlg = tk.Toplevel(owner) if owner is not None else tk.Tk()
+    dlg.title(APP_TITLE)
+    dlg.configure(cursor="arrow")
+    if owner is not None:
+        try:
+            dlg.transient(owner)
+        except tk.TclError:
+            pass
+    apply_resizable_window(dlg, 480, 160, (360, 130))
+    refit_toplevel_geometry(dlg, 480, 160)
+    try:
+        dlg.attributes("-topmost", True)
+    except tk.TclError:
+        pass
+    ensure_window_stacking(dlg, above=owner)
+    try:
+        dlg.grab_set()
+    except tk.TclError:
+        pass
+
+    frame = tk.Frame(dlg, padx=18, pady=16)
+    frame.pack(fill="both", expand=True)
+    tk.Label(frame, text=message, justify="left", anchor="w", wraplength=420).pack(fill="x", pady=(0, 10))
+    bar = ttk.Progressbar(frame, mode="indeterminate")
+    bar.pack(fill="x")
+    bar.start(10)
+    try:
+        dlg.update_idletasks()
+        dlg.update()
+        fn()
+    finally:
+        try:
+            bar.stop()
+        except Exception:
+            pass
+        try:
+            dlg.grab_release()
+        except Exception:
+            pass
+        try:
+            dlg.destroy()
+        except Exception:
+            pass
+
+
 def show_summary_confirm(
     selected_states: List[str],
     selected_zooms: List[int],
@@ -2380,7 +3325,9 @@ def show_summary_confirm(
             f"Zooms:\n{', '.join(map(str, selected_zooms))}\n\n"
             f"Estimated size:\n{human_bytes(total_bytes)}\n\n"
             f"Estimated tiles:\n{total_tiles:,}\n\n"
-            f"Continue to choose an output folder?"
+            "Select a temporary folder for install on the next screen (defaults to your "
+            "Downloads folder if you have not chosen one before).\n\n"
+            "Press OK to continue."
         )
     else:
         state_summary = ", ".join(selected_states[:6])
@@ -2391,7 +3338,9 @@ def show_summary_confirm(
             f"Zooms:\n{', '.join(map(str, selected_zooms))}\n\n"
             f"Estimated size:\n{human_bytes(total_bytes)}\n\n"
             f"Estimated tiles:\n{total_tiles:,}\n\n"
-            f"Continue to choose an output folder?"
+            "Select a temporary folder for install on the next screen (defaults to your "
+            "Downloads folder if you have not chosen one before).\n\n"
+            "Press OK to continue."
         )
     root = tk.Tk()
     try:
@@ -2399,39 +3348,118 @@ def show_summary_confirm(
     except tk.TclError:
         pass
     root.configure(cursor="arrow")
-    root.withdraw()
+    # Position at center but keep visible so topmost works on GNOME/Mutter.
+    root.geometry("1x1")
     root.update_idletasks()
-    try:
-        root.update()
-    except tk.TclError:
-        pass
-    ensure_window_stacking(root)
-    answer = messagebox.askyesno(APP_TITLE, msg, parent=root)
+    sw = root.winfo_screenwidth()
+    sh = root.winfo_screenheight()
+    root.geometry(f"1x1+{sw // 2}+{sh // 2}")
+    root.attributes("-topmost", True)
+    root.lift()
+    root.focus_force()
+    root.update_idletasks()
+    messagebox.showinfo(APP_TITLE, msg, parent=root)
     try:
         root.destroy()
     except tk.TclError:
         pass
-    return bool(answer)
+    return True
+
+
+PIPELINE_OUTPUT_PARENT_FILE = RUNTIME_STATE_DIR / ".last_pipeline_output_parent.txt"
+
+
+def default_output_parent() -> Path:
+    if PIPELINE_OUTPUT_PARENT_FILE.is_file():
+        try:
+            p = Path(PIPELINE_OUTPUT_PARENT_FILE.read_text(encoding="utf-8").strip())
+            if p.is_dir():
+                return p
+        except OSError:
+            pass
+    downloads = Path.home() / "Downloads"
+    if downloads.is_dir():
+        return downloads
+    return Path.home()
+
+
+def save_output_parent(parent: Path) -> None:
+    try:
+        PIPELINE_OUTPUT_PARENT_FILE.write_text(str(parent.resolve()), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def pick_directory(title: str, initial: Path, parent: tk.Misc) -> str:
-    """Linux: Zenity folder picker when available; else Tk ``askdirectory`` parented to ``parent``."""
+    """Linux: same Zenity folder picker as output selection; else Tk ``askdirectory`` parented to ``parent``."""
+    try:
+        if shutil.which("zenity"):
+            start_uri = str(initial.resolve()) + "/"
+            result = subprocess.run(
+                [
+                    "zenity",
+                    "--file-selection",
+                    "--directory",
+                    f"--title={title}",
+                    f"--filename={start_uri}",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0:
+                folder = result.stdout.strip()
+                if folder:
+                    return str(Path(folder))
+            return ""
+    except Exception:
+        pass
     ensure_window_stacking(parent)
     folder = filedialog.askdirectory(title=title, initialdir=str(initial), parent=parent)
     return folder or ""
 
 
 def ask_output_parent() -> str:
+    initial = default_output_parent()
+    pick_title = "Select a temporary folder for install"
+    try:
+        if shutil.which("zenity"):
+            start_uri = str(initial.resolve()) + "/"
+            result = subprocess.run(
+                [
+                    "zenity",
+                    "--file-selection",
+                    "--directory",
+                    f"--title={pick_title}",
+                    f"--filename={start_uri}",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0:
+                folder = result.stdout.strip()
+                if folder:
+                    p = Path(folder)
+                    save_output_parent(p)
+                    return str(p)
+            return ""
+    except Exception:
+        pass
+
     root = tk.Tk()
     root.configure(cursor="arrow")
-    root.withdraw()
-    root.attributes("-topmost", True)
+    root.geometry("1x1")
     root.update_idletasks()
+    sw = root.winfo_screenwidth()
+    sh = root.winfo_screenheight()
+    root.geometry(f"1x1+{sw // 2}+{sh // 2}")
+    root.attributes("-topmost", True)
     root.lift()
-    ensure_window_stacking(root)
+    root.focus_force()
+    root.update_idletasks()
     try:
         folder = filedialog.askdirectory(
-            title="Select output parent folder",
+            title=pick_title,
+            initialdir=str(initial),
             parent=root,
         )
     finally:
@@ -2440,7 +3468,12 @@ def ask_output_parent() -> str:
         except tk.TclError:
             pass
         root.destroy()
-    return folder or ""
+    if folder:
+        save_output_parent(Path(folder))
+        return folder
+    return ""
+
+
 
 
 DOWNLOAD_SESSION_LOCAL = threading.local()
@@ -2459,6 +3492,7 @@ def plan_requires_network_for_imagery(
     plan: List[Tuple[str, int, int, int, Path]],
     raw_imagery_root: Optional[Path],
 ) -> bool:
+    """True if any planned tile is not already present and not available under raw_imagery_root."""
     raw = raw_imagery_root if raw_imagery_root is not None and raw_imagery_root.is_dir() else None
     for state_label, z, x, y, out_path in plan:
         if out_path.is_file():
@@ -2475,6 +3509,7 @@ def dted_requires_network_fetch(
     dted_state_list: List[str],
     local_dted_root: Optional[Path],
 ) -> bool:
+    """True if inline DTED would need to download at least one state zip over the network."""
     if not dted_state_list:
         return False
     root = local_dted_root if local_dted_root is not None and local_dted_root.is_dir() else None
@@ -2605,7 +3640,6 @@ def run_download(
         LAST_IMAGERY_ROOT_FILE.write_text(str(output_root), encoding="utf-8")
         log(f"Using output root: {output_root}")
         log(f"Using upload folder: {upload_dir}")
-        log(f"Saved imagery path file: {LAST_IMAGERY_ROOT_FILE}")
 
         plan: List[Tuple[str, int, int, int, Path]] = []
 
@@ -2643,6 +3677,7 @@ def run_download(
             except (OSError, ValueError) as exc:
                 log(f"WARNING: could not write radius footprint file: {exc}")
             planning_total = max(len(selected_zooms), 1)
+            progress.set_speed_eta(0.0, None)
             progress.set_progress_fraction(
                 0.0,
                 f"Planning 0 / {planning_total} — radius coverage",
@@ -2665,12 +3700,15 @@ def run_download(
                     out_path = output_root / radius_folder / str(z) / str(x) / f"{y}.jpg"
                     plan.append((radius_folder, z, x, y, out_path))
         else:
-            progress.set_status("Loading state boundaries...")
+            # State boundaries are pre-loaded on the main thread before this
+            # thread starts, avoiding a large allocation burst from the
+            # background thread that can trigger the cyclic GC at the wrong time.
             if preloaded_states is not None:
                 states = preloaded_states
                 geojson_path = STATE_GEOJSON_PATH
                 log(f"Using pre-loaded state boundaries ({len(states)} states)")
             else:
+                progress.set_status("Loading state boundaries...")
                 geojson_path = bundled_state_geojson_path()
                 states = load_states(geojson_path)
 
@@ -2705,6 +3743,7 @@ def run_download(
             log(f"Tile planning runtime context: {_tile_plan_runtime_context()}")
 
             planning_total = max(len(state_names) * len(selected_zooms), 1)
+            progress.set_speed_eta(0.0, None)
             progress.set_progress_fraction(
                 0.0,
                 f"Planning 0 / {planning_total} — tile coverage scan",
@@ -2787,11 +3826,22 @@ def run_download(
         total = len(plan)
         log(f"Total tile candidates: {total}")
         log(f"Tile plan complete — download phase: {total:,} tiles.")
+        progress.set_speed_eta(0.0, None)
         progress.set_progress(0, total)
         progress.set_status("Starting download...")
 
         completed = 0
         downloaded_bytes = 0
+        started_at = time.time()
+        speed_samples = deque(maxlen=10)
+        last_sample_time = started_at
+        last_sample_bytes = 0
+        smoothed_speed_bps = 0.0
+        eta_smoothed = None
+        last_eta_update_time = time.time()
+        tile_time_samples = deque(maxlen=20)
+        last_tile_complete_time = started_at
+        progress.set_speed_eta(0.0, None)
 
         def download_one(tile: Tuple[str, int, int, int, Path]) -> Tuple[str, int, int, int, str, int]:
             state_name, z, x, y, out_path = tile
@@ -2841,15 +3891,92 @@ def run_download(
                     except DownloadCancelled:
                         raise
                     except Exception as e:
-                        log(f"ERROR downloading tile: {e}")
+                        log(f"ERROR downloading z{z}/{x}/{y}: {e}")
                         result, bytes_written = "failed", 0
 
                     stats[result] += 1
                     downloaded_bytes += bytes_written
                     completed += 1
+
+                    tile_now = time.time()
+                    tile_elapsed = max(tile_now - last_tile_complete_time, 0.001)
+                    last_tile_complete_time = tile_now
+                    if result in ("downloaded", "existing", "missing", "failed"):
+                        tile_time_samples.append(tile_elapsed)
                     progress.set_progress(completed, total)
                     for key, value in stats.items():
                         progress.set_stat(key, value)
+
+                    now = time.time()
+                    interval = now - last_sample_time
+                    bytes_since_last = downloaded_bytes - last_sample_bytes
+
+                    if interval >= 0.75 and bytes_since_last >= 0:
+                        inst_speed = bytes_since_last / max(interval, 0.001)
+                        speed_samples.append(inst_speed)
+                        last_sample_time = now
+                        last_sample_bytes = downloaded_bytes
+
+                    if speed_samples:
+                        smoothed_speed_bps = sum(speed_samples) / len(speed_samples)
+                    else:
+                        elapsed = max(now - started_at, 0.001)
+                        smoothed_speed_bps = downloaded_bytes / elapsed
+
+                    now_t = time.time()
+
+                    remaining_tiles = max(0, total - completed)
+                    raw_eta_tile: Optional[float] = None
+                    raw_eta_net: Optional[float] = None
+
+                    if completed >= 8 and remaining_tiles > 0 and tile_time_samples:
+                        seconds_per_tile = sum(tile_time_samples) / len(tile_time_samples)
+                        raw_eta_tile = (seconds_per_tile * remaining_tiles) * 1.08
+
+                    downloaded_count = int(stats.get("downloaded", 0))
+                    if (
+                        remaining_tiles > 0
+                        and downloaded_count >= 20
+                        and downloaded_bytes > 0
+                        and smoothed_speed_bps > 1.0
+                    ):
+                        # Use observed outcome ratio to estimate how many remaining tiles
+                        # will likely require network transfer (vs local-existing/missing).
+                        download_ratio = downloaded_count / max(1, completed)
+                        expected_download_tiles = remaining_tiles * min(1.0, max(0.0, download_ratio))
+                        avg_bytes_per_download = downloaded_bytes / max(1, downloaded_count)
+                        expected_remaining_bytes = expected_download_tiles * avg_bytes_per_download
+                        raw_eta_net = expected_remaining_bytes / max(smoothed_speed_bps, 1.0)
+
+                    if remaining_tiles <= 0:
+                        raw_eta = 0.0
+                    else:
+                        eta_candidates = [v for v in (raw_eta_tile, raw_eta_net) if v is not None and v >= 0]
+                        raw_eta = max(eta_candidates) if eta_candidates else None
+
+                    if raw_eta is None:
+                        eta_to_show = None
+                    else:
+                        if eta_smoothed is None:
+                            eta_smoothed = raw_eta
+                            last_eta_update_time = now_t
+                        elif (now_t - last_eta_update_time) >= 2.0:
+                            alpha = 0.12
+                            proposed_eta = (alpha * raw_eta) + ((1 - alpha) * eta_smoothed)
+
+                            delta_t = now_t - last_eta_update_time
+                            max_drop = delta_t * 1.10
+                            max_rise = delta_t * 6.0
+
+                            lower_bound = max(0, eta_smoothed - max_drop)
+                            upper_bound = eta_smoothed + max_rise
+                            eta_smoothed = min(max(proposed_eta, lower_bound), upper_bound)
+
+                            last_eta_update_time = now_t
+
+                        eta_to_show = max(0, eta_smoothed)
+
+                    progress.set_speed_eta(smoothed_speed_bps, eta_to_show)
 
                     if completed % 25 == 0 or result in ("failed", "missing"):
                         log(
@@ -2870,6 +3997,7 @@ def run_download(
                 _shutdown_executor_pool(executor)
                 executor = None
 
+        progress.set_speed_eta(smoothed_speed_bps if "smoothed_speed_bps" in locals() else 0.0, 0)
         log("Imagery tile download complete")
         log(f"Downloaded: {stats['downloaded']}")
         log(f"Existing: {stats['existing']}")
@@ -2891,33 +4019,61 @@ def run_download(
 
         dted_note = ""
         try:
-            import atak_dted_downloader_win as dted_mod
+            from atak_dted_downloader_win import (
+                mark_standalone_dted_skip,
+                query_device_installed_dted_states,
+                run_dted_inline_for_states,
+            )
 
             if not dted_state_list:
                 log("DTED: no state packages match this download region; skipping.")
             else:
-                # Check what's already on the device and skip states already installed.
+                radius_bbox_for_dted: Optional[Tuple[float, float, float, float]] = None
+                if radius_mode:
+                    try:
+                        radius_bbox_for_dted = square_lonlat_footprint_for_radius_miles(lat, lon, miles)
+                    except Exception as exc:
+                        log(f"DTED: could not compute radius bbox for DTED clipping ({exc}); using full-state DTED.")
+                # Mark that DTED is handled inline so the SQLite builder won't
+                # launch the standalone DTED downloader afterward.
+                mark_standalone_dted_skip()
+                # Download-first workflow: imagery is already complete. Now prompt
+                # for device connection before deciding whether DTED is needed.
+                progress.set_status("Imagery complete — waiting for device connection for DTED check…")
+                progress.device_ready_event = threading.Event()
+                progress.device_ready_prompt = CONNECT_DEVICE_BEFORE_DTED_TEXT
+                while True:
+                    progress.wait_if_paused()
+                    evt = progress.device_ready_event
+                    if evt is None or evt.is_set():
+                        break
+                    time.sleep(0.1)
+
                 progress.set_status("DTED: checking what is already installed on device…")
-                device_dted_states: Set[str] = dted_mod.query_device_installed_dted_states(log) or set()
+                device_dted_states: Set[str] = query_device_installed_dted_states(log) or set()
                 states_needed = [s for s in dted_state_list if s not in device_dted_states]
                 states_skipped = [s for s in dted_state_list if s in device_dted_states]
                 if states_skipped:
-                    log(f"DTED: already on device — skipping: {', '.join(sorted(states_skipped))}")
+                    log(
+                        f"DTED: already on device — skipping: {', '.join(sorted(states_skipped))}"
+                    )
                 if not states_needed:
                     log("DTED: all required states already on device; skipping download.")
                     dted_note = "\n\nDTED: all required elevation data already on device — skipped."
                 else:
                     if states_skipped:
-                        log(f"DTED: downloading only missing states: {', '.join(sorted(states_needed))}")
-                    dted_zip = dted_mod.run_dted_inline_for_states(
+                        log(
+                            f"DTED: downloading only missing states: {', '.join(sorted(states_needed))}"
+                        )
+                    dted_zip = run_dted_inline_for_states(
                         states_needed,
                         upload_dir,
                         log_sink=log,
                         progress=progress,
                         local_state_zip_root=local_dted_root,
+                        radius_bbox_lonlat=radius_bbox_for_dted,
                     )
                     if dted_zip is not None:
-                        dted_mod.mark_standalone_dted_skip()
                         dted_note = f"\n\nDTED archive ready:\n{dted_zip.name}"
         except ImportError as exc:
             log(f"DTED: skipped (module not loadable: {exc}).")
@@ -2940,6 +4096,7 @@ def run_download(
     except DownloadCancelled:
         log("Download cancelled by user.")
         progress.user_cancelled = True
+        progress.set_speed_eta(0.0, None)
         progress.set_status("Cancelled")
     except Exception as e:
         tb = traceback.format_exc()
@@ -2995,15 +4152,16 @@ def pump_gui_logs(window: ProgressWindow) -> None:
             if evt is not None:
                 evt.set()
 
-        if getattr(window, "confirm_prompt", None):
-            title, items = window.confirm_prompt
-            evt = getattr(window, "confirm_event", None)
-            window.confirm_prompt = None
-            window.confirm_event = None
-            window.confirm_result = _show_addons_install_plan_dialog(window, title, items)
+        if getattr(window, "plugin_action_prompt", None):
+            title, plugin_rows = window.plugin_action_prompt
+            evt = getattr(window, "plugin_action_event", None)
+            window.plugin_action_prompt = None
+            cancel_all_scheduled_after(window)
+            window.plugin_action_result = _show_plugin_actions_dialog(window, title, plugin_rows)
             cancel_all_scheduled_after(window)
             if evt is not None:
                 evt.set()
+            window.plugin_action_event = None
 
         if getattr(window, "completion_message", None):
             msg = window.completion_message
@@ -3064,18 +4222,35 @@ def pump_gui_logs(window: ProgressWindow) -> None:
 
 
 def main() -> None:
-    run_startup_git_update_check(app_title=APP_TITLE, script_path=Path(__file__).resolve())
+    try:
+        ensure_gui_path_for_adb()
+    except Exception as exc:
+        log(f"Startup warning: adb PATH setup failed: {exc}")
+    log("Startup: beginning git update check...")
+    try:
+        run_startup_git_update_check(app_title=APP_TITLE, script_path=Path(__file__).resolve())
+    except Exception as exc:
+        log(f"Startup warning: git update check failed: {exc}")
+        log(traceback.format_exc())
+    else:
+        log("Startup: git update check complete.")
+
+    log("Startup: beginning release update check...")
+    try:
+        run_startup_release_update_check(app_title=APP_TITLE, script_path=Path(__file__).resolve())
+    except Exception as exc:
+        log(f"Startup warning: release update check failed: {exc}")
+        log(traceback.format_exc())
+    else:
+        log("Startup: release update check complete.")
     log(f"Log file: {LOGGER.log_file}")
-    log(f"Bundled script directory: {BUNDLED_SCRIPT_DIR}")
-    log(f"Runtime state directory: {RUNTIME_STATE_DIR}")
-    log(f"Saved imagery path file: {LAST_IMAGERY_ROOT_FILE}")
     zoom_payload = read_zoom_estimates_file()
     zoom_estimates = zoom_payload["states"]
     avg_tile_bytes_map = avg_tile_bytes_by_zoom(zoom_payload)
 
-    do_maps, do_addons = show_downloader_welcome()
+    do_maps, do_addons, welcome_exit_reason = show_downloader_welcome()
     if not do_maps and not do_addons:
-        log("Cancelled at welcome.")
+        log(f"Exited at welcome (reason={welcome_exit_reason}).")
         return
 
     from_installer = is_launched_from_device_installer()
@@ -3103,8 +4278,13 @@ def main() -> None:
     if not do_maps:
         progress = ProgressWindow(LOGGER.log_file)
         pump_gui_logs(progress)
-        worker = threading.Thread(target=run_refresh_addons_only, args=(progress,), daemon=True)
-        worker.start()
+        # Run add-ons-only on the Tk main thread to avoid Tcl async-handler crashes
+        # observed with background-thread + modal/UI interactions on Linux/X11.
+        run_refresh_addons_only(progress)
+        # Some add-ons steps intentionally cancel pending ``after`` callbacks for
+        # Tk stability; re-arm the GUI pump so completion/exit handlers still run.
+        if not getattr(progress, "closed", False):
+            pump_gui_logs(progress)
         progress.mainloop()
         return
 
@@ -3230,6 +4410,8 @@ def main() -> None:
                         log("Cancelled at output folder prompt.")
                         return
 
+                    # Pre-load state boundaries on the main thread to avoid a
+                    # large GC-triggering allocation burst in the download thread.
                     _geo = bundled_state_geojson_path()
                     _preloaded = load_states(_geo)
 
@@ -3266,6 +4448,15 @@ def main() -> None:
                     break
 
                 while True:
+                    _radius_tiles: Dict[int, int] = {}
+
+                    def _precompute_radius_tiles() -> None:
+                        for z in range(10, 17):
+                            tiles = compute_tiles_for_radius(rd.center_lat, rd.center_lon, rd.radius_miles, z)
+                            _radius_tiles[z] = len(tiles)
+
+                    run_with_busy_dialog("Calculating coverage…", _precompute_radius_tiles)
+
                     zoom_dialog = ZoomDialog(
                         [],
                         zoom_estimates,
@@ -3274,6 +4465,7 @@ def main() -> None:
                         radius_miles=rd.radius_miles,
                         radius_imagery_folder=scope_dlg.radius_region_folder,
                         avg_tile_bytes_by_zoom=avg_tile_bytes_map,
+                        precomputed_radius_tiles=_radius_tiles,
                     )
                     zoom_dialog.mainloop()
                     if zoom_dialog.go_back:
@@ -3288,10 +4480,8 @@ def main() -> None:
                     est_total_bytes = 0
                     est_total_tiles = 0
                     for z in selected_zooms:
-                        tiles = compute_tiles_for_radius(rd.center_lat, rd.center_lon, rd.radius_miles, z)
-                        n = len(tiles)
-                        ab = int(avg_tile_bytes_map.get(z, 25000))
-                        est_total_bytes += n * ab
+                        n = _radius_tiles.get(z, 0)
+                        est_total_bytes += n * int(avg_tile_bytes_map.get(z, 25000))
                         est_total_tiles += n
 
                     radius_summary = (
@@ -3346,4 +4536,5 @@ if __name__ == "__main__":
     log(f"Python: {sys.version}")
     log(f"Working directory: {Path.cwd()}")
     log(f"Script directory: {Path(__file__).resolve().parent}")
+    log(f"Log file: {LOGGER.log_file}")
     main()
