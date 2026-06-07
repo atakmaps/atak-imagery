@@ -20,6 +20,42 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
 WIN = ROOT / "windows_build"
 
+# If these appear in Linux scripts/*.py, someone edited Linux for Windows — stop immediately.
+_FORBIDDEN_LINUX_MARKERS = (
+    "win32",
+    "run_hidden",
+    "win_subprocess",
+    "AppData/Local/Programs/ATAK Pipeline",
+    "AppData\\\\Local",
+    "CREATE_NO_WINDOW",
+)
+
+_LINUX_RUNTIME_SOURCES = (
+    "atak_adb_deploy.py",
+    "atak_downloader_finalbuild.py",
+    "atak_downloader_from_installer.py",
+    "atak_imagery_sqlite_builder_finalbuild.py",
+    "atak_dted_downloader.py",
+)
+
+
+def _assert_linux_sources_untouched() -> None:
+    """Linux scripts/ are read-only inputs. Windows changes belong in patches below."""
+    violations: list[str] = []
+    for name in _LINUX_RUNTIME_SOURCES:
+        path = SCRIPTS / name
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        for marker in _FORBIDDEN_LINUX_MARKERS:
+            if marker in text:
+                violations.append(f"{name}: contains Windows-only marker {marker!r}")
+    if violations:
+        raise RuntimeError(
+            "Linux scripts/ must not be modified for Windows. Fix windows_build via sync patches only:\n"
+            + "\n".join(f"  - {v}" for v in violations)
+        )
+
 RENAMED_MODULES = {
     "atak_downloader_finalbuild.py": "atak_downloader_finalbuild_win.py",
     "atak_downloader_from_installer.py": "atak_downloader_from_installer_win.py",
@@ -369,6 +405,7 @@ def _sync_data_subdirs() -> list[str]:
 
 
 def main() -> None:
+    _assert_linux_sources_untouched()
     WIN.mkdir(exist_ok=True)
     (WIN / "data").mkdir(exist_ok=True)
     renamed = _sync_renamed_modules()
