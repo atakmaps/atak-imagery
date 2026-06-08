@@ -89,8 +89,8 @@ deploy.env
 # --- Local notes / handoffs ---
 atak_pipeline_handoff*.md
 HANDOFF_AGENT.local.md
+HANDOFF_TILE_PLAN_CACHE.md
 Windows Build Setup Instructions.md
 # --- IDE / agent (local only) ---
 .cursor/
-!.cursor/rules/
-!.cursor/rules/**
+.cursor/rules/
