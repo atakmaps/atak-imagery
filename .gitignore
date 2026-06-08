@@ -43,6 +43,7 @@ scripts/.protected_import_asset_cache/
 *.log
 .last_imagery_root.txt
 .last_imagery_session_states.txt
+RELEASE_CHECKLIST.md
 .last_pipeline_output_parent.txt
 last_imagery_root.txt
 

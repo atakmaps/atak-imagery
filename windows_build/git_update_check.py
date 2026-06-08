@@ -330,8 +330,11 @@ class _ReleaseCheckState:
         "update_available",
         "remote_version",
         "release_body",
+        "release_url",
         "linux_zip_url",
         "linux_zip_name",
+        "windows_setup_url",
+        "windows_setup_name",
     )
 
     def __init__(self) -> None:
@@ -340,8 +343,11 @@ class _ReleaseCheckState:
         self.update_available = False
         self.remote_version = ""
         self.release_body = ""
+        self.release_url = ""
         self.linux_zip_url = ""
         self.linux_zip_name = ""
+        self.windows_setup_url = ""
+        self.windows_setup_name = ""
 
 
 def _worker_check_github_release(local_version: str, state: _ReleaseCheckState) -> None:
@@ -352,17 +358,22 @@ def _worker_check_github_release(local_version: str, state: _ReleaseCheckState) 
             return
         state.remote_version = tag.lstrip("v")
         state.release_body = (data.get("body") or "").strip()
+        state.release_url = str(data.get("html_url") or _RELEASES_PAGE)
         assets = data.get("assets") or []
         for asset in assets:
             name = str(asset.get("name") or "")
-            if not name.endswith("-linux-install.zip"):
-                continue
             url = str(asset.get("browser_download_url") or "")
             if not url:
                 continue
+            lower = name.lower()
+            if lower.endswith(".exe") and "ataksetup" in lower:
+                state.windows_setup_name = name
+                state.windows_setup_url = url
+                continue
+            if not name.endswith("-linux-install.zip"):
+                continue
             state.linux_zip_name = name
             state.linux_zip_url = url
-            break
         if _parse_semver(tag) > _parse_semver(local_version):
             state.update_available = True
     except Exception as exc:
@@ -487,13 +498,15 @@ def run_startup_release_update_check(*, app_title: str, script_path: Path) -> No
     from the repository, replace them in the installed folder, and restart.
 
     Designed for zip installs (no .git folder). Skipped automatically for git
-    clones (handled by run_startup_git_update_check) and PyInstaller bundles.
+    clones (handled by run_startup_git_update_check).
+
+    For PyInstaller/frozen builds, this checker prompts the user to download the
+    latest installer from GitHub Releases instead of attempting in-place script replacement.
     """
-    if getattr(sys, "frozen", False):
-        return
+    is_frozen = bool(getattr(sys, "frozen", False))
 
     # Git clones are handled by run_startup_git_update_check; avoid a double-dialog.
-    if find_repo_root(script_path.parent) is not None:
+    if not is_frozen and find_repo_root(script_path.parent) is not None:
         return
 
     scripts_dir = script_path.parent          # …/atak-imagery/scripts/
@@ -599,6 +612,26 @@ def run_startup_release_update_check(*, app_title: str, script_path: Path) -> No
         )
         if notes:
             body += notes + "\n\n"
+        if is_frozen:
+            if sys.platform.startswith("win"):
+                target_url = check_state.windows_setup_url or check_state.release_url or _RELEASES_PAGE
+                target_name = check_state.windows_setup_name or "ATAKSetup-*.exe"
+                body += (
+                    f"Update now? The browser will open the latest Windows installer asset:\n{target_name}"
+                )
+            else:
+                target_url = check_state.release_url or _RELEASES_PAGE
+                body += "Update now? The browser will open the latest release page."
+
+            _lift()
+            if messagebox.askyesno(app_title, body, parent=root):
+                try:
+                    webbrowser.open(target_url)
+                except Exception:
+                    pass
+            root.destroy()
+            return
+
         body += "Update now? The scripts will be replaced and the app will restart automatically."
         if check_state.linux_zip_url:
             body += (

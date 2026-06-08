@@ -55,11 +55,17 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.3.38` (tag **`v1.3.38`** on GitHub).
+**Linux / source release:** `v1.3.39` (tag **`v1.3.39`** on GitHub).
 
-**Windows:** Same version as Linux (`v1.3.38`). Build on a Windows VM with PyInstaller — see **Windows build** below.
+**Windows:** Same version as Linux (`v1.3.39`). Build on a Windows VM with PyInstaller — see **Windows build** below.
 
-Version **1.3.38** highlights:
+Version **1.3.39** highlights:
+
+- **Google Hybrid radius imagery:** fixed-radius downloads can fetch bundled `google_hybrid.xml` tiles at zoom **16–20** (entire-state downloads remain USGS z10–15). See README user-acceptance note for third-party tile use.
+- **Radius DTED clip:** DTED extract/pack now keeps only cells overlapping the radius bbox; logs clarify that full state ZIPs are still downloaded from the server before clipping.
+- **Download ETA accuracy:** zoom-screen and live progress ETA use parallel-aware throughput (USGS + Google probe on radius jobs) and correct down faster when speed exceeds early estimates.
+
+### Previous release (v1.3.38)
 
 - **Meshcore out-of-box install:** Device Installer now downloads TAK-MESHCORE from GitHub Releases by default (`atakmaps/TAK-MESHCORE`), matching UV-PRO — no local Plugins folder required.
 - **deploy.env backfill:** missing keys from `deploy.env.example` are merged on startup so existing installs pick up new settings without manual edits.
@@ -253,6 +259,18 @@ This project provides a streamlined pipeline for:
 - SQLite creation for ATAK imagery packages
 - DTED package download
 - final ATAK-ready output packaging
+
+### Google Hybrid imagery (radius downloads only)
+
+The Imagery Downloader can fetch **Google Hybrid** tiles (from bundled `google_hybrid.xml`) for **fixed-radius** jobs at **zoom 16–20**. Entire-state downloads remain **USGS orthophoto only** (zoom 10–15).
+
+**User acceptance:** By using Google Hybrid zoom levels in the Imagery Downloader, you accept that:
+
+- Tile requests are sent to third-party map servers (not USGS).
+- You are responsible for complying with the tile provider’s terms and for how you use offline copies.
+- High zoom levels (especially 18–20) can produce **very large** downloads that take a long time and use substantial disk space on your PC and Android device.
+
+There is no in-app prompt for this; continuing with a radius download that includes zoom 16–20 constitutes acceptance.
 
 Primary Linux/source scripts:
 

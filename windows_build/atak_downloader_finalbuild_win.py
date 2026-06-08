@@ -29,6 +29,7 @@ import math
 import multiprocessing
 import re
 import os
+import xml.etree.ElementTree as ET
 import queue
 import shutil
 import subprocess
@@ -97,6 +98,16 @@ class DownloadCancelled(Exception):
 USGS_TILE_URL = "https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/tile/{z}/{y}/{x}"
 USER_AGENT = "ATAK-Ortho-Downloader/1.1"
 USGS_MAPSERVER_BASE_URL = "https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer"
+GOOGLE_HYBRID_ZOOM_MIN = 16
+GOOGLE_HYBRID_ZOOM_MAX = 20
+GOOGLE_HYBRID_AVG_TILE_BYTES: Dict[int, int] = {
+    16: 11_000,
+    17: 12_000,
+    18: 10_000,
+    19: 10_000,
+    20: 10_000,
+}
+GOOGLE_TILE_PROBE_URL = "https://mt1.google.com/vt/lyrs=y&x=0&y=0&z=0"
 DTED_SERVER_BASE_URL = "http://31.220.30.74/dted"
 OFFLINE_MISSING_DATA_MSG = "Internet unreachable to download missing data."
 # Parallel HTTP tile fetches (thread pool). Network-bound — not the same as CPU cores;
@@ -111,6 +122,7 @@ else:
     RUNTIME_STATE_DIR = SCRIPT_DIR
 
 DATA_DIR = SCRIPT_DIR / "data"
+GOOGLE_HYBRID_XML_PATH = DATA_DIR / "mobile_xml" / "MapXML" / "google_hybrid.xml"
 ZOOM_ESTIMATE_PATH = DATA_DIR / "zoom_estimates_z10_z16.json"
 STATE_GEOJSON_PATH = DATA_DIR / "us_states.geojson"
 TILE_PLAN_DIR = DATA_DIR / "tile_plans" / "v1"
@@ -1977,6 +1989,56 @@ def avg_tile_bytes_by_zoom(payload: Dict[str, Any]) -> Dict[int, int]:
     return out
 
 
+_GOOGLE_HYBRID_TILE_URL_TEMPLATE: Optional[str] = None
+
+
+def load_google_hybrid_tile_url_template() -> str:
+    """URL template from bundled ``google_hybrid.xml`` (``{x}``, ``{y}``, ``{z}`` placeholders)."""
+    global _GOOGLE_HYBRID_TILE_URL_TEMPLATE
+    if _GOOGLE_HYBRID_TILE_URL_TEMPLATE is not None:
+        return _GOOGLE_HYBRID_TILE_URL_TEMPLATE
+    fallback = "https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}"
+    path = GOOGLE_HYBRID_XML_PATH
+    if not path.is_file():
+        log(f"WARNING: missing {path}; using built-in Google Hybrid tile URL.")
+        _GOOGLE_HYBRID_TILE_URL_TEMPLATE = fallback
+        return _GOOGLE_HYBRID_TILE_URL_TEMPLATE
+    try:
+        root = ET.parse(path).getroot()
+        raw_url = (root.findtext("url") or "").strip()
+        if not raw_url:
+            raise ValueError("empty <url>")
+        raw_url = raw_url.replace("&amp;", "&")
+        raw_url = raw_url.replace("{$x}", "{x}").replace("{$y}", "{y}").replace("{$z}", "{z}")
+        _GOOGLE_HYBRID_TILE_URL_TEMPLATE = raw_url
+        log(f"Google Hybrid tile source: {path.name}")
+    except (OSError, ET.ParseError, ValueError) as exc:
+        log(f"WARNING: could not parse {path} ({exc}); using built-in Google Hybrid tile URL.")
+        _GOOGLE_HYBRID_TILE_URL_TEMPLATE = fallback
+    return _GOOGLE_HYBRID_TILE_URL_TEMPLATE
+
+
+def google_hybrid_tile_url(z: int, x: int, y: int) -> str:
+    return load_google_hybrid_tile_url_template().format(x=x, y=y, z=z)
+
+
+def is_google_hybrid_zoom(z: int) -> bool:
+    return GOOGLE_HYBRID_ZOOM_MIN <= z <= GOOGLE_HYBRID_ZOOM_MAX
+
+
+def imagery_download_url(z: int, x: int, y: int) -> str:
+    if is_google_hybrid_zoom(z):
+        return google_hybrid_tile_url(z, x, y)
+    return USGS_TILE_URL.format(z=z, x=x, y=y)
+
+
+def merged_avg_tile_bytes_by_zoom(payload: Dict[str, Any]) -> Dict[int, int]:
+    avgs = avg_tile_bytes_by_zoom(payload)
+    for z, nbytes in GOOGLE_HYBRID_AVG_TILE_BYTES.items():
+        avgs[z] = nbytes
+    return avgs
+
+
 def parse_mgrs_to_latlon(mgrs_str: str) -> Tuple[float, float]:
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         _mgrs_base = Path(sys._MEIPASS)
@@ -2592,7 +2654,7 @@ class ZoomDialog(tk.Tk):
 
         self.download_scope = download_scope
         self.zoom_min = 10
-        self.zoom_max = 16
+        self.zoom_max = GOOGLE_HYBRID_ZOOM_MAX
 
         self.result: List[int] = []
         self.go_back = False
@@ -2726,12 +2788,45 @@ class ZoomDialog(tk.Tk):
         checks = pack_vertical_scroll_area(mid)
 
         default_avg: Dict[int, int] = {zz: 25000 for zz in range(self.zoom_min, self.zoom_max + 1)}
+        for zz, nbytes in GOOGLE_HYBRID_AVG_TILE_BYTES.items():
+            default_avg[zz] = nbytes
         avgs = avg_tile_bytes_by_zoom if avg_tile_bytes_by_zoom else default_avg
 
+        google_notes_added = False
         for z in range(self.zoom_min, self.zoom_max + 1):
+            if z == GOOGLE_HYBRID_ZOOM_MIN and not google_notes_added:
+                google_notes_added = True
+                tk.Label(
+                    checks,
+                    text="Zoom 16-20 is only available for a radius search",
+                    font=("Arial", 11, "bold"),
+                    fg="gray35",
+                    anchor="w",
+                    justify="left",
+                    wraplength=note_wrap,
+                ).pack(anchor="w", fill="x", pady=(8, 2))
+                tk.Label(
+                    checks,
+                    text=(
+                        "Google Hybrid-NOTE: These files are very large and could require "
+                        "significant time to download"
+                    ),
+                    font=("Arial", 10),
+                    fg="gray35",
+                    anchor="w",
+                    justify="left",
+                    wraplength=note_wrap,
+                ).pack(anchor="w", fill="x", pady=(0, 6))
+
             total_tiles = 0
             total_bytes = 0
-            if download_scope == "radius":
+            google_only = is_google_hybrid_zoom(z)
+            state_google_disabled = download_scope != "radius" and google_only
+
+            if state_google_disabled:
+                total_tiles = 0
+                total_bytes = 0
+            elif download_scope == "radius":
                 if precomputed_radius_tiles is not None:
                     n = precomputed_radius_tiles.get(z, 0)
                     total_tiles = n
@@ -2754,10 +2849,13 @@ class ZoomDialog(tk.Tk):
 
             var = tk.BooleanVar(value=False)
             self.vars[z] = var
+            label = zoom_resolution_labels(z)
+            if google_only:
+                label = f"{label}   |   Google Hybrid"
             cb = tk.Checkbutton(
                 checks,
                 text=(
-                    f"{zoom_resolution_labels(z)}   |   "
+                    f"{label}   |   "
                     f"estimated tiles: {total_tiles:,}   |   "
                     f"estimated size: {human_bytes(total_bytes)}"
                 ),
@@ -2767,6 +2865,8 @@ class ZoomDialog(tk.Tk):
                 wraplength=note_wrap,
                 command=lambda zz=z: self._on_zoom_toggle(zz),
             )
+            if state_google_disabled:
+                cb.configure(state="disabled")
             cb.pack(anchor="w", fill="x")
 
         self.protocol("WM_DELETE_WINDOW", self.cancel)
@@ -2776,7 +2876,8 @@ class ZoomDialog(tk.Tk):
         self._probe_poll_after_id: Optional[str] = None
         self._probe_proc: Optional["multiprocessing.Process"] = None
         self._probe_mp_q: Optional["multiprocessing.Queue"] = None
-        self._probe_poll_after_id = self.after(50, self._start_usgs_probe_process)
+        self._include_google_probe = download_scope == "radius"
+        self._probe_poll_after_id = self.after(50, self._start_imagery_probe_process)
         self.update_size_label()
 
         try:
@@ -2804,7 +2905,7 @@ class ZoomDialog(tk.Tk):
             self._probe_proc = None
         super().destroy()
 
-    def _start_usgs_probe_process(self) -> None:
+    def _start_imagery_probe_process(self) -> None:
         self._probe_poll_after_id = None
         try:
             if not int(self.winfo_exists()):
@@ -2816,19 +2917,20 @@ class ZoomDialog(tk.Tk):
 
             ctx = multiprocessing.get_context("spawn")
             self._probe_mp_q = ctx.Queue()
+            include_google = bool(getattr(self, "_include_google_probe", False))
             self._probe_proc = ctx.Process(
                 target=run_probe_process_entry,
-                args=(self._probe_mp_q,),
+                args=(self._probe_mp_q, include_google),
             )
             self._probe_proc.start()
-            self._probe_poll_after_id = self.after(100, self._poll_usgs_probe_process)
+            self._probe_poll_after_id = self.after(100, self._poll_imagery_probe_process)
         except Exception as e:
             log(f"Imagery throughput probe failed to start: {e}")
             self._probe_proc = None
             self._probe_mp_q = None
             self._apply_probe_result(None)
 
-    def _poll_usgs_probe_process(self) -> None:
+    def _poll_imagery_probe_process(self) -> None:
         self._probe_poll_after_id = None
         try:
             if not int(self.winfo_exists()):
@@ -2847,7 +2949,7 @@ class ZoomDialog(tk.Tk):
             self._apply_probe_result(None)
             return
         if proc.exitcode is None:
-            self._probe_poll_after_id = self.after(100, self._poll_usgs_probe_process)
+            self._probe_poll_after_id = self.after(100, self._poll_imagery_probe_process)
             return
         bps: Optional[float] = None
         q = self._probe_mp_q
@@ -2865,15 +2967,19 @@ class ZoomDialog(tk.Tk):
         self._probe_finished = True
         self._download_throughput_bps = bps
         if bps is not None and bps > 0:
-            log(f"Imagery throughput probe: sampled aggregate {human_throughput(bps)}")
+            scope = "USGS+Google" if getattr(self, "_include_google_probe", False) else "USGS"
+            log(f"Imagery throughput probe ({scope}): sampled aggregate {human_throughput(bps)}")
         try:
             self.update_size_label()
         except tk.TclError:
             pass
 
     def select_all(self) -> None:
-        for v in self.vars.values():
-            v.set(True)
+        for zz, v in self.vars.items():
+            if is_google_hybrid_zoom(zz) and self.download_scope != "radius":
+                v.set(False)
+            else:
+                v.set(True)
         self.update_size_label()
 
     def clear_all(self) -> None:
@@ -2884,7 +2990,9 @@ class ZoomDialog(tk.Tk):
     def _on_zoom_toggle(self, z: int) -> None:
         """Checking a zoom also checks every coarser zoom (10…z) for state and radius."""
         if self.vars[z].get():
-            for zz in range(10, z + 1):
+            for zz in range(self.zoom_min, z + 1):
+                if is_google_hybrid_zoom(zz) and self.download_scope != "radius":
+                    continue
                 self.vars[zz].set(True)
         self.update_size_label()
 
@@ -2937,7 +3045,11 @@ class ZoomDialog(tk.Tk):
         self.destroy()
 
     def submit(self) -> None:
-        self.result = sorted([z for z, var in self.vars.items() if var.get()])
+        self.result = sorted(
+            z
+            for z, var in self.vars.items()
+            if var.get() and not (is_google_hybrid_zoom(z) and self.download_scope != "radius")
+        )
         if not self.result:
             ensure_window_stacking(self)
             messagebox.showwarning(APP_TITLE, "Select at least one zoom level.", parent=self)
@@ -3570,7 +3682,7 @@ def fetch_tile(
             except Exception as e:
                 log(f"ERROR copying local tile {local}: {e}")
 
-    url = USGS_TILE_URL.format(z=z, x=x, y=y)
+    url = imagery_download_url(z, x, y)
     bytes_written = 0
     try:
         session = get_download_session()
@@ -3807,21 +3919,29 @@ def run_download(
                 lat, lon, miles, states_for_dted
             )
             log(
-                "DTED: full state package(s) for states overlapping the radius "
-                f"(bounding-box match): {', '.join(dted_state_list) if dted_state_list else '(none)'}"
+                "DTED: state package(s) overlapping the radius (bounding-box match): "
+                f"{', '.join(dted_state_list) if dted_state_list else '(none)'} — "
+                "server ZIPs are per-state; download is full ZIP, final dted2 is radius-clipped."
             )
         else:
             dted_state_list = list(state_names)
 
         need_img_net = plan_requires_network_for_imagery(plan, raw_imagery_root)
         need_dted_net = dted_requires_network_fetch(dted_state_list, local_dted_root)
+        plan_uses_usgs = any(not is_google_hybrid_zoom(z) for _, z, _, _, _ in plan)
+        plan_uses_google = any(is_google_hybrid_zoom(z) for _, z, _, _, _ in plan)
         if need_img_net or need_dted_net:
             log(
                 f"Pre-download check: need network for imagery={need_img_net}, "
                 f"for DTED={need_dted_net}"
             )
-            if need_img_net and not http_host_reachable(USGS_MAPSERVER_BASE_URL):
+            if need_img_net and plan_uses_usgs and not http_host_reachable(USGS_MAPSERVER_BASE_URL):
                 log("USGS MapServer unreachable; cannot fetch missing imagery tiles.")
+                progress.error_message = OFFLINE_MISSING_DATA_MSG
+                progress.set_status("Incomplete")
+                return
+            if need_img_net and plan_uses_google and not http_host_reachable(GOOGLE_TILE_PROBE_URL):
+                log("Google Hybrid tile server unreachable; cannot fetch missing imagery tiles.")
                 progress.error_message = OFFLINE_MISSING_DATA_MSG
                 progress.set_status("Incomplete")
                 return
@@ -3833,6 +3953,13 @@ def run_download(
 
         total = len(plan)
         log(f"Total tile candidates: {total}")
+        if plan_uses_google:
+            load_google_hybrid_tile_url_template()
+            log(
+                f"Tile plan includes Google Hybrid zooms "
+                f"{GOOGLE_HYBRID_ZOOM_MIN}-{GOOGLE_HYBRID_ZOOM_MAX} "
+                f"({sum(1 for _s, z, _x, _y, _p in plan if is_google_hybrid_zoom(z)):,} tiles)"
+            )
         log(f"Tile plan complete — download phase: {total:,} tiles.")
         progress.set_speed_eta(0.0, None)
         progress.set_progress(0, total)
@@ -3841,14 +3968,12 @@ def run_download(
         completed = 0
         downloaded_bytes = 0
         started_at = time.time()
-        speed_samples = deque(maxlen=10)
+        speed_samples = deque(maxlen=12)
         last_sample_time = started_at
         last_sample_bytes = 0
         smoothed_speed_bps = 0.0
         eta_smoothed = None
         last_eta_update_time = time.time()
-        tile_time_samples = deque(maxlen=20)
-        last_tile_complete_time = started_at
         progress.set_speed_eta(0.0, None)
 
         def download_one(tile: Tuple[str, int, int, int, Path]) -> Tuple[str, int, int, int, str, int]:
@@ -3906,11 +4031,6 @@ def run_download(
                     downloaded_bytes += bytes_written
                     completed += 1
 
-                    tile_now = time.time()
-                    tile_elapsed = max(tile_now - last_tile_complete_time, 0.001)
-                    last_tile_complete_time = tile_now
-                    if result in ("downloaded", "existing", "missing", "failed"):
-                        tile_time_samples.append(tile_elapsed)
                     progress.set_progress(completed, total)
                     for key, value in stats.items():
                         progress.set_stat(key, value)
@@ -3932,35 +4052,44 @@ def run_download(
                         smoothed_speed_bps = downloaded_bytes / elapsed
 
                     now_t = time.time()
-
+                    elapsed_total = max(now_t - started_at, 0.001)
                     remaining_tiles = max(0, total - completed)
                     raw_eta_tile: Optional[float] = None
                     raw_eta_net: Optional[float] = None
 
-                    if completed >= 8 and remaining_tiles > 0 and tile_time_samples:
-                        seconds_per_tile = sum(tile_time_samples) / len(tile_time_samples)
-                        raw_eta_tile = (seconds_per_tile * remaining_tiles) * 1.08
+                    if completed >= 4 and remaining_tiles > 0:
+                        # Wall-clock tile completion rate (valid with parallel workers).
+                        tiles_per_sec = completed / elapsed_total
+                        raw_eta_tile = remaining_tiles / max(tiles_per_sec, 0.25)
 
                     downloaded_count = int(stats.get("downloaded", 0))
+                    existing_count = int(stats.get("existing", 0))
                     if (
                         remaining_tiles > 0
-                        and downloaded_count >= 20
+                        and downloaded_count >= 8
                         and downloaded_bytes > 0
-                        and smoothed_speed_bps > 1.0
+                        and smoothed_speed_bps > 500
                     ):
-                        # Use observed outcome ratio to estimate how many remaining tiles
-                        # will likely require network transfer (vs local-existing/missing).
-                        download_ratio = downloaded_count / max(1, completed)
-                        expected_download_tiles = remaining_tiles * min(1.0, max(0.0, download_ratio))
+                        finished = max(1, completed)
+                        network_ratio = downloaded_count / finished
+                        if existing_count > 0:
+                            network_ratio = min(
+                                network_ratio,
+                                max(0.0, (total - existing_count) / max(1, total)),
+                            )
+                        expected_download_tiles = remaining_tiles * min(1.0, max(0.0, network_ratio))
                         avg_bytes_per_download = downloaded_bytes / max(1, downloaded_count)
                         expected_remaining_bytes = expected_download_tiles * avg_bytes_per_download
                         raw_eta_net = expected_remaining_bytes / max(smoothed_speed_bps, 1.0)
 
                     if remaining_tiles <= 0:
                         raw_eta = 0.0
+                    elif raw_eta_net is not None:
+                        raw_eta = raw_eta_net
+                    elif raw_eta_tile is not None:
+                        raw_eta = raw_eta_tile
                     else:
-                        eta_candidates = [v for v in (raw_eta_tile, raw_eta_net) if v is not None and v >= 0]
-                        raw_eta = max(eta_candidates) if eta_candidates else None
+                        raw_eta = None
 
                     if raw_eta is None:
                         eta_to_show = None
@@ -3968,21 +4097,22 @@ def run_download(
                         if eta_smoothed is None:
                             eta_smoothed = raw_eta
                             last_eta_update_time = now_t
-                        elif (now_t - last_eta_update_time) >= 2.0:
-                            alpha = 0.12
-                            proposed_eta = (alpha * raw_eta) + ((1 - alpha) * eta_smoothed)
+                        else:
+                            delta_t = max(now_t - last_eta_update_time, 0.001)
+                            if raw_eta < eta_smoothed * 0.7:
+                                eta_smoothed = 0.45 * raw_eta + 0.55 * eta_smoothed
+                                last_eta_update_time = now_t
+                            elif delta_t >= 1.0:
+                                alpha = 0.40
+                                proposed_eta = (alpha * raw_eta) + ((1 - alpha) * eta_smoothed)
+                                max_drop = delta_t * max(8.0, eta_smoothed * 0.35)
+                                max_rise = delta_t * 4.0
+                                lower_bound = max(0.0, eta_smoothed - max_drop)
+                                upper_bound = eta_smoothed + max_rise
+                                eta_smoothed = min(max(proposed_eta, lower_bound), upper_bound)
+                                last_eta_update_time = now_t
 
-                            delta_t = now_t - last_eta_update_time
-                            max_drop = delta_t * 1.10
-                            max_rise = delta_t * 6.0
-
-                            lower_bound = max(0, eta_smoothed - max_drop)
-                            upper_bound = eta_smoothed + max_rise
-                            eta_smoothed = min(max(proposed_eta, lower_bound), upper_bound)
-
-                            last_eta_update_time = now_t
-
-                        eta_to_show = max(0, eta_smoothed)
+                        eta_to_show = max(0.0, eta_smoothed)
 
                     progress.set_speed_eta(smoothed_speed_bps, eta_to_show)
 
@@ -4254,7 +4384,7 @@ def main() -> None:
     log(f"Log file: {LOGGER.log_file}")
     zoom_payload = read_zoom_estimates_file()
     zoom_estimates = zoom_payload["states"]
-    avg_tile_bytes_map = avg_tile_bytes_by_zoom(zoom_payload)
+    avg_tile_bytes_map = merged_avg_tile_bytes_by_zoom(zoom_payload)
 
     do_maps, do_addons, welcome_exit_reason = show_downloader_welcome()
     if not do_maps and not do_addons:
@@ -4459,7 +4589,7 @@ def main() -> None:
                     _radius_tiles: Dict[int, int] = {}
 
                     def _precompute_radius_tiles() -> None:
-                        for z in range(10, 17):
+                        for z in range(10, GOOGLE_HYBRID_ZOOM_MAX + 1):
                             tiles = compute_tiles_for_radius(rd.center_lat, rd.center_lon, rd.radius_miles, z)
                             _radius_tiles[z] = len(tiles)
 

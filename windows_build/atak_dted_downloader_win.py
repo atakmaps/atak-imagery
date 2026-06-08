@@ -1067,6 +1067,7 @@ def extract_state_zip(
     zip_path: Path,
     extract_root: Path,
     log_fn: Optional[Callable[[str], None]] = None,
+    radius_bbox_lonlat: Optional[Tuple[float, float, float, float]] = None,
 ) -> None:
     _log = log_fn or log
     state_name = zip_path.stem
@@ -1075,9 +1076,36 @@ def extract_state_zip(
         shutil.rmtree(state_extract_dir)
     state_extract_dir.mkdir(parents=True, exist_ok=True)
 
-    _log(f"Extracting {zip_path.name} -> {state_extract_dir}")
     with zipfile.ZipFile(zip_path, "r") as zf:
-        zf.extractall(state_extract_dir)
+        if radius_bbox_lonlat is None:
+            _log(f"Extracting {zip_path.name} -> {state_extract_dir}")
+            zf.extractall(state_extract_dir)
+            return
+
+        rw, rs, re_, rn = radius_bbox_lonlat
+        kept = 0
+        skipped = 0
+        _log(
+            f"Extracting {zip_path.name} -> {state_extract_dir} "
+            f"(radius clip: only DTED cells overlapping bbox)"
+        )
+        for name in zf.namelist():
+            if name.endswith("/"):
+                continue
+            cell = _dted_cell_bounds_from_arcname(name)
+            if cell is None:
+                skipped += 1
+                continue
+            cw, cs, ce, cn = cell
+            if not _bbox_overlaps(cw, cs, ce, cn, rw, rs, re_, rn):
+                skipped += 1
+                continue
+            dest = state_extract_dir / name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(name) as src, open(dest, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+            kept += 1
+        _log(f"DTED: radius-selective extract kept {kept} file(s), skipped {skipped}")
 
 
 _LON_DIR_RE = re.compile(r"^([ew])(\d{3})$", re.IGNORECASE)
@@ -1146,11 +1174,13 @@ def build_final_dted_zip(
             arc_posix = arcname.as_posix()
             if radius_filter_enabled:
                 cell = _dted_cell_bounds_from_arcname(arc_posix)
-                if cell is not None:
-                    cw, cs, ce, cn = cell
-                    if not _bbox_overlaps(cw, cs, ce, cn, rw, rs, re_, rn):
-                        filtered_out += 1
-                        continue
+                if cell is None:
+                    filtered_out += 1
+                    continue
+                cw, cs, ce, cn = cell
+                if not _bbox_overlaps(cw, cs, ce, cn, rw, rs, re_, rn):
+                    filtered_out += 1
+                    continue
             entries.append((item, arc_posix))
 
     _log(f"Building final ATAK zip: {final_zip_path} ({len(entries)} files)")
@@ -1214,6 +1244,13 @@ def run_dted_inline_for_states(
     if local_state_zip_root is not None:
         log_sink(f"DTED: local state ZIP tree (copy first): {local_state_zip_root}")
     log_sink(f"DTED: server base URL {BASE_URL}")
+    if radius_bbox_lonlat is not None:
+        rw, rs, re_, rn = radius_bbox_lonlat
+        log_sink(
+            "DTED: radius mode — the server provides one ZIP per state, so each overlapping "
+            "state ZIP is downloaded in full; extract and the final dted2 archive are clipped "
+            f"to cells inside ({rw:.5f}, {rs:.5f})–({re_:.5f}, {rn:.5f})."
+        )
 
     plan: List[Tuple[str, str, Path]] = []
     for state_name in selected_states:
@@ -1302,7 +1339,12 @@ def run_dted_inline_for_states(
         for j, (state_name, out_path) in enumerate(extract_plan):
             progress.wait_if_paused()
             progress.set_status(f"DTED: extracting {state_name}…")
-            extract_state_zip(out_path, extract_root, log_fn=log_sink)
+            extract_state_zip(
+                out_path,
+                extract_root,
+                log_fn=log_sink,
+                radius_bbox_lonlat=radius_bbox_lonlat,
+            )
             extracted_any = True
             fr = _DTED_W_DOWNLOAD + _DTED_W_EXTRACT * ((j + 1) / m_ext)
             set_overall(fr, f"{int(fr * 100)}% · extract {j + 1} / {len(extract_plan)}")
