@@ -128,6 +128,9 @@ function Build-OneExe {
         "--add-data", (Format-PyInstallerAddData -SourcePath $TkPath -DestFolder "_tk_data"),
         "--add-data", (Format-PyInstallerAddData -SourcePath $DataRoot -DestFolder "scripts/data")
     )
+    if (Test-Path $VersionFile) {
+        $pyArgs += @("--add-data", (Format-PyInstallerAddData -SourcePath $VersionFile -DestFolder "."))
+    }
     foreach ($scriptName in $ScriptBundleList) {
         $src = Join-Path $BuildRootPath $scriptName
         if (-not (Test-Path $src)) { $src = Join-Path $ScriptsRoot $scriptName }

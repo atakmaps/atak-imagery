@@ -3,9 +3,8 @@ Optional update checks for ATAK Imagery Pipeline.
 
 Two modes:
   run_startup_git_update_check   — git clone only; fetches origin/main and offers to pull + restart.
-  run_startup_release_update_check — zip installs; hits GitHub releases API and opens the download
-                                     page if a newer version exists. Skipped in git clones (the git
-                                     check already handles those) and PyInstaller bundles.
+  run_startup_release_update_check — zip installs and frozen Windows EXEs; hits GitHub releases API
+                                     and offers update (in-place script refresh or installer download).
 
 Restart after git update uses os.execv with the same interpreter and argv.
 """
@@ -47,6 +46,28 @@ def read_version_file(repo_root: Path) -> str:
     if vf.is_file():
         line = vf.read_text(encoding="utf-8").strip().splitlines()
         return (line[0] if line else "").strip() or "unknown"
+    return "unknown"
+
+
+def installed_app_root(*, script_path: Path, is_frozen: bool) -> Path:
+    """Root directory that holds VERSION for this install (zip, git, or frozen EXE)."""
+    if is_frozen:
+        return Path(sys.executable).resolve().parent
+    repo_root = find_repo_root(script_path.parent)
+    if repo_root is not None:
+        return repo_root
+    return script_path.parent.parent
+
+
+def read_installed_version(*, script_path: Path, is_frozen: bool) -> str:
+    """Read VERSION from the installed app tree (EXE dir for PyInstaller one-file builds)."""
+    version = read_version_file(installed_app_root(script_path=script_path, is_frozen=is_frozen))
+    if version != "unknown":
+        return version
+    if is_frozen:
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            return read_version_file(Path(meipass))
     return "unknown"
 
 
@@ -509,12 +530,16 @@ def run_startup_release_update_check(*, app_title: str, script_path: Path) -> No
     if not is_frozen and find_repo_root(script_path.parent) is not None:
         return
 
-    scripts_dir = script_path.parent          # …/atak-imagery/scripts/
-    repo_root = scripts_dir.parent            # …/atak-imagery/
-
-    local_version = read_version_file(repo_root)
+    local_version = read_installed_version(script_path=script_path, is_frozen=is_frozen)
     if not local_version or local_version == "unknown":
         return
+
+    if is_frozen:
+        repo_root = installed_app_root(script_path=script_path, is_frozen=True)
+        scripts_dir = repo_root
+    else:
+        scripts_dir = script_path.parent          # …/atak-imagery/scripts/
+        repo_root = scripts_dir.parent            # …/atak-imagery/
 
     check_state = _ReleaseCheckState()
     threading.Thread(
