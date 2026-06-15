@@ -41,6 +41,20 @@ def _center_window(win: object) -> None:
         pass
 
 
+def _safe_destroy_tk(root: object) -> None:
+    """Cancel pending after handlers before destroy (avoids Tcl_AsyncDelete on Linux)."""
+    try:
+        from tk_window_scaling import cancel_all_scheduled_after
+
+        cancel_all_scheduled_after(root)  # type: ignore[arg-type]
+    except Exception:
+        pass
+    try:
+        root.destroy()  # type: ignore[union-attr]
+    except Exception:
+        pass
+
+
 def read_version_file(repo_root: Path) -> str:
     vf = repo_root / "VERSION"
     if vf.is_file():
@@ -164,7 +178,7 @@ def _git_status_dirty(repo: Path) -> bool:
 def _perform_update_and_restart(repo_root: Path, app_title: str, parent: Optional[object] = None) -> None:
     from tkinter import messagebox
 
-    from tk_window_scaling import ensure_window_stacking
+    from tk_window_scaling import ensure_window_stacking, cancel_all_scheduled_after
 
     def _prep() -> None:
         if parent is not None:
@@ -229,7 +243,7 @@ def run_startup_git_update_check(*, app_title: str, script_path: Path) -> None:
     import tkinter as tk
     from tkinter import messagebox, ttk
 
-    from tk_window_scaling import ensure_window_stacking
+    from tk_window_scaling import ensure_window_stacking, cancel_all_scheduled_after
 
     root = tk.Tk()
     root.withdraw()
@@ -272,11 +286,11 @@ def run_startup_git_update_check(*, app_title: str, script_path: Path) -> None:
             progress = None
 
         if state.error:
-            root.destroy()
+            _safe_destroy_tk(root)
             return
 
         if not state.update_available:
-            root.destroy()
+            _safe_destroy_tk(root)
             return
 
         local_v = read_version_file(repo_root)
@@ -299,11 +313,11 @@ def run_startup_git_update_check(*, app_title: str, script_path: Path) -> None:
         ensure_window_stacking(root)
         root.update_idletasks()
         if not messagebox.askyesno(app_title, body, parent=root):
-            root.destroy()
+            _safe_destroy_tk(root)
             return
 
         _perform_update_and_restart(repo_root, app_title, root)
-        root.destroy()
+        _safe_destroy_tk(root)
 
     def poll() -> None:
         if state.done.is_set():
@@ -618,7 +632,7 @@ def run_startup_release_update_check(*, app_title: str, script_path: Path) -> No
     import tkinter as tk
     from tkinter import messagebox, ttk
 
-    from tk_window_scaling import ensure_window_stacking
+    from tk_window_scaling import ensure_window_stacking, cancel_all_scheduled_after
 
     root = tk.Tk()
     root.withdraw()
@@ -673,7 +687,7 @@ def run_startup_release_update_check(*, app_title: str, script_path: Path) -> No
                         f"Update failed:\n{dl_state.error}",
                         parent=root,
                     )
-                    root.destroy()
+                    _safe_destroy_tk(root)
                     return
                 _lift()
                 messagebox.showinfo(
@@ -681,7 +695,7 @@ def run_startup_release_update_check(*, app_title: str, script_path: Path) -> No
                     "Update complete. The application will now restart.",
                     parent=root,
                 )
-                root.destroy()
+                _safe_destroy_tk(root)
                 os.execv(sys.executable, [sys.executable, *sys.argv])
             else:
                 root.after(150, poll_dl)
@@ -702,7 +716,7 @@ def run_startup_release_update_check(*, app_title: str, script_path: Path) -> No
                     f"Update failed:\n{dl_state.error}",
                     parent=root,
                 )
-                root.destroy()
+                _safe_destroy_tk(root)
                 return
             on_success()
             return
@@ -742,7 +756,7 @@ def run_startup_release_update_check(*, app_title: str, script_path: Path) -> No
                 "This app will close so the update can replace the programs.",
                 parent=root,
             )
-            root.destroy()
+            _safe_destroy_tk(root)
             _launch_windows_installer(dest_path)
 
         root.after(150, lambda: _poll_download_progress(dl_state, prog_win, bar, file_lbl, on_success))
@@ -750,7 +764,7 @@ def run_startup_release_update_check(*, app_title: str, script_path: Path) -> No
     # ---- version-check phase -----------------------------------------------
     def finish() -> None:
         if check_state.error or not check_state.update_available:
-            root.destroy()
+            _safe_destroy_tk(root)
             return
 
         notes = check_state.release_body
@@ -786,7 +800,7 @@ def run_startup_release_update_check(*, app_title: str, script_path: Path) -> No
                     webbrowser.open(check_state.release_url or _RELEASES_PAGE)
                 except Exception:
                     pass
-            root.destroy()
+            _safe_destroy_tk(root)
             return
 
         body += "Update now? The scripts will be replaced and the app will restart automatically."
@@ -798,7 +812,7 @@ def run_startup_release_update_check(*, app_title: str, script_path: Path) -> No
 
         _lift()
         if not messagebox.askyesno(app_title, body, parent=root):
-            root.destroy()
+            _safe_destroy_tk(root)
             return
 
         root.withdraw()

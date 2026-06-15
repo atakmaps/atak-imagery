@@ -78,7 +78,6 @@ from __future__ import annotations
 
 import logging
 import os
-import queue
 import re
 import shutil
 import subprocess
@@ -1189,8 +1188,6 @@ class DeployWizard(tk.Tk):
         self._plugin_report_label = ""
         # One of: both, both_meshcore, atak, plugin, plugin_meshcore.
         self._install_choice: str = "both"
-        self._ui_msg_queue: queue.SimpleQueue = queue.SimpleQueue()
-        self._ui_pump_active = False
 
         outer = tk.Frame(self, padx=16, pady=16)
         outer.configure(cursor="arrow")
@@ -1322,23 +1319,21 @@ class DeployWizard(tk.Tk):
         self.btn_primary.configure(state="disabled")
         self.btn_secondary.configure(state="disabled")
         self.status.configure(text="Restarting ATAK on device…")
-        self._start_ui_pump()
+        self.update_idletasks()
+        self.after(50, self._run_restart_atak_main_thread)
 
-        def work() -> None:
-            try:
-                log("Step 6 continue: attempting ATAK restart (pass 1)")
-                ok = launch_atak_reliable(self.selected_serial)
-                if not ok:
-                    log("Step 6 continue: first ATAK restart attempt failed; retrying once")
-                    time.sleep(1.0)
-                    launch_atak_reliable(self.selected_serial)
-            except Exception:
-                log("launch_atak before final screen failed")
-            # Keep installer alive briefly so restart command settles while app is running.
-            time.sleep(5.0)
-            self._ui_msg_queue.put(("advance", 7))
-
-        threading.Thread(target=work, daemon=True).start()
+    def _run_restart_atak_main_thread(self) -> None:
+        try:
+            log("Step 6 continue: attempting ATAK restart (pass 1)")
+            ok = launch_atak_reliable(self.selected_serial)
+            if not ok:
+                log("Step 6 continue: first ATAK restart attempt failed; retrying once")
+                time.sleep(1.0)
+                launch_atak_reliable(self.selected_serial)
+        except Exception:
+            log("launch_atak before final screen failed")
+        time.sleep(5.0)
+        self._advance(7)
 
     def _show_body_label(self) -> None:
         self._instructions_outer.pack_forget()
@@ -1597,49 +1592,19 @@ class DeployWizard(tk.Tk):
                 except Exception:
                     pass
 
-    def _enqueue_ui_status(self, msg: str) -> None:
-        """Thread-safe status line — worker threads must never touch Tk directly."""
-        self._ui_msg_queue.put(("status", msg))
-
-    def _start_ui_pump(self) -> None:
-        if self._ui_pump_active:
-            return
-        self._ui_pump_active = True
-        self._pump_ui_queue()
-
-    def _pump_ui_queue(self) -> None:
-        if not self._ui_pump_active:
-            return
-        try:
-            while True:
-                kind, payload = self._ui_msg_queue.get_nowait()
-                if kind == "status":
-                    self.status.configure(text=str(payload))
-                elif kind == "done_atak":
-                    self._ui_pump_active = False
-                    self.progress.stop()
-                    self._after_install_atak(payload)  # type: ignore[arg-type]
-                    return
-                elif kind == "done_plugin":
-                    self._ui_pump_active = False
-                    self.progress.stop()
-                    self._after_install_plugin(payload)  # type: ignore[arg-type]
-                    return
-                elif kind == "advance":
-                    self._advance(int(payload))
-        except queue.Empty:
-            pass
-        if self._ui_pump_active:
-            self.after(100, self._pump_ui_queue)
+    def _set_install_status(self, msg: str) -> None:
+        self.status.configure(text=msg)
+        self.update_idletasks()
 
     def _begin_install_atak(self) -> None:
-        # Network/adb on a worker thread; Tk updates only via _pump_ui_queue on main thread.
+        # Run install on the Tk main thread (Linux/X11 aborts if a worker thread is active
+        # while the indeterminate progress bar is animating). Defer one tick so _render_step
+        # can finish laying out step 3 before blocking network/adb work begins.
         self.progress.start(8)
         self.update_idletasks()
-        self._start_ui_pump()
-        threading.Thread(target=self._begin_install_atak_worker, daemon=True).start()
+        self.after(50, self._run_install_atak_main_thread)
 
-    def _begin_install_atak_worker(self) -> None:
+    def _run_install_atak_main_thread(self) -> None:
         _lg = logging.getLogger("atak_installer")
         err: Optional[Exception] = None
         try:
@@ -1667,7 +1632,7 @@ class DeployWizard(tk.Tk):
                 if pct < last_download_pct + 1 and downloaded < total:
                     return
                 last_download_pct = pct
-                self._enqueue_ui_status(
+                self._set_install_status(
                     f"Downloading ATAK {pct}% "
                     f"({_format_byte_count(downloaded)} / {_format_byte_count(total)})…"
                 )
@@ -1679,7 +1644,7 @@ class DeployWizard(tk.Tk):
             self._atak_version_value = str(version)
 
             def ui_install(msg: str) -> None:
-                self._enqueue_ui_status(msg)
+                self._set_install_status(msg)
 
             _lg.info("Step 3: installing ATAK APK (%s)", apk_path.name)
             install_apk(
@@ -1710,7 +1675,11 @@ class DeployWizard(tk.Tk):
             err = e
             log(traceback.format_exc())
         finally:
-            self._ui_msg_queue.put(("done_atak", err))
+            try:
+                self.progress.stop()
+            except Exception:
+                pass
+            self._after_install_atak(err)
 
     def _after_install_atak(self, err: Optional[Exception]) -> None:
         if err:
@@ -1730,16 +1699,15 @@ class DeployWizard(tk.Tk):
     def _begin_install_plugin(self) -> None:
         self.progress.start(8)
         self.update_idletasks()
-        self._start_ui_pump()
-        threading.Thread(target=self._begin_install_plugin_worker, daemon=True).start()
+        self.after(50, self._run_install_plugin_main_thread)
 
-    def _begin_install_plugin_worker(self) -> None:
+    def _run_install_plugin_main_thread(self) -> None:
         _lg = logging.getLogger("atak_installer")
         ser = self.selected_serial or ""
         err: Optional[Exception] = None
         try:
             def ui_install(msg: str) -> None:
-                self._enqueue_ui_status(msg)
+                self._set_install_status(msg)
 
             plugin_variant = self._plugin_variant()
             manifest = self._manifest_cache
@@ -1801,7 +1769,11 @@ class DeployWizard(tk.Tk):
             err = e
             log(traceback.format_exc())
         finally:
-            self._ui_msg_queue.put(("done_plugin", err))
+            try:
+                self.progress.stop()
+            except Exception:
+                pass
+            self._after_install_plugin(err)
 
     def _after_install_plugin(self, err: Optional[Exception]) -> None:
         self.progress.stop()
