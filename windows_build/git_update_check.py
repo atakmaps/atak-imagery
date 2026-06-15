@@ -404,14 +404,15 @@ def _worker_check_github_release(local_version: str, state: _ReleaseCheckState) 
 
 
 class _DownloadState:
-    __slots__ = ("done", "error", "current_file", "total", "completed")
+    __slots__ = ("done", "error", "current_file", "total", "completed", "bytes_mode")
 
-    def __init__(self, total: int) -> None:
+    def __init__(self, total: int, *, bytes_mode: bool = False) -> None:
         self.done = threading.Event()
         self.error: Optional[str] = None
         self.current_file = ""
         self.total = total
         self.completed = 0
+        self.bytes_mode = bytes_mode
 
 
 def _extract_bundled_data_assets_from_linux_zip(zip_path: Path, repo_root: Path) -> int:
@@ -449,6 +450,49 @@ def _extract_bundled_data_assets_from_linux_zip(zip_path: Path, repo_root: Path)
                 dst.write(src.read())
             count += 1
     return count
+
+
+def _worker_download_url_to_file(url: str, dest_path: Path, dl_state: _DownloadState) -> None:
+    """Download a release asset to disk (Windows ATAKSetup.exe)."""
+    try:
+        req = urllib.request.Request(url, headers=_GH_HEADERS)
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            cl = resp.headers.get("Content-Length", "").strip()
+            total_bytes = int(cl) if cl.isdigit() else 0
+            dl_state.bytes_mode = True
+            dl_state.total = max(total_bytes, 1)
+            dl_state.current_file = dest_path.name
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = dest_path.with_suffix(dest_path.suffix + ".part")
+            read = 0
+            with tmp_path.open("wb") as out:
+                while True:
+                    chunk = resp.read(1024 * 256)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    read += len(chunk)
+                    dl_state.completed = read
+                    if total_bytes <= 0:
+                        dl_state.total = max(read, 1)
+            tmp_path.replace(dest_path)
+    except Exception as exc:
+        dl_state.error = str(exc)
+    finally:
+        dl_state.done.set()
+
+
+def _launch_windows_installer(installer_path: Path) -> None:
+    """Run the downloaded ATAKSetup.exe and exit so files are not locked."""
+    if not installer_path.is_file():
+        raise FileNotFoundError(f"Installer not found: {installer_path}")
+    if hasattr(os, "startfile"):
+        os.startfile(str(installer_path))  # type: ignore[attr-defined]
+    else:
+        import subprocess
+
+        subprocess.Popen([str(installer_path)], cwd=str(installer_path.parent), shell=False)
+    sys.exit(0)
 
 
 def _worker_download_and_apply(
@@ -621,6 +665,65 @@ def run_startup_release_update_check(*, app_title: str, script_path: Path) -> No
 
         root.after(150, poll_dl)
 
+    def _poll_download_progress(dl_state: _DownloadState, prog_win: tk.Toplevel, bar: ttk.Progressbar, file_lbl: tk.Label, on_success) -> None:
+        if dl_state.total > 0:
+            bar["value"] = 100 * dl_state.completed / dl_state.total
+        file_lbl.configure(text=dl_state.current_file)
+
+        if dl_state.done.is_set():
+            prog_win.destroy()
+            if dl_state.error:
+                _lift()
+                messagebox.showerror(
+                    app_title,
+                    f"Update failed:\n{dl_state.error}",
+                    parent=root,
+                )
+                root.destroy()
+                return
+            on_success()
+            return
+        root.after(150, lambda: _poll_download_progress(dl_state, prog_win, bar, file_lbl, on_success))
+
+    def start_windows_setup_download(setup_url: str, setup_name: str) -> None:
+        import tempfile
+
+        update_dir = Path(tempfile.gettempdir()) / "atak-pipeline-update"
+        dest_path = update_dir / setup_name
+        dl_state = _DownloadState(total=1, bytes_mode=True)
+        threading.Thread(
+            target=_worker_download_url_to_file,
+            args=(setup_url, dest_path, dl_state),
+            daemon=True,
+        ).start()
+
+        prog_win = tk.Toplevel(root)
+        prog_win.title(app_title)
+        prog_win.resizable(False, False)
+        frm = tk.Frame(prog_win, padx=20, pady=16)
+        frm.pack()
+        tk.Label(frm, text="Downloading update…", font=("Arial", 10, "bold")).pack(anchor="w")
+        file_lbl = tk.Label(frm, text="", font=("Arial", 9), fg="gray40", width=48, anchor="w")
+        file_lbl.pack(anchor="w", pady=(4, 6))
+        bar = ttk.Progressbar(frm, mode="determinate", length=360, maximum=100)
+        bar.pack(fill="x")
+        prog_win.update_idletasks()
+        _center_window(prog_win)
+        ensure_window_stacking(prog_win)
+
+        def on_success() -> None:
+            _lift()
+            messagebox.showinfo(
+                app_title,
+                "Download complete. The ATAK Pipeline installer will now run.\n"
+                "This app will close so the update can replace the programs.",
+                parent=root,
+            )
+            root.destroy()
+            _launch_windows_installer(dest_path)
+
+        root.after(150, lambda: _poll_download_progress(dl_state, prog_win, bar, file_lbl, on_success))
+
     # ---- version-check phase -----------------------------------------------
     def finish() -> None:
         if check_state.error or not check_state.update_available:
@@ -639,19 +742,32 @@ def run_startup_release_update_check(*, app_title: str, script_path: Path) -> No
             body += notes + "\n\n"
         if is_frozen:
             if sys.platform.startswith("win"):
-                target_url = check_state.windows_setup_url or check_state.release_url or _RELEASES_PAGE
-                target_name = check_state.windows_setup_name or "ATAKSetup-*.exe"
-                body += (
-                    f"Update now? The browser will open the latest Windows installer asset:\n{target_name}"
-                )
+                setup_url = check_state.windows_setup_url
+                setup_name = check_state.windows_setup_name or f"ATAKSetup-v{check_state.remote_version}.exe"
+                if setup_url:
+                    body += (
+                        f"Update now? The latest installer will download and run:\n{setup_name}"
+                    )
+                else:
+                    body += (
+                        "Update now? Your browser will open the latest release page "
+                        f"({check_state.release_url or _RELEASES_PAGE})."
+                    )
             else:
                 target_url = check_state.release_url or _RELEASES_PAGE
                 body += "Update now? The browser will open the latest release page."
 
             _lift()
             if messagebox.askyesno(app_title, body, parent=root):
+                if sys.platform.startswith("win") and check_state.windows_setup_url:
+                    root.withdraw()
+                    start_windows_setup_download(
+                        check_state.windows_setup_url,
+                        check_state.windows_setup_name or f"ATAKSetup-v{check_state.remote_version}.exe",
+                    )
+                    return
                 try:
-                    webbrowser.open(target_url)
+                    webbrowser.open(check_state.release_url or _RELEASES_PAGE)
                 except Exception:
                     pass
             root.destroy()
