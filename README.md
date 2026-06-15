@@ -55,11 +55,15 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.3.40` (tag **`v1.3.40`** on GitHub).
+**Linux / source release:** `v1.3.41` (tag **`v1.3.41`** on GitHub).
 
-**Windows:** Same version as Linux (`v1.3.40`). Build on a Windows VM with PyInstaller — see **Windows build** below.
+**Windows:** Same version as Linux (`v1.3.41`). Build on a Windows VM with PyInstaller — see **Windows build** below.
 
-Version **1.3.40** highlights:
+Version **1.3.41** highlights:
+
+- **Windows auto-update fix:** frozen EXEs now read `VERSION` from the install folder so the startup release check can offer `ATAKSetup-v*.exe` when a newer GitHub release exists.
+
+### Previous release (v1.3.40)
 
 - **Recursive local imagery/DTED lookup:** the folder you pick for local tiles or DTED ZIPs is searched recursively (e.g. `~/Downloads` finds `~/Downloads/Imagery/Kansas/16/x/y.jpg` or nested `StateName/StateName.zip`). Tile lookup matches by zoom/x/y, not region folder name.
 - **Local scan progress:** indexing a local imagery or DTED tree now animates the progress bar and shows files scanned / items found instead of appearing frozen.
