@@ -500,7 +500,83 @@ def github_release_api_headers() -> Dict[str, str]:
     return h
 
 
-def github_latest_release_plugin_apk(owner_repo: str) -> Tuple[str, str, str]:
+def compact_atak_version_key(atak_version: str) -> Optional[str]:
+    """
+  Build key used in many plugin asset names (``uv-560.apk``, ``mesh-551.apk``).
+
+  ``5.6.0.18-f4cee7b9-civ`` → ``560``; ``5.5.1.13-...`` → ``551``.
+    """
+    nums = [int(x) for x in re.findall(r"\d+", atak_version.strip().lstrip("v"))]
+    if len(nums) >= 3:
+        return f"{nums[0]}{nums[1]}{nums[2]}"
+    if len(nums) == 2:
+        return f"{nums[0]}{nums[1]}0"
+    return None
+
+
+def dotted_atak_version_labels(atak_version: str) -> Tuple[str, ...]:
+    """``5.6.0.18-...`` → ``('5.6.0', '5.6')`` for filenames like ``...-5.6.0-civ-release.apk``."""
+    nums = [int(x) for x in re.findall(r"\d+", atak_version.strip().lstrip("v"))]
+    if len(nums) >= 3:
+        return (f"{nums[0]}.{nums[1]}.{nums[2]}", f"{nums[0]}.{nums[1]}")
+    if len(nums) == 2:
+        return (f"{nums[0]}.{nums[1]}.0", f"{nums[0]}.{nums[1]}")
+    return ()
+
+
+def _apk_asset_name_matches_atak_version(name: str, atak_version: str) -> bool:
+    lower = name.lower()
+    key = compact_atak_version_key(atak_version)
+    if key and re.search(rf"(^|[-_.]){re.escape(key)}([-.]|$)", lower):
+        return True
+    for label in dotted_atak_version_labels(atak_version):
+        if label in lower:
+            return True
+    return False
+
+
+def _legacy_prefer_plugin_apk_index(apk_assets: List[Dict[str, Any]]) -> int:
+    def name_lower(i: int) -> str:
+        return str(apk_assets[i].get("name", "")).lower()
+
+    non_debug_idx = [i for i in range(len(apk_assets)) if "debug" not in name_lower(i)]
+    pool_idx = non_debug_idx if non_debug_idx else list(range(len(apk_assets)))
+
+    for i in pool_idx:
+        n = name_lower(i)
+        if "plugin" in n and "release" in n:
+            return i
+    for i in pool_idx:
+        n = name_lower(i)
+        if "release" in n:
+            return i
+    return pool_idx[0]
+
+
+def choose_github_release_apk_asset(
+    apk_assets: List[Dict[str, Any]],
+    *,
+    atak_version: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Pick the release ``.apk`` that matches the target ATAK version when possible."""
+    if not apk_assets:
+        raise RuntimeError("No .apk assets on GitHub release")
+    if atak_version and str(atak_version).strip():
+        matched = [
+            a
+            for a in apk_assets
+            if _apk_asset_name_matches_atak_version(str(a.get("name", "")), str(atak_version))
+        ]
+        if matched:
+            return matched[0]
+    return apk_assets[_legacy_prefer_plugin_apk_index(apk_assets)]
+
+
+def github_latest_release_plugin_apk(
+    owner_repo: str,
+    *,
+    atak_version: Optional[str] = None,
+) -> Tuple[str, str, str]:
     """Pick the plugin ``.apk`` from the repo's **published** GitHub Release marked *latest*.
 
     Uses the GitHub API: ``GET /repos/{{owner}}/{{repo}}/releases/latest`` — i.e. the
@@ -528,26 +604,11 @@ def github_latest_release_plugin_apk(owner_repo: str) -> Tuple[str, str, str]:
             "Upload a release .apk on that release."
         )
 
-    def name_lower(i: int) -> str:
-        return str(apk_assets[i].get("name", "")).lower()
-
-    non_debug_idx = [i for i in range(len(apk_assets)) if "debug" not in name_lower(i)]
-    pool_idx = non_debug_idx if non_debug_idx else list(range(len(apk_assets)))
-
-    def prefer() -> int:
-        for i in pool_idx:
-            n = name_lower(i)
-            if "plugin" in n and "release" in n:
-                return i
-        for i in pool_idx:
-            n = name_lower(i)
-            if "release" in n:
-                return i
-        return pool_idx[0]
-
-    chosen = apk_assets[prefer()]
+    chosen = choose_github_release_apk_asset(apk_assets, atak_version=atak_version)
     filename = str(chosen.get("name", ""))
     url = str(chosen["browser_download_url"])
+    if atak_version and str(atak_version).strip():
+        log(f"GitHub plugin asset for ATAK {atak_version}: {filename}")
     return url, tag, filename
 
 
@@ -849,7 +910,12 @@ def safe_post_report(
             raise
 
 
-def resolve_plugin_apk(manifest: Dict[str, Any], manifest_url: str) -> Tuple[Path, str, bool]:
+def resolve_plugin_apk(
+    manifest: Dict[str, Any],
+    manifest_url: str,
+    *,
+    atak_version: Optional[str] = None,
+) -> Tuple[Path, str, bool]:
     """
     Returns (path to apk, description for report, whether temp file should be deleted).
 
@@ -870,7 +936,9 @@ def resolve_plugin_apk(manifest: Dict[str, Any], manifest_url: str) -> Tuple[Pat
 
     gh = env_optional("ATAK_PLUGIN_GITHUB_REPO")
     if gh:
-        dl_url, rel_tag, asset_name = github_latest_release_plugin_apk(gh)
+        dl_url, rel_tag, asset_name = github_latest_release_plugin_apk(
+            gh, atak_version=atak_version
+        )
         log(
             f"Plugin APK from GitHub Releases (latest): {gh} @ {rel_tag} — asset {asset_name!r}"
         )
@@ -915,7 +983,10 @@ def resolve_plugin_apk(manifest: Dict[str, Any], manifest_url: str) -> Tuple[Pat
     return tmp_path, full, True
 
 
-def resolve_meshcore_plugin_apk() -> Tuple[Path, str, bool]:
+def resolve_meshcore_plugin_apk(
+    *,
+    atak_version: Optional[str] = None,
+) -> Tuple[Path, str, bool]:
     """
     Returns (path to apk, description for report, whether temp file should be deleted)
     for TAK-Meshcore plugin.
@@ -935,7 +1006,9 @@ def resolve_meshcore_plugin_apk() -> Tuple[Path, str, bool]:
 
     gh = env_optional("ATAK_MESHCORE_PLUGIN_GITHUB_REPO") or DEFAULT_MESHCORE_PLUGIN_GITHUB_REPO
     if gh:
-        dl_url, rel_tag, asset_name = github_latest_release_plugin_apk(gh)
+        dl_url, rel_tag, asset_name = github_latest_release_plugin_apk(
+            gh, atak_version=atak_version
+        )
         log(
             f"Meshcore plugin APK from GitHub Releases (latest): {gh} @ {rel_tag} — asset {asset_name!r}"
         )
@@ -998,6 +1071,26 @@ def detect_apk_package_name(apk_path: Path) -> Optional[str]:
         except Exception:
             pass
     return None
+
+
+def resolve_target_atak_version(
+    *,
+    cached_version: str = "",
+    manifest: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Version label used to pick matching plugin APKs (``uv-560.apk``, etc.)."""
+    if cached_version.strip():
+        return cached_version.strip()
+    if manifest:
+        ver = str(manifest.get("atak_version") or "").strip()
+        if ver:
+            return ver
+    inline, _base = parse_inline_atak_from_env()
+    if inline:
+        ver = str(inline.get("atak_version") or "").strip()
+        if ver:
+            return ver
+    return env_optional("ATAK_CIV_VERSION") or ""
 
 
 def resolve_atak_apk(manifest: Dict[str, Any], manifest_url: str) -> Tuple[Path, str, bool]:
@@ -1553,22 +1646,32 @@ class DeployWizard(tk.Tk):
                 self._set_status_async(msg)
 
             plugin_variant = self._plugin_variant()
+            manifest = self._manifest_cache
+            if manifest is None:
+                if self.manifest_url:
+                    _lg.info("Step 5: fetching manifest from %s", self.manifest_url)
+                    manifest = fetch_manifest(self.manifest_url)
+                elif self._inline_atak_manifest:
+                    manifest = dict(self._inline_atak_manifest)
+            target_atak = resolve_target_atak_version(
+                cached_version=self._atak_version_value,
+                manifest=manifest,
+            )
             if plugin_variant == "meshcore":
                 _lg.info("Step 5: resolving TAK-MESHCORE plugin APK source...")
-                apk_path, report_label, is_temp = resolve_meshcore_plugin_apk()
+                apk_path, report_label, is_temp = resolve_meshcore_plugin_apk(
+                    atak_version=target_atak or None,
+                )
                 package_name = detect_apk_package_name(apk_path) or DEFAULT_MESHCORE_PLUGIN_PACKAGE
             else:
-                manifest = self._manifest_cache
                 if manifest is None:
-                    if self.manifest_url:
-                        _lg.info("Step 5: fetching manifest from %s", self.manifest_url)
-                        manifest = fetch_manifest(self.manifest_url)
-                    elif self._inline_atak_manifest:
-                        manifest = dict(self._inline_atak_manifest)
-                    else:
-                        raise RuntimeError("No ATAK deploy configuration")
+                    raise RuntimeError("No ATAK deploy configuration")
                 _lg.info("Step 5: resolving UV-PRO plugin APK source...")
-                apk_path, report_label, is_temp = resolve_plugin_apk(manifest, self._resolve_url_base())
+                apk_path, report_label, is_temp = resolve_plugin_apk(
+                    manifest,
+                    self._resolve_url_base(),
+                    atak_version=target_atak or None,
+                )
                 package_name = DEFAULT_PLUGIN_PACKAGE
             self._plugin_apk_temp = apk_path if is_temp else None
             self._plugin_report_label = report_label

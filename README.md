@@ -55,11 +55,16 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.3.43` (tag **`v1.3.43`** on GitHub).
+**Linux / source release:** `v1.3.44` (tag **`v1.3.44`** on GitHub).
 
-**Windows:** Same version as Linux (`v1.3.43`). Build on a Windows VM with PyInstaller — see **Windows build** below.
+**Windows:** Same version as Linux (`v1.3.44`). Build on a Windows VM with PyInstaller — see **Windows build** below.
 
-Version **1.3.43** highlights:
+Version **1.3.44** highlights:
+
+- **ATAK 5.6 plugin matching:** Device Installer picks the GitHub release APK that matches the manifest ATAK version (e.g. `uv-560.apk` / `mesh-560.apk` for 5.6, not `uv-551.apk`).
+- **ATAK install recovery:** signature mismatch on ATAK upgrade triggers uninstall + retry (same as plugins).
+
+### Previous release (v1.3.43)
 
 - **Windows in-app update (fixed):** Update now always downloads `ATAKSetup-v*.exe` and runs the installer — no browser, no “How do you want to open this file?” dialog.
 - **Recursive local imagery/DTED lookup:** pick a parent folder; tiles and DTED ZIPs are found anywhere under it.
