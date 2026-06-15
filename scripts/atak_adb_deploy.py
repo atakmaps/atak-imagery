@@ -78,6 +78,7 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
 import re
 import shutil
 import subprocess
@@ -1162,6 +1163,8 @@ class DeployWizard(tk.Tk):
         self._plugin_report_label = ""
         # One of: both, both_meshcore, atak, plugin, plugin_meshcore.
         self._install_choice: str = "both"
+        self._ui_msg_queue: queue.SimpleQueue = queue.SimpleQueue()
+        self._ui_pump_active = False
 
         outer = tk.Frame(self, padx=16, pady=16)
         outer.configure(cursor="arrow")
@@ -1293,6 +1296,7 @@ class DeployWizard(tk.Tk):
         self.btn_primary.configure(state="disabled")
         self.btn_secondary.configure(state="disabled")
         self.status.configure(text="Restarting ATAK on device…")
+        self._start_ui_pump()
 
         def work() -> None:
             try:
@@ -1306,7 +1310,7 @@ class DeployWizard(tk.Tk):
                 log("launch_atak before final screen failed")
             # Keep installer alive briefly so restart command settles while app is running.
             time.sleep(5.0)
-            self.after(0, lambda: self._advance(7))
+            self._ui_msg_queue.put(("advance", 7))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -1567,20 +1571,46 @@ class DeployWizard(tk.Tk):
                 except Exception:
                     pass
 
-    def _ui_call(self, fn: Any, *args: Any, **kwargs: Any) -> None:
-        """Schedule a Tk/UI call from any thread."""
-        try:
-            self.after(0, lambda: fn(*args, **kwargs))
-        except Exception:
-            pass
+    def _enqueue_ui_status(self, msg: str) -> None:
+        """Thread-safe status line — worker threads must never touch Tk directly."""
+        self._ui_msg_queue.put(("status", msg))
 
-    def _set_status_async(self, msg: str) -> None:
-        self._ui_call(self.status.configure, text=msg)
+    def _start_ui_pump(self) -> None:
+        if self._ui_pump_active:
+            return
+        self._ui_pump_active = True
+        self._pump_ui_queue()
+
+    def _pump_ui_queue(self) -> None:
+        if not self._ui_pump_active:
+            return
+        try:
+            while True:
+                kind, payload = self._ui_msg_queue.get_nowait()
+                if kind == "status":
+                    self.status.configure(text=str(payload))
+                elif kind == "done_atak":
+                    self._ui_pump_active = False
+                    self.progress.stop()
+                    self._after_install_atak(payload)  # type: ignore[arg-type]
+                    return
+                elif kind == "done_plugin":
+                    self._ui_pump_active = False
+                    self.progress.stop()
+                    self._after_install_plugin(payload)  # type: ignore[arg-type]
+                    return
+                elif kind == "advance":
+                    self._advance(int(payload))
+        except queue.Empty:
+            pass
+        if self._ui_pump_active:
+            self.after(100, self._pump_ui_queue)
 
     def _begin_install_atak(self) -> None:
-        # Run long network/adb work off the Tk thread to keep the UI responsive.
+        # Network/adb on a worker thread; Tk updates only via _pump_ui_queue on main thread.
         self.progress.start(8)
         self.update_idletasks()
+        self._start_ui_pump()
         threading.Thread(target=self._begin_install_atak_worker, daemon=True).start()
 
     def _begin_install_atak_worker(self) -> None:
@@ -1611,7 +1641,7 @@ class DeployWizard(tk.Tk):
                 if pct < last_download_pct + 1 and downloaded < total:
                     return
                 last_download_pct = pct
-                self._set_status_async(
+                self._enqueue_ui_status(
                     f"Downloading ATAK {pct}% "
                     f"({_format_byte_count(downloaded)} / {_format_byte_count(total)})…"
                 )
@@ -1623,7 +1653,7 @@ class DeployWizard(tk.Tk):
             self._atak_version_value = str(version)
 
             def ui_install(msg: str) -> None:
-                self._set_status_async(msg)
+                self._enqueue_ui_status(msg)
 
             _lg.info("Step 3: installing ATAK APK (%s)", apk_path.name)
             install_apk(
@@ -1654,8 +1684,7 @@ class DeployWizard(tk.Tk):
             err = e
             log(traceback.format_exc())
         finally:
-            self._ui_call(self.progress.stop)
-            self._ui_call(self._after_install_atak, err)
+            self._ui_msg_queue.put(("done_atak", err))
 
     def _after_install_atak(self, err: Optional[Exception]) -> None:
         if err:
@@ -1673,9 +1702,9 @@ class DeployWizard(tk.Tk):
         self._advance(4)
 
     def _begin_install_plugin(self) -> None:
-        # Keep Tk responsive while plugin download/install runs.
         self.progress.start(8)
         self.update_idletasks()
+        self._start_ui_pump()
         threading.Thread(target=self._begin_install_plugin_worker, daemon=True).start()
 
     def _begin_install_plugin_worker(self) -> None:
@@ -1684,7 +1713,7 @@ class DeployWizard(tk.Tk):
         err: Optional[Exception] = None
         try:
             def ui_install(msg: str) -> None:
-                self._set_status_async(msg)
+                self._enqueue_ui_status(msg)
 
             plugin_variant = self._plugin_variant()
             manifest = self._manifest_cache
@@ -1746,11 +1775,7 @@ class DeployWizard(tk.Tk):
             err = e
             log(traceback.format_exc())
         finally:
-            try:
-                self.progress.stop()
-            except Exception:
-                pass
-            self._ui_call(self._after_install_plugin, err)
+            self._ui_msg_queue.put(("done_plugin", err))
 
     def _after_install_plugin(self, err: Optional[Exception]) -> None:
         self.progress.stop()
