@@ -488,6 +488,18 @@ def compact_atak_version_key(atak_version: str) -> Optional[str]:
     return None
 
 
+def short_atak_version_key(atak_version: str) -> Optional[str]:
+    """
+    Short key for newer GitHub asset names (``uv56.apk``, ``mc55.apk``).
+
+    ``5.6.0.18-...`` → ``56``; ``5.5.1.13-...`` → ``55``.
+    """
+    nums = [int(x) for x in re.findall(r"\d+", atak_version.strip().lstrip("v"))]
+    if len(nums) >= 2:
+        return f"{nums[0]}{nums[1]}"
+    return None
+
+
 def dotted_atak_version_labels(atak_version: str) -> Tuple[str, ...]:
     """``5.6.0.18-...`` → ``('5.6.0', '5.6')`` for filenames like ``...-5.6.0-civ-release.apk``."""
     nums = [int(x) for x in re.findall(r"\d+", atak_version.strip().lstrip("v"))]
@@ -502,6 +514,9 @@ def _apk_asset_name_matches_atak_version(name: str, atak_version: str) -> bool:
     lower = name.lower()
     key = compact_atak_version_key(atak_version)
     if key and re.search(rf"(^|[-_.]){re.escape(key)}([-.]|$)", lower):
+        return True
+    short = short_atak_version_key(atak_version)
+    if short and re.search(rf"(^|[-_.])(uv|mc|mesh[-_.]?){re.escape(short)}([-.]|$)", lower):
         return True
     for label in dotted_atak_version_labels(atak_version):
         if label in lower:
@@ -586,12 +601,23 @@ def github_latest_release_plugin_apk(
     return url, tag, filename
 
 
+def _format_byte_count(n: int) -> str:
+    if n >= 1024 * 1024 * 1024:
+        return f"{n / (1024 ** 3):.1f} GB"
+    if n >= 1024 * 1024:
+        return f"{n / (1024 ** 2):.1f} MB"
+    if n >= 1024:
+        return f"{n / 1024:.0f} KB"
+    return f"{n} B"
+
+
 def download_file(url: str, dest: Path, status_cb=None, timeout: int = 600) -> None:
     headers = {"User-Agent": USER_AGENT}
     with requests.get(url, headers=headers, stream=True, timeout=timeout) as r:
         r.raise_for_status()
         total = int(r.headers.get("Content-Length") or 0)
         downloaded = 0
+        last_log_pct = -1
         dest.parent.mkdir(parents=True, exist_ok=True)
         with open(dest, "wb") as f:
             for chunk in r.iter_content(chunk_size=1024 * 256):
@@ -601,6 +627,16 @@ def download_file(url: str, dest: Path, status_cb=None, timeout: int = 600) -> N
                 downloaded += len(chunk)
                 if status_cb and total:
                     status_cb(downloaded, total)
+                if total:
+                    pct = min(100, int(100 * downloaded / total))
+                    if pct >= last_log_pct + 5 or downloaded >= total:
+                        log(
+                            f"Download progress: {pct}% "
+                            f"({_format_byte_count(downloaded)} / {_format_byte_count(total)})"
+                        )
+                        last_log_pct = pct
+                elif downloaded and downloaded % (50 * 1024 * 1024) < len(chunk):
+                    log(f"Download progress: {_format_byte_count(downloaded)} (size unknown)")
 
 
 def install_apk(serial: str, apk_path: Path, status_cb=None, *, package_name: Optional[str] = None) -> None:
@@ -1067,7 +1103,12 @@ def resolve_target_atak_version(
     return env_optional("ATAK_CIV_VERSION") or ""
 
 
-def resolve_atak_apk(manifest: Dict[str, Any], manifest_url: str) -> Tuple[Path, str, bool]:
+def resolve_atak_apk(
+    manifest: Dict[str, Any],
+    manifest_url: str,
+    *,
+    status_cb=None,
+) -> Tuple[Path, str, bool]:
     ver = manifest.get("atak_version")
     url = manifest.get("atak_apk_url")
     if not ver or not url:
@@ -1076,7 +1117,11 @@ def resolve_atak_apk(manifest: Dict[str, Any], manifest_url: str) -> Tuple[Path,
     fd, tmp = tempfile.mkstemp(suffix=".apk")
     os.close(fd)
     tmp_path = Path(tmp)
-    download_file(full, tmp_path)
+    logging.getLogger("atak_installer").info("Step 3: downloading ATAK APK from %s", full)
+    download_file(full, tmp_path, status_cb=status_cb)
+    logging.getLogger("atak_installer").info(
+        "Step 3: ATAK APK download complete (%s)", _format_byte_count(tmp_path.stat().st_size)
+    )
     return tmp_path, str(ver), True
 
 
@@ -1550,8 +1595,30 @@ class DeployWizard(tk.Tk):
                 _lg.info("Step 3: fetching manifest from %s", self.manifest_url)
                 manifest = fetch_manifest(self.manifest_url)
             self._manifest_cache = manifest
+            _lg.info(
+                "Step 3: manifest OK — target ATAK %s",
+                manifest.get("atak_version", "?"),
+            )
             _lg.info("Step 3: resolving ATAK APK URL/version...")
-            apk_path, version, is_temp = resolve_atak_apk(manifest, base)
+
+            last_download_pct = -1
+
+            def ui_download_progress(downloaded: int, total: int) -> None:
+                nonlocal last_download_pct
+                if not total:
+                    return
+                pct = min(100, int(100 * downloaded / total))
+                if pct < last_download_pct + 1 and downloaded < total:
+                    return
+                last_download_pct = pct
+                self._set_status_async(
+                    f"Downloading ATAK {pct}% "
+                    f"({_format_byte_count(downloaded)} / {_format_byte_count(total)})…"
+                )
+
+            apk_path, version, is_temp = resolve_atak_apk(
+                manifest, base, status_cb=ui_download_progress
+            )
             self._atak_apk_temp = apk_path if is_temp else None
             self._atak_version_value = str(version)
 
