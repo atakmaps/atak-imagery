@@ -48,6 +48,7 @@ HELPER_MODULES: tuple[str, ...] = (
     "git_update_check",
     "bundled_plugin_install",
     "usgs_throughput_probe",
+    "local_asset_lookup",
     "atak_osmdroid_sqlite_footprint",
     "tk_window_scaling",
     "win_subprocess",
@@ -99,6 +100,7 @@ SCRIPT_BUNDLES: tuple[str, ...] = (
     "win_subprocess.py",
     "bundled_plugin_install.py",
     "usgs_throughput_probe.py",
+    "local_asset_lookup.py",
     "atak_osmdroid_sqlite_footprint.py",
 )
 

@@ -1208,6 +1208,7 @@ def run_dted_inline_for_states(
     log_sink: Callable[[str], None],
     progress: object,
     local_state_zip_root: Optional[Path] = None,
+    local_dted_index: Optional[Dict[str, Path]] = None,
     radius_bbox_lonlat: Optional[Tuple[float, float, float, float]] = None,
 ) -> Optional[Path]:
     """
@@ -1215,9 +1216,11 @@ def run_dted_inline_for_states(
     Uses progress.wait_if_paused / set_status / set_progress_fraction / set_stat; optional set_speed_eta cleared when present.
     Returns path to dted2_*.zip or None if nothing could be produced.
 
-    When ``local_state_zip_root`` is set, looks for ``chosen_folder/StateName/StateName.zip`` first and copies it
-    before using HTTP (offline-friendly if you mirror the server tree).
+    When ``local_state_zip_root`` is set, looks for ``StateName/StateName.zip`` under that folder
+    (searched recursively) before using HTTP.
     """
+    from local_asset_lookup import build_dted_state_zip_index, find_local_dted_state_zip
+
     import tempfile
 
     if not selected_states:
@@ -1243,6 +1246,11 @@ def run_dted_inline_for_states(
     log_sink(f"DTED: temp work folder {temp_root}")
     if local_state_zip_root is not None:
         log_sink(f"DTED: local state ZIP tree (copy first): {local_state_zip_root}")
+        if local_dted_index is None:
+            local_dted_index = build_dted_state_zip_index(local_state_zip_root)
+            log_sink(
+                f"DTED: indexed {len(local_dted_index):,} local state ZIP(s) under {local_state_zip_root}"
+            )
     log_sink(f"DTED: server base URL {BASE_URL}")
     if radius_bbox_lonlat is not None:
         rw, rs, re_, rn = radius_bbox_lonlat
@@ -1288,9 +1296,9 @@ def run_dted_inline_for_states(
 
             local_zip: Optional[Path] = None
             if local_state_zip_root is not None:
-                cand = local_state_zip_root / state_name / f"{state_name}.zip"
-                if cand.is_file():
-                    local_zip = cand
+                local_zip = find_local_dted_state_zip(
+                    local_state_zip_root, local_dted_index, state_name
+                )
 
             if local_zip is not None:
                 progress.set_status(f"DTED: copying {state_name} from local tree…")

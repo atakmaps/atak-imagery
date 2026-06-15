@@ -72,6 +72,7 @@ DIRECT_COPY = (
     "git_update_check.py",
     "bundled_plugin_install.py",
     "usgs_throughput_probe.py",
+    "local_asset_lookup.py",
     "atak_osmdroid_sqlite_footprint.py",
 )
 

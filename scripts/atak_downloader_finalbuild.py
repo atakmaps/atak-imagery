@@ -157,6 +157,13 @@ from imagery_tile_selection import (  # noqa: E402
     square_lonlat_footprint_for_radius_miles,
     state_names_intersecting_geodesic_circle,
 )
+from local_asset_lookup import (  # noqa: E402
+    ScanProgressCb,
+    build_dted_state_zip_index,
+    build_imagery_tile_index,
+    find_local_dted_state_zip,
+    find_local_imagery_tile,
+)
 
 # Load on the main thread only: first-importing ``atak_adb_deploy`` from the download worker
 # pulls in tkinter on a background thread and can abort with Tcl_AsyncDelete on Linux/X11.
@@ -2279,7 +2286,9 @@ class DownloadScopeDialog(tk.Tk):
         _add_wrapped(
             scroll_inner,
             text=(
-                "Any required imagery not present on the local disk will be downloaded from USGS. "
+                "Any required imagery not present on the local disk will be downloaded from USGS or "
+                "Google Hybrid (radius z16–20). The folder you pick is searched recursively — for example "
+                "selecting ~/Downloads will still find tiles under ~/Downloads/Imagery/RegionName/… "
                 "Leave blank if you do not have the imagery required to build your selection."
             ),
             justify="left",
@@ -2325,6 +2334,8 @@ class DownloadScopeDialog(tk.Tk):
             scroll_inner,
             text=(
                 "Any required elevation not present on the local disk will be downloaded. "
+                "The folder you pick is searched recursively — for example selecting ~/Downloads will "
+                "still find ~/Downloads/DTED/Kansas/Kansas.zip. "
                 "Leave blank if you do not have the elevation data required to build your selection."
             ),
             justify="left",
@@ -3592,16 +3603,14 @@ def get_download_session() -> requests.Session:
 def plan_requires_network_for_imagery(
     plan: List[Tuple[str, int, int, int, Path]],
     raw_imagery_root: Optional[Path],
+    imagery_index: Optional[Dict[Tuple[int, int, int], Path]] = None,
 ) -> bool:
     """True if any planned tile is not already present and not available under raw_imagery_root."""
-    raw = raw_imagery_root if raw_imagery_root is not None and raw_imagery_root.is_dir() else None
     for state_label, z, x, y, out_path in plan:
         if out_path.is_file():
             continue
-        if raw is not None:
-            local = raw / state_label / str(z) / str(x) / f"{y}.jpg"
-            if local.is_file():
-                continue
+        if find_local_imagery_tile(raw_imagery_root, imagery_index, state_label, z, x, y) is not None:
+            continue
         return True
     return False
 
@@ -3609,18 +3618,43 @@ def plan_requires_network_for_imagery(
 def dted_requires_network_fetch(
     dted_state_list: List[str],
     local_dted_root: Optional[Path],
+    dted_index: Optional[Dict[str, Path]] = None,
 ) -> bool:
     """True if inline DTED would need to download at least one state zip over the network."""
     if not dted_state_list:
         return False
-    root = local_dted_root if local_dted_root is not None and local_dted_root.is_dir() else None
-    if root is None:
-        return True
     for state_name in dted_state_list:
-        cand = root / state_name / f"{state_name}.zip"
-        if not cand.is_file():
+        if find_local_dted_state_zip(local_dted_root, dted_index, state_name) is None:
             return True
     return False
+
+
+def _make_local_scan_progress(
+    progress: "ProgressWindow",
+    *,
+    status_label: str,
+    item_noun: str,
+    frac_start: float,
+    frac_span: float,
+) -> ScanProgressCb:
+    """Return a callback that animates the progress bar while indexing a local tree."""
+    started_at = time.time()
+
+    def _cb(paths_seen: int, items_indexed: int) -> None:
+        progress.wait_if_paused()
+        elapsed = time.time() - started_at
+        # Rise with files visited; gentle pulse so the bar keeps moving between updates.
+        base = min(0.90, 1.0 - math.exp(-paths_seen / 5000.0))
+        pulse = 0.035 * math.sin(elapsed * 4.5)
+        inner = max(0.04, min(0.94, base + pulse))
+        frac = frac_start + frac_span * inner
+        progress.set_status(status_label)
+        progress.set_progress_fraction(
+            min(frac_start + frac_span * 0.99, frac),
+            f"Scanned {paths_seen:,} files · {items_indexed:,} {item_noun}",
+        )
+
+    return _cb
 
 
 def http_host_reachable(url: str, timeout: float = 6.0) -> bool:
@@ -3649,19 +3683,19 @@ def fetch_tile(
     *,
     state_label: str,
     raw_imagery_root: Optional[Path] = None,
+    imagery_index: Optional[Dict[Tuple[int, int, int], Path]] = None,
 ) -> Tuple[str, int]:
     if out_path.exists():
         return "existing", 0
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    if raw_imagery_root is not None and raw_imagery_root.is_dir():
-        local = raw_imagery_root / state_label / str(z) / str(x) / f"{y}.jpg"
-        if local.is_file():
-            try:
-                shutil.copy2(local, out_path)
-                return "downloaded", local.stat().st_size
-            except Exception as e:
-                log(f"ERROR copying local tile {local}: {e}")
+    local = find_local_imagery_tile(raw_imagery_root, imagery_index, state_label, z, x, y)
+    if local is not None:
+        try:
+            shutil.copy2(local, out_path)
+            return "existing", 0
+        except Exception as e:
+            log(f"ERROR copying local tile {local}: {e}")
 
     url = imagery_download_url(z, x, y)
     bytes_written = 0
@@ -3704,22 +3738,75 @@ def run_download(
 ) -> None:
     stats = {"downloaded": 0, "existing": 0, "failed": 0, "missing": 0}
     executor: Optional[ThreadPoolExecutor] = None
+    imagery_index: Optional[Dict[Tuple[int, int, int], Path]] = None
+    dted_index: Optional[Dict[str, Path]] = None
 
     if raw_imagery_root is not None:
         raw_imagery_root = raw_imagery_root.expanduser()
         if not raw_imagery_root.is_dir():
             log(f"Raw imagery root not found or not a directory (ignored): {raw_imagery_root}")
             raw_imagery_root = None
-        else:
-            log(f"Raw imagery tree (try local copy before HTTP): {raw_imagery_root}")
 
     if local_dted_root is not None:
         local_dted_root = local_dted_root.expanduser()
         if not local_dted_root.is_dir():
             log(f"Local DTED root not found or not a directory (ignored): {local_dted_root}")
             local_dted_root = None
-        else:
-            log(f"Local DTED state zip tree (copy before network): {local_dted_root}")
+
+    local_scan_steps = int(raw_imagery_root is not None) + int(local_dted_root is not None)
+    scan_step = 0
+
+    if raw_imagery_root is not None:
+        frac_start = scan_step / local_scan_steps if local_scan_steps else 0.0
+        frac_span = 1.0 / local_scan_steps if local_scan_steps else 1.0
+        scan_step += 1
+        progress.set_status(f"Scanning local imagery under {raw_imagery_root.name}…")
+        progress.set_progress_fraction(
+            frac_start + 0.01 * frac_span,
+            "Scanning local imagery…",
+        )
+        log(f"Raw imagery tree (try local copy before HTTP): {raw_imagery_root}")
+        imagery_index = build_imagery_tile_index(
+            raw_imagery_root,
+            _make_local_scan_progress(
+                progress,
+                status_label=f"Scanning local imagery under {raw_imagery_root.name}…",
+                item_noun="tiles found",
+                frac_start=frac_start,
+                frac_span=frac_span,
+            ),
+        )
+        progress.set_progress_fraction(
+            frac_start + frac_span,
+            f"Indexed {len(imagery_index):,} local imagery tile(s)",
+        )
+        log(f"Indexed {len(imagery_index):,} local imagery tile(s) under {raw_imagery_root}")
+
+    if local_dted_root is not None:
+        frac_start = scan_step / local_scan_steps if local_scan_steps else 0.0
+        frac_span = 1.0 / local_scan_steps if local_scan_steps else 1.0
+        scan_step += 1
+        progress.set_status(f"Scanning local DTED under {local_dted_root.name}…")
+        progress.set_progress_fraction(
+            frac_start + 0.01 * frac_span,
+            "Scanning local DTED…",
+        )
+        log(f"Local DTED state zip tree (copy before network): {local_dted_root}")
+        dted_index = build_dted_state_zip_index(
+            local_dted_root,
+            _make_local_scan_progress(
+                progress,
+                status_label=f"Scanning local DTED under {local_dted_root.name}…",
+                item_noun="state ZIP(s) found",
+                frac_start=frac_start,
+                frac_span=frac_span,
+            ),
+        )
+        progress.set_progress_fraction(
+            frac_start + frac_span,
+            f"Indexed {len(dted_index):,} local DTED state ZIP(s)",
+        )
+        log(f"Indexed {len(dted_index):,} local DTED state ZIP(s) under {local_dted_root}")
 
     radius_mode = radius_center is not None and radius_miles is not None
     radius_folder = (radius_region_folder or RADIUS_REGION_FOLDER) if radius_mode else ""
@@ -3907,8 +3994,8 @@ def run_download(
         else:
             dted_state_list = list(state_names)
 
-        need_img_net = plan_requires_network_for_imagery(plan, raw_imagery_root)
-        need_dted_net = dted_requires_network_fetch(dted_state_list, local_dted_root)
+        need_img_net = plan_requires_network_for_imagery(plan, raw_imagery_root, imagery_index)
+        need_dted_net = dted_requires_network_fetch(dted_state_list, local_dted_root, dted_index)
         plan_uses_usgs = any(not is_google_hybrid_zoom(z) for _, z, _, _, _ in plan)
         plan_uses_google = any(is_google_hybrid_zoom(z) for _, z, _, _, _ in plan)
         if need_img_net or need_dted_net:
@@ -3966,6 +4053,7 @@ def run_download(
                 out_path,
                 state_label=state_name,
                 raw_imagery_root=raw_imagery_root,
+                imagery_index=imagery_index,
             )
             return state_name, z, x, y, result, bytes_written
 
@@ -3996,8 +4084,6 @@ def run_download(
                     progress.wait_if_paused()
                     tile = future_to_tile.pop(future)
                     state_name, z, x, y, out_path = tile
-                    progress.set_status(f"Downloading {state_name} | zoom {z} | x={x} y={y}")
-
                     try:
                         _, _, _, _, result, bytes_written = future.result()
                     except CancelledError:
@@ -4011,6 +4097,17 @@ def run_download(
                     stats[result] += 1
                     downloaded_bytes += bytes_written
                     completed += 1
+
+                    if result == "existing":
+                        progress.set_status(f"Existing {state_name} | zoom {z} | x={x} y={y}")
+                        log(f"Existing {state_name} z{z}/{x}/{y}")
+                    elif result == "missing":
+                        progress.set_status(f"Missing {state_name} | zoom {z} | x={x} y={y}")
+                        log(f"Missing {state_name} z{z}/{x}/{y}")
+                    elif result == "failed":
+                        progress.set_status(f"Failed {state_name} | zoom {z} | x={x} y={y}")
+                    else:
+                        progress.set_status(f"Downloading {state_name} | zoom {z} | x={x} y={y}")
 
                     progress.set_progress(completed, total)
                     for key, value in stats.items():
@@ -4190,6 +4287,7 @@ def run_download(
                         log_sink=log,
                         progress=progress,
                         local_state_zip_root=local_dted_root,
+                        local_dted_index=dted_index,
                         radius_bbox_lonlat=radius_bbox_for_dted,
                     )
                     if dted_zip is not None:

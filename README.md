@@ -55,11 +55,17 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.3.39` (tag **`v1.3.39`** on GitHub).
+**Linux / source release:** `v1.3.40` (tag **`v1.3.40`** on GitHub).
 
-**Windows:** Same version as Linux (`v1.3.39`). Build on a Windows VM with PyInstaller — see **Windows build** below.
+**Windows:** Same version as Linux (`v1.3.40`). Build on a Windows VM with PyInstaller — see **Windows build** below.
 
-Version **1.3.39** highlights:
+Version **1.3.40** highlights:
+
+- **Recursive local imagery/DTED lookup:** the folder you pick for local tiles or DTED ZIPs is searched recursively (e.g. `~/Downloads` finds `~/Downloads/Imagery/Kansas/16/x/y.jpg` or nested `StateName/StateName.zip`). Tile lookup matches by zoom/x/y, not region folder name.
+- **Local scan progress:** indexing a local imagery or DTED tree now animates the progress bar and shows files scanned / items found instead of appearing frozen.
+- **Existing tile logging:** tiles already on disk or copied from a local tree log as `Existing` per tile so the log scrolls through skipped work.
+
+### Previous release (v1.3.39)
 
 - **Google Hybrid radius imagery:** fixed-radius downloads can fetch bundled `google_hybrid.xml` tiles at zoom **16–20** (entire-state downloads remain USGS z10–15). See README user-acceptance note for third-party tile use.
 - **Radius DTED clip:** DTED extract/pack now keeps only cells overlapping the radius bbox; logs clarify that full state ZIPs are still downloaded from the server before clipping.
