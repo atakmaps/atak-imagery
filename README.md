@@ -55,11 +55,15 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.3.42` (tag **`v1.3.42`** on GitHub).
+**Linux / source release:** `v1.3.43` (tag **`v1.3.43`** on GitHub).
 
-**Windows:** Same version as Linux (`v1.3.42`). Build on a Windows VM with PyInstaller — see **Windows build** below.
+**Windows:** Same version as Linux (`v1.3.43`). Build on a Windows VM with PyInstaller — see **Windows build** below.
 
-Version **1.3.42** highlights:
+Version **1.3.43** highlights:
+
+- **Release bump for Windows in-app update testing** (no functional changes beyond version label).
+
+### Previous release (v1.3.42)
 
 - **Windows in-app update:** choosing Update now downloads `ATAKSetup-v*.exe` and launches the installer directly (no “How do you want to open this file?” dialog).
 
