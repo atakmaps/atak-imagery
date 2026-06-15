@@ -61,19 +61,19 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 Version **1.3.43** highlights:
 
-- **Release bump for Windows in-app update testing** (no functional changes beyond version label).
+- **Windows in-app update (fixed):** Update now always downloads `ATAKSetup-v*.exe` and runs the installer — no browser, no “How do you want to open this file?” dialog.
+- **Recursive local imagery/DTED lookup:** pick a parent folder; tiles and DTED ZIPs are found anywhere under it.
+- **Local scan progress** and **Existing** tile logging during download.
 
 ### Previous release (v1.3.42)
 
-- **Windows in-app update:** choosing Update now downloads `ATAKSetup-v*.exe` and launches the installer directly (no “How do you want to open this file?” dialog).
+- First attempt at direct Windows installer download (browser fallback when GitHub API omitted the exe asset).
 
 ### Previous release (v1.3.41)
 
-- **Recursive local imagery/DTED lookup:** the folder you pick for local tiles or DTED ZIPs is searched recursively (e.g. `~/Downloads` finds `~/Downloads/Imagery/Kansas/16/x/y.jpg` or nested `StateName/StateName.zip`). Tile lookup matches by zoom/x/y, not region folder name.
-- **Local scan progress:** indexing a local imagery or DTED tree now animates the progress bar and shows files scanned / items found instead of appearing frozen.
-- **Existing tile logging:** tiles already on disk or copied from a local tree log as `Existing` per tile so the log scrolls through skipped work.
+- **Windows auto-update fix:** frozen EXEs read `VERSION` from the install folder for release comparison.
 
-### Previous release (v1.3.39)
+### Previous release (v1.3.40)
 
 - **Google Hybrid radius imagery:** fixed-radius downloads can fetch bundled `google_hybrid.xml` tiles at zoom **16–20** (entire-state downloads remain USGS z10–15). See README user-acceptance note for third-party tile use.
 - **Radius DTED clip:** DTED extract/pack now keeps only cells overlapping the radius bbox; logs clarify that full state ZIPs are still downloaded from the server before clipping.
