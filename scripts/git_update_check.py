@@ -338,6 +338,21 @@ def _parse_semver(v: str) -> Tuple[int, ...]:
     return tuple(parts)
 
 
+def _windows_setup_asset(remote_version: str, setup_name: str = "", setup_url: str = "") -> Tuple[str, str]:
+    """
+    Return (download_url, filename) for the Windows ATAKSetup installer.
+
+    Uses the GitHub release asset URL when the API returned one; otherwise builds the
+    standard releases/download URL so updates work even before assets are listed.
+    """
+    version = remote_version.lstrip("v")
+    name = setup_name or f"ATAKSetup-v{version}.exe"
+    if setup_url:
+        return setup_url, name
+    url = f"https://github.com/{GITHUB_REPO}/releases/download/v{version}/{name}"
+    return url, name
+
+
 def _gh_get(url: str, timeout: int = 15) -> bytes:
     req = urllib.request.Request(url, headers=_GH_HEADERS)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -397,6 +412,12 @@ def _worker_check_github_release(local_version: str, state: _ReleaseCheckState) 
             state.linux_zip_url = url
         if _parse_semver(tag) > _parse_semver(local_version):
             state.update_available = True
+        if state.update_available and not state.windows_setup_url and state.remote_version:
+            state.windows_setup_url, state.windows_setup_name = _windows_setup_asset(
+                state.remote_version,
+                state.windows_setup_name,
+                "",
+            )
     except Exception as exc:
         state.error = str(exc)
     finally:
@@ -486,13 +507,15 @@ def _launch_windows_installer(installer_path: Path) -> None:
     """Run the downloaded ATAKSetup.exe and exit so files are not locked."""
     if not installer_path.is_file():
         raise FileNotFoundError(f"Installer not found: {installer_path}")
-    if hasattr(os, "startfile"):
-        os.startfile(str(installer_path))  # type: ignore[attr-defined]
-    else:
-        import subprocess
+    import subprocess
 
-        subprocess.Popen([str(installer_path)], cwd=str(installer_path.parent), shell=False)
-    sys.exit(0)
+    subprocess.Popen(
+        [str(installer_path)],
+        cwd=str(installer_path.parent),
+        shell=False,
+        close_fds=False,
+    )
+    os._exit(0)
 
 
 def _worker_download_and_apply(
@@ -742,29 +765,22 @@ def run_startup_release_update_check(*, app_title: str, script_path: Path) -> No
             body += notes + "\n\n"
         if is_frozen:
             if sys.platform.startswith("win"):
-                setup_url = check_state.windows_setup_url
-                setup_name = check_state.windows_setup_name or f"ATAKSetup-v{check_state.remote_version}.exe"
-                if setup_url:
-                    body += (
-                        f"Update now? The latest installer will download and run:\n{setup_name}"
-                    )
-                else:
-                    body += (
-                        "Update now? Your browser will open the latest release page "
-                        f"({check_state.release_url or _RELEASES_PAGE})."
-                    )
+                setup_url, setup_name = _windows_setup_asset(
+                    check_state.remote_version,
+                    check_state.windows_setup_name,
+                    check_state.windows_setup_url,
+                )
+                body += (
+                    f"Update now? The latest installer will download and run:\n{setup_name}"
+                )
             else:
-                target_url = check_state.release_url or _RELEASES_PAGE
                 body += "Update now? The browser will open the latest release page."
 
             _lift()
             if messagebox.askyesno(app_title, body, parent=root):
-                if sys.platform.startswith("win") and check_state.windows_setup_url:
+                if sys.platform.startswith("win"):
                     root.withdraw()
-                    start_windows_setup_download(
-                        check_state.windows_setup_url,
-                        check_state.windows_setup_name or f"ATAKSetup-v{check_state.remote_version}.exe",
-                    )
+                    start_windows_setup_download(setup_url, setup_name)
                     return
                 try:
                     webbrowser.open(check_state.release_url or _RELEASES_PAGE)
