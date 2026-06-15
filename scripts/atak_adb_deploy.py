@@ -1466,7 +1466,12 @@ class DeployWizard(tk.Tk):
                 self._set_status_async(msg)
 
             _lg.info("Step 3: installing ATAK APK (%s)", apk_path.name)
-            install_apk(self.selected_serial, apk_path, ui_install)
+            install_apk(
+                self.selected_serial,
+                apk_path,
+                ui_install,
+                package_name=atak_package_name(),
+            )
             _lg.info("Step 3: pushing mobile XML/import files...")
             push_mobile_xml(self.selected_serial or "", log)
 
