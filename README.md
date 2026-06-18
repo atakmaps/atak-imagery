@@ -55,17 +55,16 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.3.45` (tag **`v1.3.45`** on GitHub).
+**Linux / source release:** `v1.3.46` (tag **`v1.3.46`** on GitHub).
 
-**Windows:** Same version as Linux (`v1.3.45`). Build on a Windows VM with PyInstaller — see **Windows build** below.
+**Windows:** Same version as Linux (`v1.3.46`). Build on a Windows VM with PyInstaller — see **Windows build** below.
 
-Version **1.3.45** highlights:
+Version **1.3.46** highlights:
 
-- **Linux Step 3 stability:** ATAK and plugin install run on the Tk main thread — fixes `Tcl_AsyncDelete` crash on Linux Mint during ATAK update.
-- **ATAK download progress:** Step 3 shows percent and size while the ~350 MB ATAK APK downloads (no silent spinner).
-- **Plugin asset names:** matches GitHub Latest `uv56.apk` / `mc56.apk` (and legacy `uv-560` / `mesh-560` names) for ATAK 5.6.
+- **AmRRON report forms:** Imagery Downloader password-protected install now includes `AmRRON Forms.xml`, pushed to `/sdcard/atak/tools/reports/templates` for the ATAK Reports plugin.
+- **Protected import routing:** protected assets can target different device folders (CSV → `tools/import`, report templates → `tools/reports/templates`).
 
-### Previous release (v1.3.44)
+### Previous release (v1.3.45)
 
 - **ATAK 5.6 plugin matching:** Device Installer picks the GitHub release APK that matches the manifest ATAK version (e.g. `uv-560.apk` / `mesh-560.apk` for 5.6, not `uv-551.apk`).
 - **ATAK install recovery:** signature mismatch on ATAK upgrade triggers uninstall + retry (same as plugins).

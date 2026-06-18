@@ -39,6 +39,7 @@ import threading
 import time
 import warnings
 import zipfile
+from urllib.parse import quote
 
 # Suppress the benign "leaked semaphore" warning from Python's resource_tracker
 # subprocess on hard exit (os._exit). The env var propagates to child processes;
@@ -136,13 +137,18 @@ PROTECTED_IMPORT_GITHUB_REPO = (
     .strip()
 )
 PROTECTED_IMPORT_RELEASE_TAG = (os.environ.get("ATAK_PROTECTED_IMPORT_RELEASE_TAG") or "").strip()
+DEFAULT_PROTECTED_IMPORT_ASSET_NAMES = (
+    "AmRRON-Default-v1.0.csv.zip,"
+    "AmRRON Forms.xml.zip@/sdcard/atak/tools/reports/templates"
+)
 PROTECTED_IMPORT_ASSET_NAMES = [
     s.strip()
-    for s in (os.environ.get("ATAK_PROTECTED_IMPORT_ASSET_NAMES") or "AmRRON-Default-v1.0.csv.zip").split(",")
+    for s in (os.environ.get("ATAK_PROTECTED_IMPORT_ASSET_NAMES") or DEFAULT_PROTECTED_IMPORT_ASSET_NAMES).split(",")
     if s.strip()
 ]
 MOBILE_XML_DEVICE_PATH = "/sdcard/atak/imagery/mobile/mapsources"
 MOBILE_IMPORT_DEVICE_PATH = "/sdcard/atak/tools/import"
+MOBILE_REPORTS_TEMPLATES_DEVICE_PATH = "/sdcard/atak/tools/reports/templates"
 MOBILE_OVERLAY_DEVICE_PATH = "/sdcard/Download"
 LAST_IMAGERY_ROOT_FILE = RUNTIME_STATE_DIR / ".last_imagery_root.txt"
 # Written after each successful imagery download: state folder names (for SQLite builder filter).
@@ -718,6 +724,19 @@ def _resolve_addon_plugin_apks(log_sink: Callable[[str], None]) -> List[Dict[str
     return out_local
 
 
+def _parse_protected_import_asset_entry(entry: str) -> Tuple[str, str]:
+    """Return ``(release_asset_name, device_dir)``; optional ``@/device/path`` suffix."""
+    text = entry.strip()
+    if not text:
+        return "", MOBILE_IMPORT_DEVICE_PATH
+    if "@" in text:
+        asset_name, device_path = text.split("@", 1)
+        asset_name = asset_name.strip()
+        device_path = device_path.strip() or MOBILE_IMPORT_DEVICE_PATH
+        return asset_name, device_path
+    return text, MOBILE_IMPORT_DEVICE_PATH
+
+
 def _protected_import_plain_name(asset_name: str) -> str:
     lower = asset_name.lower()
     if lower.endswith(".zip"):
@@ -733,15 +752,20 @@ def _protected_import_asset_specs() -> List[Dict[str, str]]:
         return []
     owner, repo = owner_repo.split("/", 1)
     specs: List[Dict[str, str]] = []
-    for asset_name in PROTECTED_IMPORT_ASSET_NAMES:
+    for entry in PROTECTED_IMPORT_ASSET_NAMES:
+        asset_name, device_path = _parse_protected_import_asset_entry(entry)
+        if not asset_name:
+            continue
+        asset_url_name = quote(asset_name)
         if PROTECTED_IMPORT_RELEASE_TAG:
-            url = f"https://github.com/{owner}/{repo}/releases/download/{PROTECTED_IMPORT_RELEASE_TAG}/{asset_name}"
+            url = f"https://github.com/{owner}/{repo}/releases/download/{PROTECTED_IMPORT_RELEASE_TAG}/{asset_url_name}"
         else:
-            url = f"https://github.com/{owner}/{repo}/releases/latest/download/{asset_name}"
+            url = f"https://github.com/{owner}/{repo}/releases/latest/download/{asset_url_name}"
         specs.append(
             {
                 "asset_name": asset_name,
                 "plain_name": _protected_import_plain_name(asset_name),
+                "device_path": device_path,
                 "url": url,
             }
         )
@@ -752,10 +776,11 @@ def _missing_protected_import_specs(serial: str) -> List[Dict[str, str]]:
     out: List[Dict[str, str]] = []
     for spec in _protected_import_asset_specs():
         plain_name = spec.get("plain_name") or ""
+        device_path = spec.get("device_path") or MOBILE_IMPORT_DEVICE_PATH
         if not plain_name:
             continue
-        device_path = f"{MOBILE_IMPORT_DEVICE_PATH}/{plain_name}"
-        if _adb_device_file_exists(serial, device_path):
+        device_file = f"{device_path}/{plain_name}"
+        if _adb_device_file_exists(serial, device_file):
             continue
         out.append(spec)
     return out
@@ -1211,10 +1236,17 @@ def _install_protected_import_assets(
         log_sink("Protected import install skipped (no password entered).")
         return
 
-    _run_adb(["shell", "mkdir", "-p", MOBILE_IMPORT_DEVICE_PATH], serial=serial, timeout=30)
+    device_dirs = {
+        spec.get("device_path") or MOBILE_IMPORT_DEVICE_PATH
+        for spec in pending_specs
+        if spec.get("device_path") or MOBILE_IMPORT_DEVICE_PATH
+    }
+    for device_dir in sorted(device_dirs):
+        _run_adb(["shell", "mkdir", "-p", device_dir], serial=serial, timeout=30)
     for spec in pending_specs:
         asset_name = spec.get("asset_name") or ""
         plain_name = spec.get("plain_name") or ""
+        device_path = spec.get("device_path") or MOBILE_IMPORT_DEVICE_PATH
         url = spec.get("url") or ""
         if not asset_name or not plain_name or not url:
             continue
@@ -1248,17 +1280,18 @@ def _install_protected_import_assets(
                 log_sink(f"Protected import asset is not a valid zip: {asset_name}")
                 continue
 
-            device_target = f"{MOBILE_IMPORT_DEVICE_PATH}/{plain_name}"
-            progress.set_status(f"Installing protected import: {plain_name}…")
+            installed_name = extracted.name or plain_name
+            device_target = f"{device_path}/{installed_name}"
+            progress.set_status(f"Installing protected import: {installed_name}…")
             r = _run_adb(["push", str(extracted), device_target], serial=serial, timeout=120)
             if r.returncode != 0:
                 msg = (r.stderr or r.stdout or "").strip()
-                log_sink(f"Warning: failed to push protected import {plain_name}: {msg or 'unknown error'}")
+                log_sink(f"Warning: failed to push protected import {installed_name}: {msg or 'unknown error'}")
                 continue
-            log_sink(f"Installed protected import file: {plain_name}")
+            log_sink(f"Installed protected import file: {device_target}")
             if step_cb:
                 try:
-                    step_cb(f"Installed protected import: {plain_name}")
+                    step_cb(f"Installed protected import: {installed_name}")
                 except Exception:
                     pass
 
