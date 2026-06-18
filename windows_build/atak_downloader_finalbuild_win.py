@@ -141,7 +141,7 @@ PROTECTED_IMPORT_GITHUB_REPO = (
 PROTECTED_IMPORT_RELEASE_TAG = (os.environ.get("ATAK_PROTECTED_IMPORT_RELEASE_TAG") or "").strip()
 DEFAULT_PROTECTED_IMPORT_ASSET_NAMES = (
     "AmRRON-Default-v1.0.csv.zip,"
-    "AmRRON Forms.xml.zip@/sdcard/atak/tools/reports/templates"
+    "AmRRON.Forms.xml.zip@/sdcard/atak/tools/reports/templates>AmRRON Forms.xml"
 )
 PROTECTED_IMPORT_ASSET_NAMES = [
     s.strip()
@@ -735,17 +735,24 @@ def _resolve_addon_plugin_apks(log_sink: Callable[[str], None]) -> List[Dict[str
     return out_local
 
 
-def _parse_protected_import_asset_entry(entry: str) -> Tuple[str, str]:
-    """Return ``(release_asset_name, device_dir)``; optional ``@/device/path`` suffix."""
+def _parse_protected_import_asset_entry(entry: str) -> Tuple[str, str, str]:
+    """Return ``(release_asset_name, device_dir, install_filename)``."""
     text = entry.strip()
+    install_name = ""
+    if ">" in text:
+        text, install_name = text.rsplit(">", 1)
+        install_name = install_name.strip()
     if not text:
-        return "", MOBILE_IMPORT_DEVICE_PATH
+        return "", MOBILE_IMPORT_DEVICE_PATH, install_name
     if "@" in text:
         asset_name, device_path = text.split("@", 1)
         asset_name = asset_name.strip()
         device_path = device_path.strip() or MOBILE_IMPORT_DEVICE_PATH
-        return asset_name, device_path
-    return text, MOBILE_IMPORT_DEVICE_PATH
+        plain = install_name or _protected_import_plain_name(asset_name)
+        return asset_name, device_path, plain
+    asset_name = text
+    plain = install_name or _protected_import_plain_name(asset_name)
+    return asset_name, MOBILE_IMPORT_DEVICE_PATH, plain
 
 
 def _protected_import_plain_name(asset_name: str) -> str:
@@ -764,7 +771,7 @@ def _protected_import_asset_specs() -> List[Dict[str, str]]:
     owner, repo = owner_repo.split("/", 1)
     specs: List[Dict[str, str]] = []
     for entry in PROTECTED_IMPORT_ASSET_NAMES:
-        asset_name, device_path = _parse_protected_import_asset_entry(entry)
+        asset_name, device_path, install_name = _parse_protected_import_asset_entry(entry)
         if not asset_name:
             continue
         asset_url_name = quote(asset_name)
@@ -775,7 +782,7 @@ def _protected_import_asset_specs() -> List[Dict[str, str]]:
         specs.append(
             {
                 "asset_name": asset_name,
-                "plain_name": _protected_import_plain_name(asset_name),
+                "plain_name": install_name,
                 "device_path": device_path,
                 "url": url,
             }
