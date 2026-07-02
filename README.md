@@ -55,14 +55,20 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.3.46` (tag **`v1.3.46`** on GitHub).
+**Linux / source release:** `v1.3.47` (tag **`v1.3.47`** on GitHub).
 
-**Windows:** Same version as Linux (`v1.3.46`). Build on a Windows VM with PyInstaller — see **Windows build** below.
+**Windows:** Same version as Linux (`v1.3.47`). Build on a Windows VM with PyInstaller — see **Windows build** below.
 
-Version **1.3.46** highlights:
+Version **1.3.47** highlights:
 
-- **AmRRON report forms:** Imagery Downloader password-protected install now includes `AmRRON Forms.xml`, pushed to `/sdcard/atak/tools/reports/templates` for the ATAK Reports plugin.
-- **Protected import routing:** protected assets can target different device folders (CSV → `tools/import`, report templates → `tools/reports/templates`).
+- **Lean Linux install zip:** release packaging no longer ships local add-on APKs or `tmp/` test data (~133 MB vs ~640 MB); Imagery Downloader fetches plugins from the matching `*-plugin-assets` GitHub release.
+- **Windows parity:** Windows sync no longer embeds bundled plugin APKs in EXEs — same GitHub asset download path as Linux.
+- **Protected import reliability:** `deploy.env` is loaded before downloader constants; `install_linux.sh` seeds plugin-assets release tags from `VERSION`; improved protected-import logging and download error handling.
+
+### Previous release (v1.3.46)
+
+- **AmRRON report forms:** password-protected install includes `AmRRON Forms.xml` → `/sdcard/atak/tools/reports/templates`.
+- **Protected import routing:** per-asset device paths (CSV → `tools/import`, report templates → `tools/reports/templates`).
 
 ### Previous release (v1.3.45)
 

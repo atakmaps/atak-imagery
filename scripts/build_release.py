@@ -28,9 +28,13 @@ EXCLUDE_DIRS = {
     "installer-dist",
     "New Test",
     "windows_build",
+    "tmp",
     ".addon_plugin_asset_cache",
     ".protected_import_asset_cache",
 }
+
+# Add-on plugin APKs ship on GitHub *-plugin-assets releases (see deploy.env.example).
+RELATIVE_EXCLUDE_PREFIXES: tuple[Path, ...] = (Path("scripts/data/bundled_plugins"),)
 
 EXCLUDE_FILES = {
     ".DS_Store",
@@ -50,6 +54,12 @@ def zip_version_label(version: str) -> str:
     v = version.strip()
     return v[1:] if v.startswith("v") else v
 
+def _is_under(relative: Path, prefix: Path) -> bool:
+    rel = relative.as_posix()
+    base = prefix.as_posix()
+    return rel == base or rel.startswith(base + "/")
+
+
 def should_skip(path: Path) -> bool:
     parts = set(path.parts)
     if parts & EXCLUDE_DIRS:
@@ -61,6 +71,13 @@ def should_skip(path: Path) -> bool:
         return True
     if name == "deploy.env":
         return True
+    try:
+        rel = path.relative_to(ROOT)
+    except ValueError:
+        return True
+    for prefix in RELATIVE_EXCLUDE_PREFIXES:
+        if _is_under(rel, prefix):
+            return True
     return False
 
 def build_zip(version: str) -> Path:

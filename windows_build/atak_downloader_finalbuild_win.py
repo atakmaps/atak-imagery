@@ -84,6 +84,33 @@ APP_TITLE = "ATAK Imagery Downloader"
 LAUNCHED_FROM_DEVICE_INSTALLER_ENV = "ATAK_DOWNLOADER_LAUNCHED_FROM_DEVICE_INSTALLER"
 
 
+def _bootstrap_deploy_env() -> None:
+    """Load deploy.env before module-level config constants (matches Device Installer)."""
+    if getattr(sys, "frozen", False):
+        project_root = Path(sys.executable).resolve().parent
+    else:
+        project_root = Path(__file__).resolve().parent.parent
+    for name in ("deploy.env", "deploy.env.example"):
+        path = project_root / name
+        if not path.is_file():
+            continue
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                text = line.strip()
+                if not text or text.startswith("#") or "=" not in text:
+                    continue
+                key, _, val = text.partition("=")
+                key = key.strip()
+                val = val.strip().strip('"').strip("'")
+                if key and not os.environ.get(key, "").strip():
+                    os.environ[key] = val
+        except OSError:
+            pass
+
+
+_bootstrap_deploy_env()
+
+
 def is_launched_from_device_installer() -> bool:
     return os.environ.get(LAUNCHED_FROM_DEVICE_INSTALLER_ENV, "").strip().lower() in (
         "1",
@@ -138,7 +165,11 @@ PROTECTED_IMPORT_GITHUB_REPO = (
     (os.environ.get("ATAK_PROTECTED_IMPORT_GITHUB_REPO") or ADDON_PLUGIN_GITHUB_REPO or "atakmaps/atak-imagery")
     .strip()
 )
-PROTECTED_IMPORT_RELEASE_TAG = (os.environ.get("ATAK_PROTECTED_IMPORT_RELEASE_TAG") or "").strip()
+PROTECTED_IMPORT_RELEASE_TAG = (
+    os.environ.get("ATAK_PROTECTED_IMPORT_RELEASE_TAG")
+    or os.environ.get("ATAK_ADDON_PLUGIN_RELEASE_TAG")
+    or ""
+).strip()
 DEFAULT_PROTECTED_IMPORT_ASSET_NAMES = (
     "AmRRON-Default-v1.0.csv.zip,"
     "AmRRON.Forms.xml.zip@/sdcard/atak/tools/reports/templates>AmRRON Forms.xml"
@@ -804,6 +835,18 @@ def _missing_protected_import_specs(serial: str) -> List[Dict[str, str]]:
     return out
 
 
+def _log_protected_import_config(log_sink: Callable[[str], None]) -> None:
+    log_sink(f"Protected import repo: {PROTECTED_IMPORT_GITHUB_REPO or '(unset)'}")
+    tag = PROTECTED_IMPORT_RELEASE_TAG or "(latest — may 404 if asset is on *-plugin-assets only)"
+    log_sink(f"Protected import release tag: {tag}")
+    for spec in _protected_import_asset_specs():
+        log_sink(
+            "Protected import asset: "
+            f"{spec.get('asset_name')} -> {spec.get('device_path')}/{spec.get('plain_name')} "
+            f"({spec.get('url')})"
+        )
+
+
 def _prompt_protected_import_password(parent: tk.Misc) -> Optional[str]:
     ensure_window_stacking(parent)
     try:
@@ -1247,7 +1290,11 @@ def _install_protected_import_assets(
 ) -> None:
     pending_specs = list(specs or _missing_protected_import_specs(serial))
     if not pending_specs:
+        log_sink("Protected import: nothing pending (files already on device or no assets configured).")
         return
+
+    _log_protected_import_config(log_sink)
+    log_sink(f"Protected import: {len(pending_specs)} file(s) pending install.")
 
     password = _prompt_protected_import_password(progress)
     if not password:
@@ -1277,15 +1324,20 @@ def _install_protected_import_assets(
                 pass
 
         enc_path = PROTECTED_IMPORT_ASSET_CACHE_DIR / asset_name
-        _download_file_with_progress(
-            url,
-            enc_path,
-            progress_cb=(
-                (lambda done, total, name=plain_name: download_progress_cb(name, done, total))
-                if download_progress_cb
-                else None
-            ),
-        )
+        try:
+            _download_file_with_progress(
+                url,
+                enc_path,
+                progress_cb=(
+                    (lambda done, total, name=plain_name: download_progress_cb(name, done, total))
+                    if download_progress_cb
+                    else None
+                ),
+            )
+        except Exception as exc:
+            log_sink(f"Protected import download failed for {asset_name}: {exc}")
+            log_sink(f"  URL: {url}")
+            continue
 
         with tempfile.TemporaryDirectory(prefix="atak_protected_import_") as td:
             tmp_dir = Path(td)
@@ -1579,6 +1631,8 @@ def bundled_addons_available() -> bool:
     if ADDON_PLUGIN_APK_URLS.strip():
         return True
     if ADDON_PLUGIN_GITHUB_REPO.strip():
+        return True
+    if PROTECTED_IMPORT_ASSET_NAMES or DEFAULT_PROTECTED_IMPORT_ASSET_NAMES:
         return True
     return False
 
@@ -1896,7 +1950,8 @@ def _refresh_addons_only_for_device(
         f"Total size = {_format_size_mb(install_bytes)}"
     )
     if protected_count:
-        log_sink(f"{protected_count} protected import file(s) pending install to {MOBILE_IMPORT_DEVICE_PATH}.")
+        _log_protected_import_config(log_sink)
+        log_sink(f"{protected_count} protected import file(s) pending install.")
     if not missing_assets and not install_plugins and not remove_packages and not protected_import_specs:
         log_sink("Device already has all required add-ons.")
         if addons_only:

@@ -105,7 +105,9 @@ sync_bundle_into_install_dir() {
             --exclude 'dist' \
             --exclude 'build' \
             --exclude 'output' \
-            --exclude '.cursor'
+            --exclude '.cursor' \
+            --exclude 'tmp' \
+            --exclude 'scripts/data/bundled_plugins'
     else
         # tar if rsync is missing (should be rare once packaged)
         tar -C "$src" \
@@ -120,6 +122,8 @@ sync_bundle_into_install_dir() {
             --exclude='build' \
             --exclude='output' \
             --exclude='.cursor' \
+            --exclude='tmp' \
+            --exclude='scripts/data/bundled_plugins' \
             -cf - . | tar -C "$dest" -xf -
     fi
 
@@ -148,6 +152,20 @@ append_deploy_env_defaults() {
     fi
     if ! grep -qE "^[[:space:]]*ATAK_ADDON_PLUGIN_GITHUB_REPO=" "$f" 2>/dev/null; then
         echo "ATAK_ADDON_PLUGIN_GITHUB_REPO=atakmaps/atak-imagery" >> "$f"
+    fi
+    local ver=""
+    if [ -f "$ROOT/VERSION" ]; then
+        ver="$(tr -d '[:space:]' < "$ROOT/VERSION")"
+        ver="${ver#v}"
+    fi
+    if [ -n "$ver" ] && ! grep -qE "^[[:space:]]*ATAK_ADDON_PLUGIN_RELEASE_TAG=" "$f" 2>/dev/null; then
+        echo "ATAK_ADDON_PLUGIN_RELEASE_TAG=v${ver}-plugin-assets" >> "$f"
+    fi
+    if [ -n "$ver" ] && ! grep -qE "^[[:space:]]*ATAK_PROTECTED_IMPORT_RELEASE_TAG=" "$f" 2>/dev/null; then
+        echo "ATAK_PROTECTED_IMPORT_RELEASE_TAG=v${ver}-plugin-assets" >> "$f"
+    fi
+    if ! grep -qE "^[[:space:]]*ATAK_PROTECTED_IMPORT_GITHUB_REPO=" "$f" 2>/dev/null; then
+        echo "ATAK_PROTECTED_IMPORT_GITHUB_REPO=atakmaps/atak-imagery" >> "$f"
     fi
 }
 

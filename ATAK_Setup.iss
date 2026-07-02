@@ -5,7 +5,7 @@
 ;   powershell -ExecutionPolicy Bypass -File windows_build\build_windows_installer.ps1
 ;
 #ifndef MyAppVersion
-#define MyAppVersion "1.3.46"
+#define MyAppVersion "1.3.47"
 #endif
 
 #define MyAppName "ATAK Pipeline"

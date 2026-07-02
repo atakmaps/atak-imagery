@@ -372,9 +372,17 @@ def _sync_direct_copies() -> list[str]:
     return updated
 
 
+def _prune_windows_bundled_plugins() -> None:
+    """Add-on APKs are fetched from GitHub *-plugin-assets at runtime — not embedded in EXEs."""
+    dst = WIN / "data" / "bundled_plugins"
+    if dst.is_dir():
+        shutil.rmtree(dst)
+
+
 def _sync_data_subdirs() -> list[str]:
     synced: list[str] = []
-    for sub in ("mobile_xml", "bundled_plugins", "tile_plans"):
+    _prune_windows_bundled_plugins()
+    for sub in ("mobile_xml", "tile_plans"):
         src_dir = SCRIPTS / "data" / sub
         dst_dir = WIN / "data" / sub
         if not src_dir.is_dir():
