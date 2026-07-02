@@ -109,9 +109,8 @@ sync_bundle_into_install_dir() {
             --exclude 'tmp' \
             --exclude 'windows_build' \
             --exclude 'scripts/data/bundled_plugins' \
-            --exclude 'HANDOFF_AGENT.local.md' \
-            --exclude 'RELEASE_CHECKLIST.md' \
-            --exclude 'windows_agent.md' \
+            --include 'README.md' \
+            --exclude '*.md' \
             --exclude 'ATAK_Setup.iss' \
             --exclude 'ATAKPipeline_Setup.iss' \
             --exclude 'install_windows.cmd' \
@@ -140,9 +139,7 @@ sync_bundle_into_install_dir() {
             --exclude='tmp' \
             --exclude='windows_build' \
             --exclude='scripts/data/bundled_plugins' \
-            --exclude='HANDOFF_AGENT.local.md' \
-            --exclude='RELEASE_CHECKLIST.md' \
-            --exclude='windows_agent.md' \
+            --exclude='*.md' \
             --exclude='ATAK_Setup.iss' \
             --exclude='ATAKPipeline_Setup.iss' \
             --exclude='install_windows.cmd' \
@@ -155,6 +152,9 @@ sync_bundle_into_install_dir() {
             --exclude='scripts/windows_bundle_manifest.py' \
             --exclude='scripts/*.ps1' \
             -cf - . | tar -C "$dest" -xf -
+        if [ -f "$src/README.md" ]; then
+            cp -a "$src/README.md" "$dest/README.md"
+        fi
     fi
 
     if [ -n "$deploy_bak" ] && [ -f "$deploy_bak" ]; then

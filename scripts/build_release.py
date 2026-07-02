@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Build the Linux install zip (atak-imagery-v*-linux-install.zip).
 
-Ships Linux runtime (scripts/, data/, install_linux.sh) plus maintainer-facing
-docs (README, Windows Build Setup Instructions, tile-plan handoff). Excludes
-Windows build trees, agent/Cursor handoffs, bundled plugin APKs, and tmp/logs.
+Ships Linux runtime (scripts/, data/, install_linux.sh) and README.md only.
+Excludes Windows build/maintainer docs, agent handoffs, bundled plugin APKs,
+and tmp/logs.
 """
 from __future__ import annotations
 
@@ -42,12 +42,17 @@ EXCLUDE_DIRS = {
 # Add-on plugin APKs ship on GitHub *-plugin-assets releases (see deploy.env.example).
 RELATIVE_EXCLUDE_PREFIXES: tuple[Path, ...] = (Path("scripts/data/bundled_plugins"),)
 
-# Agent / IDE handoffs and internal checklists — never ship in end-user zips.
+# Maintainer / agent docs — never ship in Linux end-user zips.
 INTERNAL_DOC_BASENAMES = {
     "HANDOFF_AGENT.local.md",
+    "HANDOFF_TILE_PLAN_CACHE.md",
     "RELEASE_CHECKLIST.md",
     "windows_agent.md",
+    "Windows Build Setup Instructions.md",
 }
+
+# Only the repo-root README is end-user documentation for Linux installs.
+LINUX_ZIP_README = Path("README.md")
 
 # Windows-only repo files (Linux zip users run install_linux.sh, not Inno/PyInstaller).
 RELATIVE_EXCLUDE_FILES: frozenset[Path] = frozenset(
@@ -111,6 +116,8 @@ def should_skip(path: Path) -> bool:
     except ValueError:
         return True
     if rel in RELATIVE_EXCLUDE_FILES:
+        return True
+    if rel.suffix.lower() == ".md" and rel != LINUX_ZIP_README:
         return True
     for prefix in RELATIVE_EXCLUDE_PREFIXES:
         if _is_under(rel, prefix):
