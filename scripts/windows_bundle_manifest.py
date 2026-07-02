@@ -47,6 +47,7 @@ HELPER_MODULES: tuple[str, ...] = (
     "imagery_tile_selection",
     "git_update_check",
     "bundled_plugin_install",
+    "atak_version_policy",
     "usgs_throughput_probe",
     "local_asset_lookup",
     "atak_osmdroid_sqlite_footprint",

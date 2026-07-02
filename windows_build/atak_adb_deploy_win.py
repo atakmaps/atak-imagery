@@ -78,6 +78,8 @@ from __future__ import annotations
 
 import logging
 import os
+
+from atak_version_policy import is_blocked_legacy_55_apk_filename, require_supported_atak_version
 import re
 import shutil
 import subprocess
@@ -468,6 +470,9 @@ def fetch_manifest(url: str) -> Dict[str, Any]:
     data = r.json()
     if not isinstance(data, dict):
         raise ValueError("Manifest must be a JSON object")
+    ver = str(data.get("atak_version") or "").strip()
+    if ver:
+        require_supported_atak_version(ver)
     return data
 
 
@@ -485,6 +490,7 @@ def parse_inline_atak_from_env() -> Tuple[Optional[Dict[str, Any]], str]:
         base = f"{p.scheme}://{p.netloc}/"
     else:
         base = "https://local.invalid/"
+    require_supported_atak_version(ver)
     return {"atak_version": ver, "atak_apk_url": apk}, base
 
 
@@ -576,7 +582,15 @@ def choose_github_release_apk_asset(
     """Pick the release ``.apk`` that matches the target ATAK version when possible."""
     if not apk_assets:
         raise RuntimeError("No .apk assets on GitHub release")
+    apk_assets = [
+        a
+        for a in apk_assets
+        if not is_blocked_legacy_55_apk_filename(str(a.get("name") or ""))
+    ]
+    if not apk_assets:
+        raise RuntimeError("No supported ATAK 5.6+ .apk assets on GitHub release (5.5.x blocked).")
     if atak_version and str(atak_version).strip():
+        require_supported_atak_version(str(atak_version))
         matched = [
             a
             for a in apk_assets
@@ -1120,13 +1134,17 @@ def resolve_target_atak_version(
     if manifest:
         ver = str(manifest.get("atak_version") or "").strip()
         if ver:
+            require_supported_atak_version(ver)
             return ver
     inline, _base = parse_inline_atak_from_env()
     if inline:
         ver = str(inline.get("atak_version") or "").strip()
         if ver:
             return ver
-    return env_optional("ATAK_CIV_VERSION") or ""
+    ver = env_optional("ATAK_CIV_VERSION") or ""
+    if ver.strip():
+        require_supported_atak_version(ver)
+    return ver
 
 
 def resolve_atak_apk(

@@ -71,6 +71,7 @@ DIRECT_COPY = (
     "imagery_tile_selection.py",
     "git_update_check.py",
     "bundled_plugin_install.py",
+    "atak_version_policy.py",
     "usgs_throughput_probe.py",
     "local_asset_lookup.py",
     "atak_osmdroid_sqlite_footprint.py",

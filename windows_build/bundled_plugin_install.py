@@ -8,6 +8,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable, List, Optional
 
+from atak_version_policy import is_blocked_legacy_55_apk_filename
+
 InstallApkFn = Callable[..., None]
 
 
@@ -21,7 +23,13 @@ def iter_bundled_addon_apks(plugin_root: Path) -> List[Path]:
     if not plugin_root.is_dir():
         return []
     candidates = sorted(
-        (p for p in plugin_root.rglob("*.apk") if p.is_file() and not _is_uvpro_apk_filename(p.name)),
+        (
+            p
+            for p in plugin_root.rglob("*.apk")
+            if p.is_file()
+            and not _is_uvpro_apk_filename(p.name)
+            and not is_blocked_legacy_55_apk_filename(p.name)
+        ),
         key=lambda p: str(p).lower(),
     )
     seen: set[str] = set()

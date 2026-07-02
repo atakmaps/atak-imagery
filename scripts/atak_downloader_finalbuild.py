@@ -206,6 +206,7 @@ from local_asset_lookup import (  # noqa: E402
 # pulls in tkinter on a background thread and can abort with Tcl_AsyncDelete on Linux/X11.
 from atak_adb_deploy import install_apk  # noqa: E402
 from bundled_plugin_install import iter_bundled_addon_apks  # noqa: E402
+from atak_version_policy import is_blocked_legacy_55_apk_filename  # noqa: E402
 
 
 def sanitize_radius_imagery_folder_name(raw: str) -> str:
@@ -657,6 +658,9 @@ def _addon_plugin_candidates_from_github_assets(log_sink: Callable[[str], None])
             continue
         if _is_uvpro_apk_filename(name):
             continue
+        if is_blocked_legacy_55_apk_filename(name):
+            log_sink(f"Skipping unsupported 5.5.x add-on asset: {name}")
+            continue
         if not dl.startswith("http://") and not dl.startswith("https://"):
             continue
         apk_assets.append((name, dl, size_bytes))
@@ -709,6 +713,9 @@ def _resolve_addon_plugin_apks(log_sink: Callable[[str], None]) -> List[Dict[str
         for i, url in enumerate(urls, 1):
             filename = Path(url.split("?", 1)[0]).name or f"addon_{i}.apk"
             if not filename.lower().endswith(".apk") or _is_uvpro_apk_filename(filename):
+                continue
+            if is_blocked_legacy_55_apk_filename(filename):
+                log_sink(f"Skipping unsupported 5.5.x add-on URL: {filename}")
                 continue
             dest = custom_cache / filename
             key = _addon_candidate_cache_key(filename, url)
