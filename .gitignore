@@ -94,3 +94,4 @@ Windows Build Setup Instructions.md
 # --- IDE / agent (local only) ---
 .cursor/
 .cursor/rules/
+windows_agent.md

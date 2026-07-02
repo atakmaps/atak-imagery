@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+"""Build the Linux install zip (atak-imagery-v*-linux-install.zip).
+
+Ships Linux runtime (scripts/, data/, install_linux.sh) plus maintainer-facing
+docs (README, Windows Build Setup Instructions, tile-plan handoff). Excludes
+Windows build trees, agent/Cursor handoffs, bundled plugin APKs, and tmp/logs.
+"""
 from __future__ import annotations
 
 import zipfile
@@ -36,6 +42,33 @@ EXCLUDE_DIRS = {
 # Add-on plugin APKs ship on GitHub *-plugin-assets releases (see deploy.env.example).
 RELATIVE_EXCLUDE_PREFIXES: tuple[Path, ...] = (Path("scripts/data/bundled_plugins"),)
 
+# Agent / IDE handoffs and internal checklists — never ship in end-user zips.
+INTERNAL_DOC_BASENAMES = {
+    "HANDOFF_AGENT.local.md",
+    "RELEASE_CHECKLIST.md",
+    "windows_agent.md",
+}
+
+# Windows-only repo files (Linux zip users run install_linux.sh, not Inno/PyInstaller).
+RELATIVE_EXCLUDE_FILES: frozenset[Path] = frozenset(
+    {
+        Path("ATAK_Setup.iss"),
+        Path("ATAKPipeline_Setup.iss"),
+        Path("install_windows.cmd"),
+        Path("requirements-windows-build.txt"),
+        Path("windows_launcher.py"),
+        Path("google_hybrid.xml"),
+        Path("google_roadmap_no_poi.xml"),
+        Path("scripts/audit_windows_bundle.py"),
+        Path("scripts/sync_windows_build.py"),
+        Path("scripts/windows_bundle_manifest.py"),
+        Path("scripts/build_windows_exe.ps1"),
+        Path("scripts/install_windows.ps1"),
+        Path("scripts/setup_windows_pipeline.ps1"),
+        Path("scripts/wipe_windows_install.ps1"),
+    }
+)
+
 EXCLUDE_FILES = {
     ".DS_Store",
 }
@@ -67,6 +100,8 @@ def should_skip(path: Path) -> bool:
     if path.name in EXCLUDE_FILES:
         return True
     name = path.name
+    if name in INTERNAL_DOC_BASENAMES:
+        return True
     if ".bak_" in name or name.endswith((".bak", ".orig", ".rej", ".tmp", "~")):
         return True
     if name == "deploy.env":
@@ -74,6 +109,8 @@ def should_skip(path: Path) -> bool:
     try:
         rel = path.relative_to(ROOT)
     except ValueError:
+        return True
+    if rel in RELATIVE_EXCLUDE_FILES:
         return True
     for prefix in RELATIVE_EXCLUDE_PREFIXES:
         if _is_under(rel, prefix):

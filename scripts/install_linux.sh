@@ -107,7 +107,22 @@ sync_bundle_into_install_dir() {
             --exclude 'output' \
             --exclude '.cursor' \
             --exclude 'tmp' \
-            --exclude 'scripts/data/bundled_plugins'
+            --exclude 'windows_build' \
+            --exclude 'scripts/data/bundled_plugins' \
+            --exclude 'HANDOFF_AGENT.local.md' \
+            --exclude 'RELEASE_CHECKLIST.md' \
+            --exclude 'windows_agent.md' \
+            --exclude 'ATAK_Setup.iss' \
+            --exclude 'ATAKPipeline_Setup.iss' \
+            --exclude 'install_windows.cmd' \
+            --exclude 'requirements-windows-build.txt' \
+            --exclude 'windows_launcher.py' \
+            --exclude 'google_hybrid.xml' \
+            --exclude 'google_roadmap_no_poi.xml' \
+            --exclude 'scripts/audit_windows_bundle.py' \
+            --exclude 'scripts/sync_windows_build.py' \
+            --exclude 'scripts/windows_bundle_manifest.py' \
+            --exclude 'scripts/*.ps1'
     else
         # tar if rsync is missing (should be rare once packaged)
         tar -C "$src" \
@@ -123,7 +138,22 @@ sync_bundle_into_install_dir() {
             --exclude='output' \
             --exclude='.cursor' \
             --exclude='tmp' \
+            --exclude='windows_build' \
             --exclude='scripts/data/bundled_plugins' \
+            --exclude='HANDOFF_AGENT.local.md' \
+            --exclude='RELEASE_CHECKLIST.md' \
+            --exclude='windows_agent.md' \
+            --exclude='ATAK_Setup.iss' \
+            --exclude='ATAKPipeline_Setup.iss' \
+            --exclude='install_windows.cmd' \
+            --exclude='requirements-windows-build.txt' \
+            --exclude='windows_launcher.py' \
+            --exclude='google_hybrid.xml' \
+            --exclude='google_roadmap_no_poi.xml' \
+            --exclude='scripts/audit_windows_bundle.py' \
+            --exclude='scripts/sync_windows_build.py' \
+            --exclude='scripts/windows_bundle_manifest.py' \
+            --exclude='scripts/*.ps1' \
             -cf - . | tar -C "$dest" -xf -
     fi
 
