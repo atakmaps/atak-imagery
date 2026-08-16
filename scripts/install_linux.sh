@@ -163,6 +163,15 @@ sync_bundle_into_install_dir() {
 }
 
 # Ensure deploy.env lists where to download ATAK (manifest) and the plugin (GitHub repo).
+set_deploy_env_kv() {
+    local key="$1" value="$2" file="$3"
+    if grep -qE "^[[:space:]]*${key}=" "$file" 2>/dev/null; then
+        sed -i "s|^[[:space:]]*${key}=.*|${key}=${value}|" "$file"
+    else
+        echo "${key}=${value}" >> "$file"
+    fi
+}
+
 append_deploy_env_defaults() {
     local f="$ROOT/deploy.env"
     mkdir -p "$(dirname "$f")"
@@ -188,11 +197,9 @@ append_deploy_env_defaults() {
         ver="$(tr -d '[:space:]' < "$ROOT/VERSION")"
         ver="${ver#v}"
     fi
-    if [ -n "$ver" ] && ! grep -qE "^[[:space:]]*ATAK_ADDON_PLUGIN_RELEASE_TAG=" "$f" 2>/dev/null; then
-        echo "ATAK_ADDON_PLUGIN_RELEASE_TAG=v${ver}-plugin-assets" >> "$f"
-    fi
-    if [ -n "$ver" ] && ! grep -qE "^[[:space:]]*ATAK_PROTECTED_IMPORT_RELEASE_TAG=" "$f" 2>/dev/null; then
-        echo "ATAK_PROTECTED_IMPORT_RELEASE_TAG=v${ver}-plugin-assets" >> "$f"
+    if [ -n "$ver" ]; then
+        set_deploy_env_kv "ATAK_ADDON_PLUGIN_RELEASE_TAG" "v${ver}-plugin-assets" "$f"
+        set_deploy_env_kv "ATAK_PROTECTED_IMPORT_RELEASE_TAG" "v${ver}-plugin-assets" "$f"
     fi
     if ! grep -qE "^[[:space:]]*ATAK_PROTECTED_IMPORT_GITHUB_REPO=" "$f" 2>/dev/null; then
         echo "ATAK_PROTECTED_IMPORT_GITHUB_REPO=atakmaps/atak-imagery" >> "$f"

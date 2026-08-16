@@ -740,8 +740,16 @@ def _resolve_addon_plugin_apks(log_sink: Callable[[str], None]) -> List[Dict[str
             return candidates
     except Exception as exc:
         log_sink(f"Warning: could not fetch add-on plugin assets from GitHub release: {exc}")
+        if ADDON_PLUGIN_RELEASE_TAG:
+            log_sink(
+                f"No local fallback — configure ATAK_ADDON_PLUGIN_RELEASE_TAG correctly "
+                f"(currently {ADDON_PLUGIN_RELEASE_TAG!r})."
+            )
+            return []
 
-    # Backward-compatible fallback for older local builds.
+    # Backward-compatible fallback when no release tag is configured.
+    if ADDON_PLUGIN_RELEASE_TAG:
+        return []
     local_apks = iter_bundled_addon_apks(BUNDLED_PLUGIN_DIR)
     if local_apks:
         log_sink("Using local bundled add-on plugin APKs (legacy fallback).")
@@ -1133,7 +1141,11 @@ def _install_selected_plugin_apks(
         rel = _plugin_label_for_display(apk)
         progress.set_status(f"Add-on: {apk.name}…")
         log_sink(f"Installing bundled add-on: {rel}")
-        install_apk(serial, apk, progress.set_status, package_name=None)
+        try:
+            install_apk(serial, apk, progress.set_status, package_name=row.get("package_name"))
+        except Exception as exc:
+            log_sink(f"Warning: failed to install {rel}: {exc}")
+            continue
         if step_cb:
             try:
                 step_cb(f"Installed {apk.name}")
@@ -2273,6 +2285,14 @@ class DownloadScopeDialog(tk.Tk):
         ).pack(anchor="w", pady=(0, 8))
 
         self.scope_var = tk.StringVar(value="state")
+
+        def _focus_radius_name_if_selected() -> None:
+            if self.scope_var.get() == "radius":
+                try:
+                    self.radius_name_entry.focus_set()
+                except tk.TclError:
+                    pass
+
         tk.Radiobutton(
             form_top,
             text="An entire state (or several states)",
@@ -2288,6 +2308,7 @@ class DownloadScopeDialog(tk.Tk):
             value="radius",
             anchor="w",
             justify="left",
+            command=_focus_radius_name_if_selected,
         ).pack(anchor="w", pady=(4, 0))
 
         radius_name_frame = tk.Frame(form_top)
@@ -2306,19 +2327,6 @@ class DownloadScopeDialog(tk.Tk):
         self.radius_name_var = tk.StringVar(value="")
         self.radius_name_entry = tk.Entry(radius_name_frame, textvariable=self.radius_name_var)
         self.radius_name_entry.pack(anchor="w", fill="x", pady=(4, 0))
-        try:
-            self.radius_name_entry.configure(disabledforeground="gray55")
-        except tk.TclError:
-            pass
-
-        def _sync_radius_name_field(*_a: object) -> None:
-            if self.scope_var.get() == "radius":
-                self.radius_name_entry.configure(state="normal")
-            else:
-                self.radius_name_entry.configure(state="disabled")
-
-        self.scope_var.trace_add("write", _sync_radius_name_field)
-        _sync_radius_name_field()
 
         tk.Label(
             form_top,
@@ -3476,8 +3484,20 @@ class ProgressWindow(tk.Tk):
 # Workflow helpers
 # -----------------------------
 
-def run_with_busy_dialog(message: str, fn: Callable[[], None]) -> None:
-    """Run ``fn`` while showing a foreground modal busy dialog (main thread only)."""
+def run_with_busy_dialog(
+    message: str,
+    fn: Callable[[], None],
+    *,
+    progress_msg: Optional[List[str]] = None,
+    progress_value: Optional[List[int]] = None,
+    progress_max: int = 0,
+) -> None:
+    """Run ``fn`` on a worker thread while showing a modal busy dialog.
+
+    The dialog keeps repainting on the main thread so the progress bar moves.
+    Optional ``progress_msg`` / ``progress_value`` are one-element lists the worker
+    may update (e.g. current zoom step).
+    """
     owner = tk._default_root
     dlg = tk.Toplevel(owner) if owner is not None else tk.Tk()
     dlg.title(APP_TITLE)
@@ -3501,14 +3521,63 @@ def run_with_busy_dialog(message: str, fn: Callable[[], None]) -> None:
 
     frame = tk.Frame(dlg, padx=18, pady=16)
     frame.pack(fill="both", expand=True)
-    tk.Label(frame, text=message, justify="left", anchor="w", wraplength=420).pack(fill="x", pady=(0, 10))
-    bar = ttk.Progressbar(frame, mode="indeterminate")
+    detail_var = tk.StringVar(value=message)
+    tk.Label(frame, textvariable=detail_var, justify="left", anchor="w", wraplength=420).pack(fill="x", pady=(0, 10))
+    use_determinate = progress_max > 0 and progress_value is not None
+    bar = ttk.Progressbar(
+        frame,
+        mode="determinate" if use_determinate else "indeterminate",
+        maximum=max(1, progress_max) if use_determinate else 100,
+    )
     bar.pack(fill="x")
-    bar.start(10)
+    if not use_determinate:
+        bar.start(10)
+
+    worker_error: List[BaseException] = []
+    done = threading.Event()
+    pulse = 0
+
+    def _worker() -> None:
+        try:
+            fn()
+        except BaseException as exc:
+            worker_error.append(exc)
+        finally:
+            done.set()
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+    def _pump_dialog() -> None:
+        nonlocal pulse
+        pulse = (pulse + 1) % 4
+        dots = "." * pulse
+        if progress_msg:
+            try:
+                detail_var.set(str(progress_msg[0] or message) + dots)
+            except tk.TclError:
+                pass
+        else:
+            try:
+                detail_var.set(message + dots)
+            except tk.TclError:
+                pass
+        if use_determinate and progress_value is not None:
+            try:
+                bar["value"] = max(0, min(int(progress_value[0]), int(progress_max)))
+            except (tk.TclError, TypeError, ValueError):
+                pass
+        try:
+            dlg.update_idletasks()
+            dlg.update()
+        except tk.TclError:
+            pass
+
     try:
-        dlg.update_idletasks()
-        dlg.update()
-        fn()
+        _pump_dialog()
+        while not done.is_set():
+            _pump_dialog()
+            done.wait(0.05)
+        _pump_dialog()
     finally:
         try:
             bar.stop()
@@ -3522,6 +3591,9 @@ def run_with_busy_dialog(message: str, fn: Callable[[], None]) -> None:
             dlg.destroy()
         except Exception:
             pass
+
+    if worker_error:
+        raise worker_error[0]
 
 
 def show_summary_confirm(
@@ -4606,6 +4678,7 @@ def main() -> None:
     if do_maps and do_addons:
         log("Maps + add-ons selected — running add-ons refresh routine before imagery workflow.")
         preflight = ProgressWindow(LOGGER.log_file)
+        pump_gui_logs(preflight)
         try:
             _refresh_addons_only_for_device(preflight, log, addons_only=False)
             if getattr(preflight, "user_cancelled", False) or getattr(preflight, "error_message", None):
@@ -4615,6 +4688,8 @@ def main() -> None:
                 log("Exited during add-ons preflight.")
                 return
             ensure_window_stacking(preflight)
+            preflight.update_idletasks()
+            preflight.update()
             messagebox.showinfo(APP_TITLE, ADDONS_PRE_DOWNLOAD_DONE_TEXT, parent=preflight)
             cancel_all_scheduled_after(preflight)
         finally:
@@ -4764,13 +4839,29 @@ def main() -> None:
 
                 while True:
                     _radius_tiles: Dict[int, int] = {}
+                    _coverage_status = ["Calculating coverage…"]
+                    _coverage_steps = [0]
+                    _coverage_max = GOOGLE_HYBRID_ZOOM_MAX - 10 + 1
 
                     def _precompute_radius_tiles() -> None:
-                        for z in range(10, GOOGLE_HYBRID_ZOOM_MAX + 1):
+                        for step, z in enumerate(range(10, GOOGLE_HYBRID_ZOOM_MAX + 1), start=1):
+                            _coverage_status[0] = (
+                                f"Calculating coverage… zoom {z} / {GOOGLE_HYBRID_ZOOM_MAX} "
+                                f"(high zooms can take a few minutes)"
+                            )
+                            log(_coverage_status[0])
                             tiles = compute_tiles_for_radius(rd.center_lat, rd.center_lon, rd.radius_miles, z)
                             _radius_tiles[z] = len(tiles)
+                            _coverage_steps[0] = step
+                            log(f"  zoom {z}: {len(tiles):,} tiles")
 
-                    run_with_busy_dialog("Calculating coverage…", _precompute_radius_tiles)
+                    run_with_busy_dialog(
+                        "Calculating coverage…",
+                        _precompute_radius_tiles,
+                        progress_msg=_coverage_status,
+                        progress_value=_coverage_steps,
+                        progress_max=_coverage_max,
+                    )
 
                     zoom_dialog = ZoomDialog(
                         [],
