@@ -85,6 +85,15 @@ def read_installed_version(*, script_path: Path, is_frozen: bool) -> str:
     return "unknown"
 
 
+def format_installed_version_label(*, script_path: Path) -> str:
+    """Human-readable install version for welcome screens (empty when unknown)."""
+    version = read_installed_version(
+        script_path=script_path,
+        is_frozen=bool(getattr(sys, "frozen", False)),
+    )
+    return f"Version {version}" if version != "unknown" else ""
+
+
 def find_repo_root(start: Path) -> Optional[Path]:
     p = start.resolve()
     for _ in range(16):

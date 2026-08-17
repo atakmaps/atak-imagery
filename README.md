@@ -55,11 +55,15 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.3.48` (tag **`v1.3.48`** on GitHub).
+**Linux / source release:** `v1.3.49` (tag **`v1.3.49`** on GitHub).
 
-**Windows:** Same version as Linux (`v1.3.48`). Build on a Windows VM with PyInstaller — see **Windows build** below.
+**Windows:** Same version as Linux (`v1.3.49`). Build on a Windows VM with PyInstaller — see **Windows build** below.
 
-Version **1.3.48** highlights:
+Version **1.3.49** highlights:
+
+- **Version on welcome screen:** Device Installer and Imagery Downloader show the installed release version on the first screen.
+
+### Previous release (v1.3.48)
 
 - **Radius coverage UI:** “Calculating coverage…” keeps the progress bar moving and shows per-zoom status during long high-zoom tile counts.
 - **Radius download name:** name field stays editable when fixed-radius mode is selected (Linux/Tk fix).

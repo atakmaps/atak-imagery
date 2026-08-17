@@ -64,7 +64,11 @@ from win_subprocess import run_hidden
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from git_update_check import run_startup_git_update_check, run_startup_release_update_check
+from git_update_check import (
+    format_installed_version_label,
+    run_startup_git_update_check,
+    run_startup_release_update_check,
+)
 from tk_window_scaling import (
     apply_fixed_size_window,
     apply_resizable_window,
@@ -1515,6 +1519,9 @@ def show_downloader_welcome() -> Tuple[bool, bool, str]:
     }
 
     tk.Label(root, text="Welcome", font=("TkDefaultFont", 12, "bold")).pack(anchor="w", padx=16, pady=(16, 6))
+    _ver_text = format_installed_version_label(script_path=Path(__file__).resolve())
+    if _ver_text:
+        tk.Label(root, text=_ver_text, fg="gray40").pack(anchor="w", padx=16, pady=(0, 6))
     intro_lbl = tk.Label(
         root,
         text="Choose what to run. You can select both options.",

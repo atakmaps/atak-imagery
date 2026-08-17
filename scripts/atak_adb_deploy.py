@@ -99,7 +99,11 @@ try:
     import tkinter as tk
     from tkinter import messagebox, scrolledtext, ttk
 
-    from git_update_check import run_startup_git_update_check, run_startup_release_update_check
+    from git_update_check import (
+        format_installed_version_label,
+        run_startup_git_update_check,
+        run_startup_release_update_check,
+    )
     from tk_window_scaling import apply_resizable_window, ensure_window_stacking, scaled_int
 except Exception:  # pragma: no cover
     tk = None
@@ -109,6 +113,7 @@ except Exception:  # pragma: no cover
     apply_resizable_window = None  # type: ignore[assignment]
     scaled_int = None  # type: ignore[assignment]
     ensure_window_stacking = None  # type: ignore[assignment]
+    format_installed_version_label = None  # type: ignore[assignment,misc]
     run_startup_git_update_check = None  # type: ignore[assignment]
     run_startup_release_update_check = None  # type: ignore[assignment]
 
@@ -1188,6 +1193,20 @@ class DeployWizard(tk.Tk):
         self.step_label = tk.Label(outer, text="", font=("Arial", 12, "bold"), anchor="w", justify="left")
         self.step_label.pack(fill="x", pady=(0, 8))
 
+        _ver_text = (
+            format_installed_version_label(script_path=Path(__file__).resolve())
+            if format_installed_version_label is not None
+            else ""
+        )
+        self._welcome_version_label = tk.Label(
+            outer,
+            text=_ver_text,
+            anchor="w",
+            justify="left",
+            fg="gray40",
+            font=("Arial", 9),
+        )
+
         self.body = tk.Label(outer, text="", justify="left", anchor="w", wraplength=500)
 
         self._instructions_outer = tk.Frame(outer)
@@ -1367,6 +1386,10 @@ class DeployWizard(tk.Tk):
 
         # Step 0 — welcome
         if self._step == 0:
+            if self._welcome_version_label.cget("text"):
+                self._welcome_version_label.pack(fill="x", pady=(0, 4), before=self.step_label)
+            else:
+                self._welcome_version_label.pack_forget()
             self._set_secondary_visible(True)
             self._show_body_label()
             self.step_label.configure(text="")
@@ -1383,6 +1406,7 @@ class DeployWizard(tk.Tk):
 
         # Step 1 — choose what to install
         elif self._step == 1:
+            self._welcome_version_label.pack_forget()
             self._set_secondary_visible(True)
             self.body.configure(text="")
             self._show_selection_panel()
