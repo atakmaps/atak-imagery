@@ -55,11 +55,19 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.3.47` (tag **`v1.3.47`** on GitHub).
+**Linux / source release:** `v1.3.48` (tag **`v1.3.48`** on GitHub).
 
-**Windows:** Same version as Linux (`v1.3.47`). Build on a Windows VM with PyInstaller — see **Windows build** below.
+**Windows:** Same version as Linux (`v1.3.48`). Build on a Windows VM with PyInstaller — see **Windows build** below.
 
-Version **1.3.47** highlights:
+Version **1.3.48** highlights:
+
+- **Radius coverage UI:** “Calculating coverage…” keeps the progress bar moving and shows per-zoom status during long high-zoom tile counts.
+- **Radius download name:** name field stays editable when fixed-radius mode is selected (Linux/Tk fix).
+- **Add-on installs:** continue past individual plugin failures; no stale local APK fallback when `*-plugin-assets` tags are configured.
+- **Install upgrades:** `install_linux.sh` refreshes `deploy.env` plugin-assets tags to match `VERSION`.
+- **Linux install zip:** ships runtime + `README.md` only (no agent handoffs or Windows build docs).
+
+### Previous release (v1.3.47)
 
 - **Lean Linux install zip:** release packaging no longer ships local add-on APKs or `tmp/` test data (~133 MB vs ~640 MB); Imagery Downloader fetches plugins from the matching `*-plugin-assets` GitHub release.
 - **Windows parity:** Windows sync no longer embeds bundled plugin APKs in EXEs — same GitHub asset download path as Linux.
