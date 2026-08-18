@@ -1486,7 +1486,8 @@ def show_downloader_intro_and_verify_device() -> bool:
     apply_resizable_window(root, 640, 520, (480, 300))
 
     def _sync_intro_wrap(_evt: Optional[object] = None) -> None:
-        root.update_idletasks()
+        # No update_idletasks() here: this handler runs from <Configure> and
+        # resizes widgets, so flushing the geometry queue re-enters it forever.
         try:
             rw = int(root.winfo_width())
         except tk.TclError:
@@ -1497,6 +1498,7 @@ def show_downloader_intro_and_verify_device() -> bool:
 
     root.bind("<Configure>", lambda e: _sync_intro_wrap())
     refit_toplevel_geometry(root, 640, 520)
+    root.update_idletasks()
     _sync_intro_wrap()
 
     root.protocol("WM_DELETE_WINDOW", on_quit)
@@ -1583,7 +1585,8 @@ def show_downloader_welcome() -> Tuple[bool, bool, str]:
     apply_resizable_window(root, 520, 400, (400, 280))
 
     def _sync_wrap(_evt: Optional[object] = None) -> None:
-        root.update_idletasks()
+        # No update_idletasks() here: this handler runs from <Configure> and
+        # resizes widgets, so flushing the geometry queue re-enters it forever.
         try:
             rw = int(root.winfo_width())
         except tk.TclError:
@@ -1594,6 +1597,7 @@ def show_downloader_welcome() -> Tuple[bool, bool, str]:
 
     root.bind("<Configure>", lambda e: _sync_wrap())
     refit_toplevel_geometry(root, 520, 400)
+    root.update_idletasks()
     _sync_wrap()
 
     root.protocol("WM_DELETE_WINDOW", on_window_close)
@@ -2375,7 +2379,8 @@ class DownloadScopeDialog(tk.Tk):
             return lb
 
         def _sync_scroll_wrap(_evt: Optional[object] = None) -> None:
-            scroll_inner.update_idletasks()
+            # No update_idletasks() here: this handler runs from <Configure> and
+            # resizes widgets, so flushing the geometry queue re-enters it forever.
             try:
                 iw = int(scroll_inner.winfo_width())
             except tk.TclError:
@@ -2497,6 +2502,7 @@ class DownloadScopeDialog(tk.Tk):
 
         self.bind("<Configure>", lambda e: _sync_scroll_wrap())
         refit_toplevel_geometry(self, 740, 780)
+        scroll_inner.update_idletasks()
         _sync_scroll_wrap()
 
         self.protocol("WM_DELETE_WINDOW", self.cancel)
@@ -2708,7 +2714,8 @@ class StateSelectionDialog(tk.Tk):
         apply_resizable_window(self, 620, 700, (400, 280))
 
         def _sync_note_wrap(_evt: Optional[object] = None) -> None:
-            self.update_idletasks()
+            # No update_idletasks() here: this handler runs from <Configure> and
+            # resizes widgets, so flushing the geometry queue re-enters it forever.
             try:
                 fw = int(frame.winfo_width())
             except tk.TclError:
@@ -2719,6 +2726,7 @@ class StateSelectionDialog(tk.Tk):
 
         self.bind("<Configure>", lambda e: _sync_note_wrap())
         refit_toplevel_geometry(self, 620, 700)
+        self.update_idletasks()
         _sync_note_wrap()
 
         self.protocol("WM_DELETE_WINDOW", self.cancel)
