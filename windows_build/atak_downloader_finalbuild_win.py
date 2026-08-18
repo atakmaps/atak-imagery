@@ -193,9 +193,13 @@ LAST_IMAGERY_SESSION_STATES_FILE = RUNTIME_STATE_DIR / ".last_imagery_session_st
 
 from imagery_tile_selection import (  # noqa: E402
     STATE_BOUNDARY_BUFFER_MILES,
+    RADIUS_COUNT_EXACT_MAX_ZOOM,
     RADIUS_REGION_FOLDER,
     build_tiles_for_state_result,
     compute_tiles_for_radius,
+    count_tiles_for_radius,
+    estimate_tile_counts_for_radius,
+    iter_tiles_for_radius,
     lonlat_to_tile,
     square_lonlat_footprint_for_radius_miles,
     state_names_intersecting_geodesic_circle,
@@ -2960,8 +2964,7 @@ class ZoomDialog(tk.Tk):
                     total_tiles = n
                     total_bytes = n * int(avgs.get(z, 25000))
                 elif radius_center is not None and radius_miles is not None:
-                    tiles = compute_tiles_for_radius(radius_center[0], radius_center[1], radius_miles, z)
-                    n = len(tiles)
+                    n = count_tiles_for_radius(radius_center[0], radius_center[1], radius_miles, z)
                     avg_b = int(avgs.get(z, 25000))
                     total_tiles = n
                     total_bytes = n * avg_b
@@ -4075,18 +4078,21 @@ def run_download(
             for z in selected_zooms:
                 progress.wait_if_paused()
                 progress.set_status(f"Tile plan: radius zoom {z}…")
-                tiles = compute_tiles_for_radius(lat, lon, miles, z)
-                log(f"Tile plan (radius): {len(tiles):,} tiles for zoom {z}")
-                planning_step += 1
-                progress.set_progress_fraction(
-                    planning_step / planning_total,
-                    f"Planned {planning_step} / {planning_total} — radius z{z} ({len(tiles):,} tiles)",
-                )
-                for i, (x, y) in enumerate(tiles, start=1):
+                # Streamed, not materialised: a 130-mile radius is ~17.8M tiles at z18, and
+                # holding that list alongside the plan it feeds costs gigabytes for nothing.
+                zoom_tiles = 0
+                for i, (x, y) in enumerate(iter_tiles_for_radius(lat, lon, miles, z), start=1):
                     if i % 2048 == 0:
                         progress.wait_if_paused()
                     out_path = output_root / radius_folder / str(z) / str(x) / f"{y}.jpg"
                     plan.append((radius_folder, z, x, y, out_path))
+                    zoom_tiles = i
+                log(f"Tile plan (radius): {zoom_tiles:,} tiles for zoom {z}")
+                planning_step += 1
+                progress.set_progress_fraction(
+                    planning_step / planning_total,
+                    f"Planned {planning_step} / {planning_total} — radius z{z} ({zoom_tiles:,} tiles)",
+                )
         else:
             # State boundaries are pre-loaded on the main thread before this
             # thread starts, avoiding a large allocation burst from the
@@ -4874,16 +4880,31 @@ def main() -> None:
                     _coverage_max = GOOGLE_HYBRID_ZOOM_MAX - 10 + 1
 
                     def _precompute_radius_tiles() -> None:
-                        for step, z in enumerate(range(10, GOOGLE_HYBRID_ZOOM_MAX + 1), start=1):
-                            _coverage_status[0] = (
-                                f"Calculating coverage… zoom {z} / {GOOGLE_HYBRID_ZOOM_MAX} "
-                                f"(high zooms can take a few minutes)"
-                            )
-                            log(_coverage_status[0])
-                            tiles = compute_tiles_for_radius(rd.center_lat, rd.center_lon, rd.radius_miles, z)
-                            _radius_tiles[z] = len(tiles)
-                            _coverage_steps[0] = step
-                            log(f"  zoom {z}: {len(tiles):,} tiles")
+                        # Enumerating every tile just to call len() on it is what killed this
+                        # step: tile count quadruples per zoom, so a 130-mile radius reaches
+                        # ~17.8M tiles at z18 and ~71M at z19 — minutes of CPU and enough
+                        # allocation for the kernel OOM killer, for a number the user only
+                        # reads off the zoom picker. Count exactly where it is cheap, then
+                        # model the rest (see estimate_tile_counts_for_radius; within 0.1%).
+                        def _on_zoom(z: int, count: int, is_exact: bool) -> None:
+                            _coverage_steps[0] = z - 10 + 1
+                            log(f"  zoom {z}: {count:,} tiles{'' if is_exact else ' (estimated)'}")
+
+                        _coverage_status[0] = "Calculating coverage…"
+                        log(
+                            f"Calculating coverage for {rd.radius_miles:g} mi radius: "
+                            f"exact through zoom {RADIUS_COUNT_EXACT_MAX_ZOOM}, "
+                            f"estimated above it."
+                        )
+                        counts, _exact_through = estimate_tile_counts_for_radius(
+                            rd.center_lat,
+                            rd.center_lon,
+                            rd.radius_miles,
+                            10,
+                            GOOGLE_HYBRID_ZOOM_MAX,
+                            on_zoom=_on_zoom,
+                        )
+                        _radius_tiles.update(counts)
 
                     run_with_busy_dialog(
                         "Calculating coverage…",
