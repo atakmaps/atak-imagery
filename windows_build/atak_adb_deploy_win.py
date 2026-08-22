@@ -597,7 +597,7 @@ def choose_github_release_apk_asset(
             if _apk_asset_name_matches_atak_version(str(a.get("name", "")), str(atak_version))
         ]
         if matched:
-            return matched[0]
+            return matched[_legacy_prefer_plugin_apk_index(matched)]
     return apk_assets[_legacy_prefer_plugin_apk_index(apk_assets)]
 
 

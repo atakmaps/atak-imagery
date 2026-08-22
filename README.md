@@ -55,11 +55,15 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.3.49` (tag **`v1.3.49`** on GitHub).
+**Linux / source release:** `v1.3.50` (tag **`v1.3.50`** on GitHub).
 
-**Windows:** Same version as Linux (`v1.3.49`). Build on a Windows VM with PyInstaller — see **Windows build** below.
+**Windows:** Same version as Linux (`v1.3.50`). Build on a Windows VM with PyInstaller — see **Windows build** below.
 
-Version **1.3.49** highlights:
+Version **1.3.50** highlights:
+
+- **UV-PRO install fix:** Device Installer now picks the signed **release** APK (not the debug build) when matching ATAK 5.6.x on GitHub Latest.
+
+### Previous release (v1.3.49)
 
 - **Version on welcome screen:** Device Installer and Imagery Downloader show the installed release version on the first screen.
 
