@@ -171,6 +171,12 @@ def pack_vertical_scroll_area_when_needed(
     """
     Like ``pack_vertical_scroll_area``, but the vertical scrollbar is only gridded when
     the inner content is taller than the canvas. When everything fits, no scrollbar is shown.
+
+    The ``<Configure>`` handlers here must never call ``update_idletasks()``. That flushes Tk's
+    geometry queue synchronously and re-delivers the very ``<Configure>`` being handled, so an
+    ``on_inner_layout`` callback that resizes widgets (re-wrapping labels, say) recurses without
+    bound — the window paints black and stops responding. Measure from current geometry instead
+    and coalesce all follow-up work onto a single idle callback.
     """
     holder = tk.Frame(parent)
     holder.pack(fill=tk.BOTH, expand=True)
@@ -182,16 +188,32 @@ def pack_vertical_scroll_area_when_needed(
     inner = tk.Frame(canvas)
     win_id = canvas.create_window((0, 0), window=inner, anchor="nw")
     scroll_active: List[bool] = [False]
+    sync_pending: List[bool] = [False]
+    in_layout: List[bool] = [False]
+
+    def _schedule_sync(delay_ms: int = 0) -> None:
+        """Queue one _sync_vsb pass; extra requests while it is pending are dropped."""
+        if sync_pending[0]:
+            return
+        sync_pending[0] = True
+        try:
+            if delay_ms > 0:
+                canvas.after(delay_ms, _sync_vsb)
+            else:
+                canvas.after_idle(_sync_vsb)
+        except tk.TclError:
+            sync_pending[0] = False
 
     def _sync_vsb() -> None:
-        canvas.update_idletasks()
-        inner.update_idletasks()
+        sync_pending[0] = False
         try:
             ch = int(canvas.winfo_height())
         except tk.TclError:
             return
         if ch <= 1:
-            canvas.after_idle(_sync_vsb)
+            # Canvas not mapped yet. Retry on a timer, not after_idle: an idle callback that
+            # re-arms itself starves the event loop while the window is still coming up.
+            _schedule_sync(50)
             return
         try:
             ih = int(inner.winfo_reqheight())
@@ -201,8 +223,11 @@ def pack_vertical_scroll_area_when_needed(
         if bbox is not None:
             y1, y2 = int(bbox[1]), int(bbox[3])
             ih = max(ih, y2 - y1)
+        canvas.configure(scrollregion=bbox if bbox else (0, 0, 0, 0))
         content_h = ih
-        need = content_h > ch + 2
+        # Hysteresis: gridding the scrollbar narrows the canvas, which re-wraps text and changes
+        # the content height. Without a dead band the bar can flap on and off indefinitely.
+        need = content_h > (ch - 8) if scroll_active[0] else content_h > (ch + 2)
         scroll_active[0] = need
         if need:
             vsb.grid(row=0, column=1, sticky="ns")
@@ -212,12 +237,16 @@ def pack_vertical_scroll_area_when_needed(
         canvas.configure(yscrollcommand=vsb.set)
 
     def _on_inner_configure(_event: object) -> None:
-        if on_inner_layout is not None:
-            on_inner_layout()
-        canvas.update_idletasks()
-        br = canvas.bbox("all")
-        canvas.configure(scrollregion=br if br else (0, 0, 0, 0))
-        _sync_vsb()
+        # on_inner_layout resizes children, which re-fires this event; ignore the nested pass.
+        if in_layout[0]:
+            return
+        in_layout[0] = True
+        try:
+            if on_inner_layout is not None:
+                on_inner_layout()
+        finally:
+            in_layout[0] = False
+        _schedule_sync()
 
     def _on_canvas_configure(event: tk.Event) -> None:
         try:
@@ -226,7 +255,7 @@ def pack_vertical_scroll_area_when_needed(
                 canvas.itemconfigure(win_id, width=w)
         except tk.TclError:
             pass
-        _sync_vsb()
+        _schedule_sync()
 
     inner.bind("<Configure>", _on_inner_configure)
     canvas.bind("<Configure>", _on_canvas_configure)
@@ -253,8 +282,7 @@ def pack_vertical_scroll_area_when_needed(
     except tk.TclError:
         pass
 
-    holder.after_idle(_sync_vsb)
-    holder.after(120, _sync_vsb)
+    _schedule_sync()
     return inner
 
 
