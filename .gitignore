@@ -83,6 +83,18 @@ dist/
 installer-dist/
 *.exe
 
+# Stray copies of map configs that already live (tracked) under MapXML/.
+/google_hybrid.xml
+/google_roadmap_no_poi.xml
+
+# Prebuilt ATAK plugin APKs fetched/built locally (same local-only pattern as ATAK-CIV*_loadout.zip).
+# Copy into tree before a release build if needed.
+scripts/data/bundled_plugins/
+
+# One-off dropped map config, not part of the tracked MapXML/ set.
+scripts/data/mobile_xml/AmRRON Forms.xml
+windows_build/data/mobile_xml/AmRRON Forms.xml
+
 # --- Secrets (use deploy.env.example) ---
 deploy.env
 
