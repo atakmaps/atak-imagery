@@ -95,6 +95,9 @@ scripts/data/bundled_plugins/
 scripts/data/mobile_xml/AmRRON Forms.xml
 windows_build/data/mobile_xml/AmRRON Forms.xml
 
+# Local debug scripts, not committed source.
+scripts/collect_imagery_downloader_debug.sh
+
 # --- Secrets (use deploy.env.example) ---
 deploy.env
 
