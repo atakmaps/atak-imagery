@@ -42,6 +42,7 @@ Source repository: `https://github.com/atakmaps/atak-imagery`
 The root script runs **`scripts/install_linux.sh`**, which:
 
 - Installs or checks **system packages** needed for the pipeline (Python 3, pip/venv, Tkinter, Zenity, Android **adb**, etc.) via apt, dnf, or pacman when it recognizes your distro.
+- **Arch Linux:** installs GDAL/GEOS/PROJ, `base-devel`, and Tk via pacman, then uses Arch-aware pip flags so geopandas/rasterio/mgrs install reliably inside the venv.
 - Creates or repairs a **virtual environment** at **`.venv/`** and installs Python dependencies from **`requirements.txt`**.
 - Copies **`deploy.env.example`** to **`deploy.env`** the first time, so **ATAK Device Installer** has a config template to edit.
 - Writes **`run_atak_pipeline_with_device.sh`** and **`run_atak_pipeline.sh`** in the project root (wrappers that call the correct Python entry points with that venv).

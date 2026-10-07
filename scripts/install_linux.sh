@@ -73,6 +73,102 @@ pacman_installed() {
     pacman -Qi "$1" &>/dev/null
 }
 
+is_arch_linux() {
+    [ -f /etc/arch-release ] || grep -qiE '^ID=arch$|^ID=archlinux$' /etc/os-release 2>/dev/null
+}
+
+# Arch ships Python/Tk differently from Debian; geopandas/rasterio often need native
+# GDAL/GEOS/PROJ headers or wheels plus a compiler (mgrs, fallback pip builds).
+ARCH_PACMAN_PKGS=(
+    python
+    python-pip
+    tk
+    zenity
+    android-tools
+    rsync
+    gdal
+    geos
+    proj
+    base-devel
+    gcc
+)
+
+install_arch_system_packages() {
+    echo "  Detected Arch Linux (pacman)."
+    local pac_missing=()
+    local pkg
+    for pkg in "${ARCH_PACMAN_PKGS[@]}"; do
+        if ! pacman_installed "$pkg"; then
+            pac_missing+=("$pkg")
+        fi
+    done
+
+    if [ ${#pac_missing[@]} -gt 0 ]; then
+        echo "  Installing Arch packages: ${pac_missing[*]}"
+        if ! sudo pacman -S --needed --noconfirm "${pac_missing[@]}"; then
+            echo "ERROR: pacman install failed."
+            echo "       Run manually, then rerun this installer:"
+            echo "         sudo pacman -S --needed ${ARCH_PACMAN_PKGS[*]}"
+            exit 1
+        fi
+    else
+        echo "  All Arch pacman packages already present; skipping."
+    fi
+
+    if ! /usr/bin/python3 -c "import tkinter" >/dev/null 2>&1; then
+        echo "ERROR: tkinter is not available after installing tk + python."
+        echo "       Ensure /usr/bin/python3 is the Arch python package, then rerun:"
+        echo "         sudo pacman -S --needed python tk"
+        exit 1
+    fi
+}
+
+arch_pip_install_requirements() {
+    local venv_pip="$1"
+    local req_file="$2"
+    # Help pip find distro GDAL/GEOS/PROJ when it must compile extensions.
+    export GDAL_CONFIG="${GDAL_CONFIG:-/usr/bin/gdal-config}"
+    export GEOS_CONFIG="${GEOS_CONFIG:-/usr/bin/geos-config}"
+    export PROJ_DIR="${PROJ_DIR:-/usr}"
+    export PROJ_LIB="${PROJ_LIB:-/usr/share/proj}"
+    export CPLUS_INCLUDE_PATH="${CPLUS_INCLUDE_PATH:-/usr/include}"
+    export C_INCLUDE_PATH="${C_INCLUDE_PATH:-/usr/include}"
+
+    echo "  Arch: installing Python deps (prefer wheels; GDAL/GEOS/PROJ from pacman)..."
+    if "$venv_pip" install --upgrade pip && \
+       "$venv_pip" install --prefer-binary -r "$req_file"; then
+        return 0
+    fi
+    echo "  Arch: retrying pip with --no-build-isolation (uses system GDAL headers)..."
+    "$venv_pip" install --prefer-binary --no-build-isolation -r "$req_file"
+}
+
+verify_venv_imports() {
+    local py="$1"
+    local label="${2:-Python environment}"
+    local failed=0
+    local mod err
+    for mod in ssl tkinter geopandas shapely rasterio numpy requests mgrs; do
+        if ! err="$("$py" -c "import ${mod}" 2>&1)"; then
+            echo "  ERROR: ${label} missing module '${mod}'."
+            if [ -n "$err" ]; then
+                echo "         $err"
+            fi
+            failed=1
+        fi
+    done
+    if [ "$failed" -ne 0 ]; then
+        if is_arch_linux; then
+            echo ""
+            echo "Arch Linux troubleshooting:"
+            echo "  sudo pacman -S --needed ${ARCH_PACMAN_PKGS[*]}"
+            echo "  rm -rf \"$VENV_DIR\" && rerun ./install_linux.sh"
+            echo "If pip still fails, send the error above — rasterio/geopandas may need a newer pip wheel for your Python version."
+        fi
+        exit 1
+    fi
+}
+
 # Copy application tree into INSTALL_ROOT (excludes venv and junk). Preserves existing deploy.env.
 sync_bundle_into_install_dir() {
     local src dest
@@ -293,20 +389,7 @@ elif command -v dnf >/dev/null 2>&1; then
     fi
 
 elif command -v pacman >/dev/null 2>&1; then
-    pac_pkgs=(python python-pip python-virtualenv tk zenity android-tools rsync)
-    pac_missing=()
-    for pkg in "${pac_pkgs[@]}"; do
-        if ! pacman_installed "$pkg"; then
-            pac_missing+=("$pkg")
-        fi
-    done
-
-    if [ ${#pac_missing[@]} -gt 0 ]; then
-        echo "  Installing: ${pac_missing[*]}"
-        sudo pacman -Sy --noconfirm "${pac_missing[@]}"
-    else
-        echo "  All pacman packages already present; skipping."
-    fi
+    install_arch_system_packages
 
 else
     echo "Unsupported distro."
@@ -319,8 +402,13 @@ INSTALL_PYTHON="$(select_install_python || true)"
 if [ -z "${INSTALL_PYTHON:-}" ]; then
     echo "ERROR: No python3 interpreter with working ssl+venv was found."
     echo "       The current default python may be a custom build without SSL."
-    echo "       Install distro python packages, then rerun:"
-    echo "         sudo apt-get install -y python3 python3-venv python3-pip"
+    if is_arch_linux; then
+        echo "       Install Arch python packages, then rerun:"
+        echo "         sudo pacman -S --needed python python-pip tk"
+    else
+        echo "       Install distro python packages, then rerun:"
+        echo "         sudo apt-get install -y python3 python3-venv python3-pip"
+    fi
     exit 1
 fi
 echo "  Using Python interpreter: $INSTALL_PYTHON"
@@ -331,7 +419,7 @@ venv_created=0
 echo "[3/7] Virtual environment in install directory..."
 
 if [ -x "$venv_python" ]; then
-    if "$venv_python" -c "import ssl, geopandas, shapely, rasterio, numpy, requests" &>/dev/null; then
+    if "$venv_python" -c "import ssl, tkinter, geopandas, shapely, rasterio, numpy, requests, mgrs" &>/dev/null; then
         echo "  Reusing existing .venv (imports OK)."
     else
         echo "  Existing .venv is incomplete; recreating..."
@@ -353,16 +441,26 @@ if ! "$VENV_DIR/bin/python" -c "import ssl" >/dev/null 2>&1; then
     exit 1
 fi
 if [ "$venv_created" -eq 1 ]; then
-    "$VENV_DIR/bin/python" -m pip install --upgrade pip
-    "$VENV_DIR/bin/pip" install -r "$ROOT/requirements.txt"
+    if is_arch_linux; then
+        arch_pip_install_requirements "$VENV_DIR/bin/pip" "$ROOT/requirements.txt"
+    else
+        "$VENV_DIR/bin/python" -m pip install --upgrade pip
+        "$VENV_DIR/bin/pip" install -r "$ROOT/requirements.txt"
+    fi
 else
     if ! "$venv_python" -m pip check &>/dev/null; then
         echo "  pip check reported issues; syncing requirements.txt..."
-        "$VENV_DIR/bin/pip" install -r "$ROOT/requirements.txt"
+        if is_arch_linux; then
+            arch_pip_install_requirements "$VENV_DIR/bin/pip" "$ROOT/requirements.txt"
+        else
+            "$VENV_DIR/bin/pip" install -r "$ROOT/requirements.txt"
+        fi
     else
         echo "  Already satisfied; skipping pip."
     fi
 fi
+
+verify_venv_imports "$VENV_DIR/bin/python" "Virtual environment"
 
 if [ ! -f "$ROOT/deploy.env" ] && [ -f "$ROOT/deploy.env.example" ]; then
     cp "$ROOT/deploy.env.example" "$ROOT/deploy.env"
