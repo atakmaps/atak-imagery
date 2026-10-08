@@ -55,6 +55,164 @@ def _safe_destroy_tk(root: object) -> None:
         pass
 
 
+def _strip_md_inline(text: str) -> str:
+    """Remove light markdown emphasis/code markers for plain UI text."""
+    s = text.strip()
+    s = s.replace("**", "").replace("__", "").replace("`", "")
+    return " ".join(s.split())
+
+
+def release_notes_bullets(release_body: str, *, max_items: int = 8) -> List[str]:
+    """
+    Turn a GitHub release body into a short bullet list for the update dialog.
+
+    Drops install how-to sections (Linux / Windows) and markdown headings so the
+    prompt stays compact on 3:2 and other small displays.
+    """
+    if not (release_body or "").strip():
+        return []
+
+    bullets: List[str] = []
+    in_skip_section = False
+    for raw in release_body.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        heading = ""
+        if line.startswith("#"):
+            heading = line.lstrip("#").strip().lower()
+            if heading.startswith("linux install") or heading.startswith("windows install"):
+                in_skip_section = True
+                continue
+            # Other headings (Highlights, etc.) — resume collecting, do not show heading text.
+            in_skip_section = False
+            continue
+        if in_skip_section:
+            continue
+        if line.startswith(("- ", "* ", "• ")):
+            item = _strip_md_inline(line[2:])
+            if item:
+                bullets.append(item)
+            continue
+        # Ignore non-bullet prose outside skipped sections (keeps dialog short).
+
+    if not bullets:
+        # Fallback: first non-empty, non-heading lines as plain bullets.
+        for raw in release_body.splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                heading = line.lstrip("#").strip().lower() if line.startswith("#") else ""
+                if heading.startswith("linux install") or heading.startswith("windows install"):
+                    break
+                continue
+            if line.startswith(("- ", "* ", "• ")):
+                line = line[2:]
+            item = _strip_md_inline(line)
+            if item:
+                bullets.append(item)
+            if len(bullets) >= max_items:
+                break
+
+    return bullets[:max_items]
+
+
+def ask_update_available(
+    parent: object,
+    *,
+    app_title: str,
+    local_version: str,
+    remote_version: str,
+    release_body: str,
+    question: str,
+) -> bool:
+    """Landscape update prompt: normal font, bulleted changes, Yes/No. No install how-to."""
+    import tkinter as tk
+
+    from tk_window_scaling import apply_resizable_window, ensure_window_stacking, refit_toplevel_geometry
+
+    result = {"ok": False}
+    dlg = tk.Toplevel(parent)  # type: ignore[arg-type]
+    dlg.title(app_title)
+    dlg.configure(cursor="arrow")
+    dlg.transient(parent)  # type: ignore[arg-type]
+
+    outer = tk.Frame(dlg, padx=16, pady=14)
+    outer.pack(fill="both", expand=True)
+
+    tk.Label(
+        outer,
+        text=f"Version {remote_version} is available (you are running {local_version}).",
+        justify="left",
+        anchor="w",
+        font=("TkDefaultFont", 10),
+    ).pack(anchor="w", fill="x")
+
+    bullets = release_notes_bullets(release_body)
+    if bullets:
+        tk.Label(
+            outer,
+            text="Changes:",
+            justify="left",
+            anchor="w",
+            font=("TkDefaultFont", 10),
+        ).pack(anchor="w", fill="x", pady=(10, 2))
+        changes = "\n".join(f"• {b}" for b in bullets)
+        changes_lbl = tk.Label(
+            outer,
+            text=changes,
+            justify="left",
+            anchor="nw",
+            font=("TkDefaultFont", 10),
+            wraplength=520,
+        )
+        changes_lbl.pack(anchor="w", fill="both", expand=True)
+
+        def _sync_wrap(_evt: object = None) -> None:
+            try:
+                w = int(dlg.winfo_width())
+            except tk.TclError:
+                return
+            if w > 80:
+                changes_lbl.configure(wraplength=max(200, w - 48))
+
+        dlg.bind("<Configure>", lambda e: _sync_wrap())
+    else:
+        tk.Label(outer, text="", font=("TkDefaultFont", 10)).pack()
+
+    tk.Label(
+        outer,
+        text=question,
+        justify="left",
+        anchor="w",
+        font=("TkDefaultFont", 10),
+    ).pack(anchor="w", fill="x", pady=(12, 0))
+
+    btns = tk.Frame(outer)
+    btns.pack(fill="x", pady=(14, 0))
+
+    def on_no() -> None:
+        result["ok"] = False
+        dlg.destroy()
+
+    def on_yes() -> None:
+        result["ok"] = True
+        dlg.destroy()
+
+    tk.Button(btns, text="No", width=10, command=on_no).pack(side="right", padx=(6, 0))
+    tk.Button(btns, text="Yes", width=10, command=on_yes).pack(side="right")
+
+    dlg.protocol("WM_DELETE_WINDOW", on_no)
+    apply_resizable_window(dlg, 640, 320, (480, 220))
+    refit_toplevel_geometry(dlg, 640, 320)
+    ensure_window_stacking(dlg)
+    try:
+        dlg.grab_set()
+    except tk.TclError:
+        pass
+    dlg.wait_window()
+    return bool(result["ok"])
+
+
 def read_version_file(repo_root: Path) -> str:
     vf = repo_root / "VERSION"
     if vf.is_file():
@@ -776,16 +934,6 @@ def run_startup_release_update_check(*, app_title: str, script_path: Path) -> No
             _safe_destroy_tk(root)
             return
 
-        notes = check_state.release_body
-        if len(notes) > 500:
-            notes = notes[:500].rsplit("\n", 1)[0] + "\n…"
-
-        body = (
-            f"Version {check_state.remote_version} is available "
-            f"(you are running {local_version}).\n\n"
-        )
-        if notes:
-            body += notes + "\n\n"
         if is_frozen:
             if sys.platform.startswith("win"):
                 setup_url, setup_name = _windows_setup_asset(
@@ -793,14 +941,19 @@ def run_startup_release_update_check(*, app_title: str, script_path: Path) -> No
                     check_state.windows_setup_name,
                     check_state.windows_setup_url,
                 )
-                body += (
-                    f"Update now? The latest installer will download and run:\n{setup_name}"
-                )
+                question = f"Update now? The latest installer will download and run:\n{setup_name}"
             else:
-                body += "Update now? The browser will open the latest release page."
+                question = "Update now? The browser will open the latest release page."
 
             _lift()
-            if messagebox.askyesno(app_title, body, parent=root):
+            if ask_update_available(
+                root,
+                app_title=app_title,
+                local_version=local_version,
+                remote_version=check_state.remote_version,
+                release_body=check_state.release_body,
+                question=question,
+            ):
                 if sys.platform.startswith("win"):
                     root.withdraw()
                     start_windows_setup_download(setup_url, setup_name)
@@ -812,15 +965,19 @@ def run_startup_release_update_check(*, app_title: str, script_path: Path) -> No
             _safe_destroy_tk(root)
             return
 
-        body += "Update now? The scripts will be replaced and the app will restart automatically."
+        question = "Update now? Scripts will be replaced and the app will restart."
         if check_state.linux_zip_url:
-            body += (
-                "\n\nThis update will also refresh bundled downloader data assets "
-                "(tile-plan caches, map/import add-ons, and plugin APKs)."
-            )
+            question += " Bundled downloader data assets will also refresh."
 
         _lift()
-        if not messagebox.askyesno(app_title, body, parent=root):
+        if not ask_update_available(
+            root,
+            app_title=app_title,
+            local_version=local_version,
+            remote_version=check_state.remote_version,
+            release_body=check_state.release_body,
+            question=question,
+        ):
             _safe_destroy_tk(root)
             return
 
