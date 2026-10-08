@@ -36,13 +36,21 @@ def scale_factor(widget: tk.Misc) -> float:
 
 
 def scaled_dimensions(widget: tk.Misc, base_w: int, base_h: int) -> Tuple[int, int, float]:
+    """Scale width and height independently against usable screen.
+
+    Using a single ``min(w_scale, h_scale)`` for both axes over-shrinks height on
+    taller aspect ratios (e.g. 3:2 laptops / HiDPI logical sizes) and clips fixed
+    dialogs. Width and height each track their own axis; ``s`` remains the
+    conservative min for wraplength callers.
+    """
     mx, my = usable_screen_bounds(widget)
-    s = scale_factor(widget)
-    w = int(round(base_w * s))
-    h = int(round(base_h * s))
+    sx = max(MIN_SCALE, min(MAX_SCALE, mx / REF_SCREEN_W))
+    sy = max(MIN_SCALE, min(MAX_SCALE, my / REF_SCREEN_H))
+    w = int(round(base_w * sx))
+    h = int(round(base_h * sy))
     w = max(320, min(w, mx))
     h = max(240, min(h, my))
-    return w, h, s
+    return w, h, min(sx, sy)
 
 
 def _place_center(widget: tk.Misc, w: int, h: int) -> None:
@@ -93,9 +101,10 @@ def refit_toplevel_geometry(win: tk.Wm, base_w: int, base_h: int) -> float:
     """
     win.update_idletasks()
     mx, my = usable_screen_bounds(win)
-    s = scale_factor(win)
-    w_ds = max(320, min(int(round(base_w * s)), mx))
-    h_ds = max(240, min(int(round(base_h * s)), my))
+    sx = max(MIN_SCALE, min(MAX_SCALE, mx / REF_SCREEN_W))
+    sy = max(MIN_SCALE, min(MAX_SCALE, my / REF_SCREEN_H))
+    w_ds = max(320, min(int(round(base_w * sx)), mx))
+    h_ds = max(240, min(int(round(base_h * sy)), my))
     try:
         reqw = int(win.winfo_reqwidth())
         reqh = int(win.winfo_reqheight())
@@ -104,7 +113,7 @@ def refit_toplevel_geometry(win: tk.Wm, base_w: int, base_h: int) -> float:
     w = min(max(reqw, w_ds), mx)
     h = min(max(reqh, h_ds), my)
     _place_center(win, w, h)
-    return s
+    return min(sx, sy)
 
 
 def scaled_int(base_px: int, scale: float) -> int:

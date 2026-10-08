@@ -56,11 +56,17 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.3.50` (tag **`v1.3.50`** on GitHub).
+**Linux / source release:** `v1.3.51` (tag **`v1.3.51`** on GitHub).
 
-**Windows:** Same version as Linux (`v1.3.50`). Build on a Windows VM with PyInstaller — see **Windows build** below.
+**Windows:** Same version as Linux (`v1.3.51`). Build on a Windows VM with PyInstaller — see **Windows build** below.
 
-Version **1.3.50** highlights:
+Version **1.3.51** highlights:
+
+- **3:2 / HiDPI Radius center fix:** window scales height independently and sizes after layout so Longitude and Radius are no longer clipped.
+- **Arch Linux install:** `install_linux.sh` installs GDAL/GEOS/PROJ and build tools via pacman and uses Arch-aware pip flags.
+- Welcome screens continue to show **Version 1.3.51** from the install `VERSION` file.
+
+### Previous release (v1.3.50)
 
 - **UV-PRO install fix:** Device Installer now picks the signed **release** APK (not the debug build) when matching ATAK 5.6.x on GitHub Latest.
 

@@ -2535,7 +2535,7 @@ class RadiusCenterDialog(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title(f"{APP_TITLE} - Radius center")
-        self.resizable(False, False)
+        self.resizable(True, True)
         self.configure(cursor="arrow")
 
         self.accepted = False
@@ -2545,7 +2545,8 @@ class RadiusCenterDialog(tk.Tk):
 
         frame = tk.Frame(self, padx=14, pady=14)
         frame.pack(fill="both", expand=True)
-        _rc_scale = apply_fixed_size_window(self, 580, 560)
+        self.update_idletasks()
+        _rc_scale = scale_factor(self)
         _rc_wrap = scaled_int(520, _rc_scale)
 
         instr = (
@@ -2571,17 +2572,25 @@ class RadiusCenterDialog(tk.Tk):
 
         tk.Label(frame, text="MGRS").pack(anchor="w", pady=(10, 2))
         self.e_mgrs = tk.Entry(frame, textvariable=self.mgrs_var, width=48)
-        self.e_mgrs.pack(anchor="w")
+        self.e_mgrs.pack(anchor="w", fill="x")
 
-        tk.Label(frame, text="Latitude (decimal degrees, north positive)").pack(anchor="w", pady=(8, 2))
+        tk.Label(
+            frame,
+            text="Latitude (decimal degrees, north positive)",
+            justify="left",
+            wraplength=_rc_wrap,
+        ).pack(anchor="w", pady=(8, 2))
         self.e_lat = tk.Entry(frame, textvariable=self.lat_var, width=24)
-        self.e_lat.pack(anchor="w")
+        self.e_lat.pack(anchor="w", fill="x")
 
-        tk.Label(frame, text="Longitude (decimal degrees, east positive; use negative for west)").pack(
-            anchor="w", pady=(8, 2)
-        )
+        tk.Label(
+            frame,
+            text="Longitude (decimal degrees, east positive; use negative for west)",
+            justify="left",
+            wraplength=_rc_wrap,
+        ).pack(anchor="w", pady=(8, 2))
         self.e_lon = tk.Entry(frame, textvariable=self.lon_var, width=24)
-        self.e_lon.pack(anchor="w")
+        self.e_lon.pack(anchor="w", fill="x")
 
         tk.Label(frame, text="Radius (miles)").pack(anchor="w", pady=(10, 2))
         self.radius_var = tk.StringVar(value="25")
@@ -2602,6 +2611,29 @@ class RadiusCenterDialog(tk.Tk):
         tk.Button(btns, text="Cancel", width=12, command=self.cancel).pack(side="right", padx=(6, 0))
         tk.Button(btns, text="OK", width=12, command=self.submit).pack(side="right")
 
+        # Size after children are packed so 3:2 / HiDPI logical screens keep
+        # Radius + buttons visible (fixed-size pre-layout was clipping).
+        apply_resizable_window(self, 580, 620, (420, 360))
+        refit_toplevel_geometry(self, 580, 620)
+
+        def _sync_wrap(_evt: Optional[object] = None) -> None:
+            self.update_idletasks()
+            try:
+                rw = int(self.winfo_width())
+            except tk.TclError:
+                return
+            if rw < 64:
+                return
+            wrap = max(120, min(_rc_wrap, rw - 48))
+            for child in frame.winfo_children():
+                if isinstance(child, tk.Label):
+                    try:
+                        child.configure(wraplength=wrap)
+                    except tk.TclError:
+                        pass
+
+        self.bind("<Configure>", lambda e: _sync_wrap())
+        _sync_wrap()
         self.protocol("WM_DELETE_WINDOW", self.cancel)
 
     def submit(self) -> None:
