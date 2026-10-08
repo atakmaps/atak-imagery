@@ -1654,8 +1654,8 @@ def bundled_addons_available() -> bool:
 
 def _wait_for_device_ready_dialog(progress: Any, prompt_text: str) -> None:
     if threading.current_thread() is threading.main_thread():
-        ensure_window_stacking(progress)
-        messagebox.showinfo(APP_TITLE, prompt_text, parent=progress)
+        cancel_all_scheduled_after(progress)
+        show_plain_info_dialog(progress, prompt_text)
         cancel_all_scheduled_after(progress)
         return
     progress.device_ready_event = threading.Event()
@@ -2017,30 +2017,10 @@ def run_refresh_addons_only(progress: Any) -> None:
 
 def show_downloader_session_exit_dialog(parent: tk.Tk, body: Optional[str] = None) -> None:
     """After imagery (and optional inline DTED), prompt user before launching the SQLite builder."""
-    ensure_window_stacking(parent)
     text = body if body is not None else DOWNLOADER_NEXT_SQLITE_DIALOG_TEXT
-    dlg = tk.Toplevel(parent)
-    dlg.title(APP_TITLE)
-    dlg.configure(cursor="arrow")
-    dlg.transient(parent)
-    dlg.grab_set()
-    dlg.resizable(False, False)
-    _exit_scale = apply_fixed_size_window(dlg, 520, 280)
-    tk.Label(
-        dlg,
-        text=text,
-        justify="center",
-        wraplength=scaled_int(460, _exit_scale),
-    ).pack(padx=24, pady=(20, 12))
-
-    def on_next() -> None:
-        dlg.destroy()
-
-    dlg.protocol("WM_DELETE_WINDOW", on_next)
-    tk.Button(dlg, text="Next", width=12, command=on_next).pack(pady=(0, 20))
-    parent.wait_window(dlg)
-    # ensure_window_stacking() schedules after() pulses on parent; clear them before
-    # the download worker continues touching the UI via pending status updates.
+    cancel_all_scheduled_after(parent)
+    # Landscape + content-sized (not fixed 520x280) so DTED notes and Next stay visible on 3:2.
+    show_plain_info_dialog(parent, text, ok_text="Next")
     cancel_all_scheduled_after(parent)
 
 # -----------------------------
@@ -2660,10 +2640,12 @@ class RadiusCenterDialog(tk.Tk):
         self.center_lon = lon
         self.radius_miles = miles
         self.accepted = True
+        cancel_all_scheduled_after(self)
         self.destroy()
 
     def cancel(self) -> None:
         self.accepted = False
+        cancel_all_scheduled_after(self)
         self.destroy()
 
 
@@ -3533,9 +3515,9 @@ def run_with_busy_dialog(
 ) -> None:
     """Run ``fn`` on a worker thread while showing a modal busy dialog.
 
-    The dialog keeps repainting on the main thread so the progress bar moves.
-    Optional ``progress_msg`` / ``progress_value`` are one-element lists the worker
-    may update (e.g. current zoom step).
+    UI updates run only on the Tk main thread via ``after`` + ``wait_window``.
+    Avoids nested ``update()`` loops that, with stacking ``after`` nudges, have
+    caused ``Tcl_AsyncDelete`` aborts on Linux during long coverage calcs.
     """
     owner = tk._default_root
     dlg = tk.Toplevel(owner) if owner is not None else tk.Tk()
@@ -3548,11 +3530,14 @@ def run_with_busy_dialog(
             pass
     apply_resizable_window(dlg, 480, 160, (360, 130))
     refit_toplevel_geometry(dlg, 480, 160)
+    # Drop stacking nudge timers immediately — they are unsafe on a long-lived
+    # busy dialog that later destroys itself (Linux Tcl_AsyncDelete).
+    cancel_all_scheduled_after(dlg)
     try:
+        dlg.lift()
         dlg.attributes("-topmost", True)
     except tk.TclError:
         pass
-    ensure_window_stacking(dlg, above=owner)
     try:
         dlg.grab_set()
     except tk.TclError:
@@ -3561,7 +3546,9 @@ def run_with_busy_dialog(
     frame = tk.Frame(dlg, padx=18, pady=16)
     frame.pack(fill="both", expand=True)
     detail_var = tk.StringVar(value=message)
-    tk.Label(frame, textvariable=detail_var, justify="left", anchor="w", wraplength=420).pack(fill="x", pady=(0, 10))
+    tk.Label(frame, textvariable=detail_var, justify="left", anchor="w", wraplength=420).pack(
+        fill="x", pady=(0, 10)
+    )
     use_determinate = progress_max > 0 and progress_value is not None
     bar = ttk.Progressbar(
         frame,
@@ -3574,7 +3561,8 @@ def run_with_busy_dialog(
 
     worker_error: List[BaseException] = []
     done = threading.Event()
-    pulse = 0
+    pulse = [0]
+    closed = [False]
 
     def _worker() -> None:
         try:
@@ -3584,40 +3572,18 @@ def run_with_busy_dialog(
         finally:
             done.set()
 
-    threading.Thread(target=_worker, daemon=True).start()
-
-    def _pump_dialog() -> None:
-        nonlocal pulse
-        pulse = (pulse + 1) % 4
-        dots = "." * pulse
-        if progress_msg:
-            try:
-                detail_var.set(str(progress_msg[0] or message) + dots)
-            except tk.TclError:
-                pass
-        else:
-            try:
-                detail_var.set(message + dots)
-            except tk.TclError:
-                pass
-        if use_determinate and progress_value is not None:
-            try:
-                bar["value"] = max(0, min(int(progress_value[0]), int(progress_max)))
-            except (tk.TclError, TypeError, ValueError):
-                pass
+    def _close_dialog() -> None:
+        if closed[0]:
+            return
+        closed[0] = True
         try:
-            dlg.update_idletasks()
-            dlg.update()
-        except tk.TclError:
+            cancel_all_scheduled_after(dlg)
+        except Exception:
             pass
-
-    try:
-        _pump_dialog()
-        while not done.is_set():
-            _pump_dialog()
-            done.wait(0.05)
-        _pump_dialog()
-    finally:
+        try:
+            dlg.attributes("-topmost", False)
+        except Exception:
+            pass
         try:
             bar.stop()
         except Exception:
@@ -3631,8 +3597,120 @@ def run_with_busy_dialog(
         except Exception:
             pass
 
+    def _tick() -> None:
+        if closed[0]:
+            return
+        if done.is_set():
+            _close_dialog()
+            return
+        pulse[0] = (pulse[0] + 1) % 4
+        dots = "." * pulse[0]
+        try:
+            if progress_msg:
+                detail_var.set(str(progress_msg[0] or message) + dots)
+            else:
+                detail_var.set(message + dots)
+            if use_determinate and progress_value is not None:
+                bar["value"] = max(0, min(int(progress_value[0]), int(progress_max)))
+        except (tk.TclError, TypeError, ValueError):
+            pass
+        try:
+            dlg.after(80, _tick)
+        except tk.TclError:
+            pass
+
+    threading.Thread(target=_worker, daemon=True).start()
+    try:
+        # Clear topmost after a beat without keep-alive stacking nudges.
+        try:
+            dlg.after(400, lambda: dlg.attributes("-topmost", False))
+        except tk.TclError:
+            pass
+        dlg.after(0, _tick)
+        dlg.wait_window()
+    finally:
+        _close_dialog()
+
     if worker_error:
         raise worker_error[0]
+
+
+def show_plain_info_dialog(
+    parent: Optional[tk.Misc],
+    body: str,
+    *,
+    title: str = APP_TITLE,
+    ok_text: str = "OK",
+) -> None:
+    """Landscape info prompt — normal font (not system messagebox bold stack)."""
+    owns_root = parent is None
+    dlg: tk.Misc
+    if owns_root:
+        dlg = tk.Tk()
+    else:
+        dlg = tk.Toplevel(parent)
+        try:
+            dlg.transient(parent)  # type: ignore[arg-type]
+        except tk.TclError:
+            pass
+    dlg.title(title)  # type: ignore[union-attr]
+    dlg.configure(cursor="arrow")  # type: ignore[union-attr]
+
+    outer = tk.Frame(dlg, padx=16, pady=14)
+    outer.pack(fill="both", expand=True)
+
+    paragraphs = [p.strip() for p in (body or "").split("\n\n") if p.strip()]
+    if not paragraphs:
+        paragraphs = [(body or "").strip() or " "]
+    display = "\n\n".join(" ".join(p.splitlines()) for p in paragraphs)
+
+    body_lbl = tk.Label(
+        outer,
+        text=display,
+        justify="left",
+        anchor="nw",
+        font=("TkDefaultFont", 10),
+        wraplength=560,
+    )
+    body_lbl.pack(anchor="w", fill="both", expand=True)
+
+    btns = tk.Frame(outer)
+    btns.pack(fill="x", pady=(14, 0))
+
+    def on_ok() -> None:
+        cancel_all_scheduled_after(dlg)
+        dlg.destroy()  # type: ignore[union-attr]
+
+    tk.Button(btns, text=ok_text, width=10, command=on_ok).pack(side="right")
+
+    def _sync_wrap(_evt: Optional[object] = None) -> None:
+        try:
+            w = int(dlg.winfo_width())  # type: ignore[union-attr]
+        except tk.TclError:
+            return
+        if w > 80:
+            body_lbl.configure(wraplength=max(200, w - 48))
+
+    dlg.bind("<Configure>", lambda e: _sync_wrap())  # type: ignore[union-attr]
+    dlg.protocol("WM_DELETE_WINDOW", on_ok)  # type: ignore[union-attr]
+    apply_resizable_window(dlg, 640, 280, (480, 200))  # type: ignore[arg-type]
+    refit_toplevel_geometry(dlg, 640, 280)  # type: ignore[arg-type]
+    cancel_all_scheduled_after(dlg)
+    try:
+        dlg.lift()  # type: ignore[union-attr]
+        dlg.attributes("-topmost", True)  # type: ignore[union-attr]
+        dlg.after(400, lambda: dlg.attributes("-topmost", False))  # type: ignore[union-attr]
+    except tk.TclError:
+        pass
+    try:
+        dlg.grab_set()  # type: ignore[union-attr]
+    except tk.TclError:
+        pass
+    _sync_wrap()
+    if owns_root:
+        dlg.mainloop()  # type: ignore[union-attr]
+    else:
+        dlg.wait_window()  # type: ignore[union-attr]
 
 
 def show_summary_confirm(
@@ -3644,51 +3722,101 @@ def show_summary_confirm(
     download_scope: str = "state",
     radius_summary: Optional[str] = None,
 ) -> bool:
+    """Landscape summary confirm — normal font (not system messagebox bold stack)."""
+    lines: List[str] = []
     if download_scope == "radius" and radius_summary:
-        msg = (
-            f"{radius_summary}\n\n"
-            f"Zooms:\n{', '.join(map(str, selected_zooms))}\n\n"
-            f"Estimated size:\n{human_bytes(total_bytes)}\n\n"
-            f"Estimated tiles:\n{total_tiles:,}\n\n"
-            "Select a temporary folder for install on the next screen (defaults to your "
-            "Downloads folder if you have not chosen one before).\n\n"
-            "Press OK to continue."
-        )
+        for part in radius_summary.splitlines():
+            part = part.strip()
+            if part:
+                lines.append(part)
     else:
         state_summary = ", ".join(selected_states[:6])
         if len(selected_states) > 6:
             state_summary += f", ... ({len(selected_states)} total)"
-        msg = (
-            f"States:\n{state_summary}\n\n"
-            f"Zooms:\n{', '.join(map(str, selected_zooms))}\n\n"
-            f"Estimated size:\n{human_bytes(total_bytes)}\n\n"
-            f"Estimated tiles:\n{total_tiles:,}\n\n"
-            "Select a temporary folder for install on the next screen (defaults to your "
-            "Downloads folder if you have not chosen one before).\n\n"
-            "Press OK to continue."
-        )
+        lines.append(f"States: {state_summary}")
+    lines.append(f"Zooms: {', '.join(map(str, selected_zooms))}")
+    lines.append(f"Estimated size: {human_bytes(total_bytes)}")
+    lines.append(f"Estimated tiles: {total_tiles:,}")
+
+    note = (
+        "Select a temporary folder for install on the next screen "
+        "(defaults to your Downloads folder if you have not chosen one before)."
+    )
+
+    result = {"ok": False}
     root = tk.Tk()
+    root.title(APP_TITLE)
+    root.configure(cursor="arrow")
     try:
         root.option_add("*cursor", "arrow")
     except tk.TclError:
         pass
-    root.configure(cursor="arrow")
-    # Position at center but keep visible so topmost works on GNOME/Mutter.
-    root.geometry("1x1")
-    root.update_idletasks()
-    sw = root.winfo_screenwidth()
-    sh = root.winfo_screenheight()
-    root.geometry(f"1x1+{sw // 2}+{sh // 2}")
-    root.attributes("-topmost", True)
-    root.lift()
-    root.focus_force()
-    root.update_idletasks()
-    messagebox.showinfo(APP_TITLE, msg, parent=root)
-    try:
+
+    outer = tk.Frame(root, padx=16, pady=14)
+    outer.pack(fill="both", expand=True)
+
+    body = "\n".join(lines)
+    body_lbl = tk.Label(
+        outer,
+        text=body,
+        justify="left",
+        anchor="nw",
+        font=("TkDefaultFont", 10),
+        wraplength=560,
+    )
+    body_lbl.pack(anchor="w", fill="both", expand=True)
+
+    note_lbl = tk.Label(
+        outer,
+        text=note,
+        justify="left",
+        anchor="w",
+        font=("TkDefaultFont", 10),
+        wraplength=560,
+        fg="gray25",
+    )
+    note_lbl.pack(anchor="w", fill="x", pady=(12, 0))
+
+    btns = tk.Frame(outer)
+    btns.pack(fill="x", pady=(14, 0))
+
+    def on_cancel() -> None:
+        result["ok"] = False
+        cancel_all_scheduled_after(root)
         root.destroy()
+
+    def on_ok() -> None:
+        result["ok"] = True
+        cancel_all_scheduled_after(root)
+        root.destroy()
+
+    tk.Button(btns, text="Cancel", width=10, command=on_cancel).pack(side="right", padx=(6, 0))
+    tk.Button(btns, text="OK", width=10, command=on_ok).pack(side="right")
+
+    def _sync_wrap(_evt: Optional[object] = None) -> None:
+        try:
+            w = int(root.winfo_width())
+        except tk.TclError:
+            return
+        if w > 80:
+            wrap = max(200, w - 48)
+            body_lbl.configure(wraplength=wrap)
+            note_lbl.configure(wraplength=wrap)
+
+    root.bind("<Configure>", lambda e: _sync_wrap())
+    root.protocol("WM_DELETE_WINDOW", on_cancel)
+    apply_resizable_window(root, 640, 300, (480, 220))
+    refit_toplevel_geometry(root, 640, 300)
+    cancel_all_scheduled_after(root)
+    try:
+        root.lift()
+        root.attributes("-topmost", True)
+        root.after(400, lambda: root.attributes("-topmost", False))
     except tk.TclError:
         pass
-    return True
+    _sync_wrap()
+    root.mainloop()
+    return bool(result["ok"])
 
 
 PIPELINE_OUTPUT_PARENT_FILE = RUNTIME_STATE_DIR / ".last_pipeline_output_parent.txt"
@@ -4576,8 +4704,8 @@ def pump_gui_logs(window: ProgressWindow) -> None:
             prompt_text = window.device_ready_prompt
             evt = getattr(window, "device_ready_event", None)
             window.device_ready_prompt = None
-            ensure_window_stacking(window)
-            messagebox.showinfo(APP_TITLE, prompt_text, parent=window)
+            cancel_all_scheduled_after(window)
+            show_plain_info_dialog(window, str(prompt_text or ""))
             cancel_all_scheduled_after(window)
             if evt is not None:
                 evt.set()
@@ -4930,9 +5058,9 @@ def main() -> None:
                         est_total_tiles += n
 
                     radius_summary = (
-                        f"Fixed-radius download:\n"
-                        f"Center ({rd.center_lat:.5f}, {rd.center_lon:.5f}) decimal deg, "
-                        f"radius {rd.radius_miles:g} mi\n"
+                        "Fixed-radius download\n"
+                        f"Center: ({rd.center_lat:.5f}, {rd.center_lon:.5f}) decimal deg\n"
+                        f"Radius: {rd.radius_miles:g} mi\n"
                         f"Imagery folder: {scope_dlg.radius_region_folder}"
                     )
                     if not show_summary_confirm(
