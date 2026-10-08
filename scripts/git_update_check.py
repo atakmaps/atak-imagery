@@ -413,6 +413,7 @@ def run_startup_git_update_check(*, app_title: str, script_path: Path) -> None:
     from tk_window_scaling import ensure_window_stacking, cancel_all_scheduled_after
 
     root = tk.Tk()
+    root.title(app_title)
     root.withdraw()
 
     progress: Optional[tk.Toplevel] = None
@@ -474,11 +475,11 @@ def run_startup_git_update_check(*, app_title: str, script_path: Path) -> None:
             "\n\nUpdate now? Your repo will switch to branch main, fast-forward pull, "
             "and uncommitted changes will be stashed automatically if needed."
         )
-        root.deiconify()
-        root.update_idletasks()
-        _center_window(root)
-        ensure_window_stacking(root)
-        root.update_idletasks()
+        try:
+            root.withdraw()
+            root.update_idletasks()
+        except Exception:
+            pass
         if not messagebox.askyesno(app_title, body, parent=root):
             _safe_destroy_tk(root)
             return
@@ -802,14 +803,17 @@ def run_startup_release_update_check(*, app_title: str, script_path: Path) -> No
     from tk_window_scaling import ensure_window_stacking, cancel_all_scheduled_after
 
     root = tk.Tk()
+    root.title(app_title)
     root.withdraw()
 
     def _lift() -> None:
-        root.deiconify()
-        root.update_idletasks()
-        _center_window(root)
-        ensure_window_stacking(root)
-        root.update_idletasks()
+        # Keep the empty root hidden. deiconify() flashes a blank "tk" window
+        # behind messageboxes / Toplevels on Linux WMs.
+        try:
+            root.withdraw()
+            root.update_idletasks()
+        except Exception:
+            pass
 
     # ---- download + progress phase ----------------------------------------
     def start_download() -> None:

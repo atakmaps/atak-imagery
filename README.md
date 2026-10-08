@@ -56,11 +56,17 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.3.52` (tag **`v1.3.52`** on GitHub).
+**Linux / source release:** `v1.3.53` (tag **`v1.3.53`** on GitHub).
 
-**Windows:** Same version as Linux (`v1.3.52`). Build on a Windows VM with PyInstaller — see **Windows build** below.
+**Windows:** Same version as Linux (`v1.3.53`). Build on a Windows VM with PyInstaller — see **Windows build** below.
 
-Version **1.3.52** highlights:
+Version **1.3.53** highlights:
+
+- **Coverage Tcl crash fix:** busy dialog runs zoom steps on the main thread (no worker / no ttk), avoiding `Tcl_AsyncDelete` after radius dialog teardown.
+- **Update prompt:** empty Tk root stays withdrawn so “Update complete” no longer flashes a blank window.
+- Welcome screens show **Version 1.3.53**.
+
+### Previous release (v1.3.52)
 
 - **Coverage calc crash fix:** busy dialog no longer nested-`update()`s with stacking timers (Linux `Tcl_AsyncDelete` during high-zoom radius coverage).
 - **Dialog UI cleanup:** update, summary, device-connect, and “Next to SQLite” prompts use landscape normal-font dialogs instead of tall bold messageboxes.

@@ -56,7 +56,7 @@ from collections import deque
 from concurrent.futures import FIRST_COMPLETED, CancelledError, ThreadPoolExecutor, wait
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Set, Tuple, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 import requests
 import tkinter as tk
@@ -1545,11 +1545,13 @@ def show_downloader_welcome() -> Tuple[bool, bool, str]:
     def on_quit() -> None:
         state["accepted"] = False
         state["exit_reason"] = "quit_button"
+        cancel_all_scheduled_after(root)
         root.destroy()
 
     def on_window_close() -> None:
         state["accepted"] = False
         state["exit_reason"] = "window_close"
+        cancel_all_scheduled_after(root)
         root.destroy()
 
     def on_continue() -> None:
@@ -1564,6 +1566,7 @@ def show_downloader_welcome() -> Tuple[bool, bool, str]:
             return
         state["accepted"] = True
         state["exit_reason"] = "continue"
+        cancel_all_scheduled_after(root)
         root.destroy()
 
     tk.Button(btn_row, text="Continue", width=12, command=on_continue).pack(side="left", padx=6)
@@ -2485,10 +2488,12 @@ class DownloadScopeDialog(tk.Tk):
         self.raw_imagery_path = self.raw_var.get().strip()
         self.local_dted_path = self.dted_var.get().strip()
         self.accepted = True
+        cancel_all_scheduled_after(self)
         self.destroy()
 
     def cancel(self) -> None:
         self.accepted = False
+        cancel_all_scheduled_after(self)
         self.destroy()
 
 
@@ -3507,32 +3512,33 @@ class ProgressWindow(tk.Tk):
 
 def run_with_busy_dialog(
     message: str,
-    fn: Callable[[], None],
+    steps: Sequence[Callable[[], None]],
     *,
     progress_msg: Optional[List[str]] = None,
     progress_value: Optional[List[int]] = None,
     progress_max: int = 0,
 ) -> None:
-    """Run ``fn`` on a worker thread while showing a modal busy dialog.
+    """Run coverage (or similar) steps on the Tk main thread with a modal busy dialog.
 
-    UI updates run only on the Tk main thread via ``after`` + ``wait_window``.
-    Avoids nested ``update()`` loops that, with stacking ``after`` nudges, have
-    caused ``Tcl_AsyncDelete`` aborts on Linux during long coverage calcs.
+    No worker thread and no ``ttk`` widgets: prior Linux crashes
+    (``Tcl_AsyncDelete`` / ``ttk::ThemeChanged`` after dialog teardown) came from a
+    background thread + Progressbar while earlier Tk roots were being destroyed.
+    Each step may block briefly; we ``after(1, …)`` between steps so the dialog can paint.
     """
-    owner = tk._default_root
-    dlg = tk.Toplevel(owner) if owner is not None else tk.Tk()
+    # Always a fresh root — never Toplevel() on a just-destroyed dialog chain.
+    dlg = tk.Tk()
     dlg.title(APP_TITLE)
     dlg.configure(cursor="arrow")
-    if owner is not None:
-        try:
-            dlg.transient(owner)
-        except tk.TclError:
-            pass
-    apply_resizable_window(dlg, 480, 160, (360, 130))
-    refit_toplevel_geometry(dlg, 480, 160)
-    # Drop stacking nudge timers immediately — they are unsafe on a long-lived
-    # busy dialog that later destroys itself (Linux Tcl_AsyncDelete).
-    cancel_all_scheduled_after(dlg)
+    # Manual geometry (no ensure_window_stacking timers on this short-lived dialog).
+    dlg.update_idletasks()
+    sw = max(int(dlg.winfo_screenwidth()), 640)
+    sh = max(int(dlg.winfo_screenheight()), 480)
+    w, h = 480, 160
+    dlg.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
+    try:
+        dlg.minsize(360, 130)
+    except tk.TclError:
+        pass
     try:
         dlg.lift()
         dlg.attributes("-topmost", True)
@@ -3549,28 +3555,28 @@ def run_with_busy_dialog(
     tk.Label(frame, textvariable=detail_var, justify="left", anchor="w", wraplength=420).pack(
         fill="x", pady=(0, 10)
     )
+    # Plain tk progress track (avoid ttk theme callbacks across root lifetimes).
+    track = tk.Frame(frame, height=16, bg="#d0d0d0", highlightthickness=0)
+    track.pack(fill="x")
+    track.pack_propagate(False)
+    fill = tk.Frame(track, width=1, height=16, bg="#3a7bd5", highlightthickness=0)
+    fill.place(x=0, y=0, relheight=1.0)
+
     use_determinate = progress_max > 0 and progress_value is not None
-    bar = ttk.Progressbar(
-        frame,
-        mode="determinate" if use_determinate else "indeterminate",
-        maximum=max(1, progress_max) if use_determinate else 100,
-    )
-    bar.pack(fill="x")
-    if not use_determinate:
-        bar.start(10)
-
-    worker_error: List[BaseException] = []
-    done = threading.Event()
-    pulse = [0]
+    step_list = list(steps)
+    step_error: List[BaseException] = []
     closed = [False]
+    idx = [0]
+    pulse = [0]
 
-    def _worker() -> None:
+    def _set_bar(value: int, maximum: int) -> None:
         try:
-            fn()
-        except BaseException as exc:
-            worker_error.append(exc)
-        finally:
-            done.set()
+            track.update_idletasks()
+            tw = max(1, int(track.winfo_width()))
+            frac = 0.0 if maximum <= 0 else max(0.0, min(1.0, float(value) / float(maximum)))
+            fill.place(x=0, y=0, relheight=1.0, width=max(1, int(tw * frac)))
+        except tk.TclError:
+            pass
 
     def _close_dialog() -> None:
         if closed[0]:
@@ -3585,10 +3591,6 @@ def run_with_busy_dialog(
         except Exception:
             pass
         try:
-            bar.stop()
-        except Exception:
-            pass
-        try:
             dlg.grab_release()
         except Exception:
             pass
@@ -3597,12 +3599,7 @@ def run_with_busy_dialog(
         except Exception:
             pass
 
-    def _tick() -> None:
-        if closed[0]:
-            return
-        if done.is_set():
-            _close_dialog()
-            return
+    def _refresh_label() -> None:
         pulse[0] = (pulse[0] + 1) % 4
         dots = "." * pulse[0]
         try:
@@ -3611,28 +3608,45 @@ def run_with_busy_dialog(
             else:
                 detail_var.set(message + dots)
             if use_determinate and progress_value is not None:
-                bar["value"] = max(0, min(int(progress_value[0]), int(progress_max)))
+                _set_bar(int(progress_value[0]), int(progress_max))
+            elif step_list:
+                _set_bar(idx[0], len(step_list))
         except (tk.TclError, TypeError, ValueError):
             pass
-        try:
-            dlg.after(80, _tick)
-        except tk.TclError:
-            pass
 
-    threading.Thread(target=_worker, daemon=True).start()
+    def _run_next() -> None:
+        if closed[0]:
+            return
+        if idx[0] >= len(step_list):
+            _close_dialog()
+            return
+        _refresh_label()
+        try:
+            step_list[idx[0]]()
+        except BaseException as exc:
+            step_error.append(exc)
+            _close_dialog()
+            return
+        idx[0] += 1
+        _refresh_label()
+        try:
+            # Yield so the dialog can paint between heavy zoom steps.
+            dlg.after(1, _run_next)
+        except tk.TclError:
+            _close_dialog()
+
     try:
-        # Clear topmost after a beat without keep-alive stacking nudges.
         try:
             dlg.after(400, lambda: dlg.attributes("-topmost", False))
         except tk.TclError:
             pass
-        dlg.after(0, _tick)
+        dlg.after(1, _run_next)
         dlg.wait_window()
     finally:
         _close_dialog()
 
-    if worker_error:
-        raise worker_error[0]
+    if step_error:
+        raise step_error[0]
 
 
 def show_plain_info_dialog(
@@ -5009,22 +5023,39 @@ def main() -> None:
                     _coverage_status = ["Calculating coverage…"]
                     _coverage_steps = [0]
                     _coverage_max = GOOGLE_HYBRID_ZOOM_MAX - 10 + 1
+                    # Plain floats only — do not close steps over ``rd`` (destroyed Tk root).
+                    _cov_lat = float(rd.center_lat)
+                    _cov_lon = float(rd.center_lon)
+                    _cov_miles = float(rd.radius_miles)
 
-                    def _precompute_radius_tiles() -> None:
-                        for step, z in enumerate(range(10, GOOGLE_HYBRID_ZOOM_MAX + 1), start=1):
+                    def _make_coverage_step(
+                        z: int,
+                        step: int,
+                        lat: float = _cov_lat,
+                        lon: float = _cov_lon,
+                        miles: float = _cov_miles,
+                    ) -> Callable[[], None]:
+                        def _one() -> None:
                             _coverage_status[0] = (
                                 f"Calculating coverage… zoom {z} / {GOOGLE_HYBRID_ZOOM_MAX} "
                                 f"(high zooms can take a few minutes)"
                             )
                             log(_coverage_status[0])
-                            tiles = compute_tiles_for_radius(rd.center_lat, rd.center_lon, rd.radius_miles, z)
+                            tiles = compute_tiles_for_radius(lat, lon, miles, z)
                             _radius_tiles[z] = len(tiles)
                             _coverage_steps[0] = step
                             log(f"  zoom {z}: {len(tiles):,} tiles")
 
+                        return _one
+
+                    _coverage_steps_fns = [
+                        _make_coverage_step(z, step)
+                        for step, z in enumerate(range(10, GOOGLE_HYBRID_ZOOM_MAX + 1), start=1)
+                    ]
+
                     run_with_busy_dialog(
                         "Calculating coverage…",
-                        _precompute_radius_tiles,
+                        _coverage_steps_fns,
                         progress_msg=_coverage_status,
                         progress_value=_coverage_steps,
                         progress_max=_coverage_max,
@@ -5034,8 +5065,8 @@ def main() -> None:
                         [],
                         zoom_estimates,
                         download_scope="radius",
-                        radius_center=(rd.center_lat, rd.center_lon),
-                        radius_miles=rd.radius_miles,
+                        radius_center=(_cov_lat, _cov_lon),
+                        radius_miles=_cov_miles,
                         radius_imagery_folder=scope_dlg.radius_region_folder,
                         avg_tile_bytes_by_zoom=avg_tile_bytes_map,
                         precomputed_radius_tiles=_radius_tiles,
@@ -5059,8 +5090,8 @@ def main() -> None:
 
                     radius_summary = (
                         "Fixed-radius download\n"
-                        f"Center: ({rd.center_lat:.5f}, {rd.center_lon:.5f}) decimal deg\n"
-                        f"Radius: {rd.radius_miles:g} mi\n"
+                        f"Center: ({_cov_lat:.5f}, {_cov_lon:.5f}) decimal deg\n"
+                        f"Radius: {_cov_miles:g} mi\n"
                         f"Imagery folder: {scope_dlg.radius_region_folder}"
                     )
                     if not show_summary_confirm(
@@ -5090,8 +5121,8 @@ def main() -> None:
                         kwargs={
                             "raw_imagery_root": raw_path,
                             "local_dted_root": dted_path,
-                            "radius_center": (rd.center_lat, rd.center_lon),
-                            "radius_miles": rd.radius_miles,
+                            "radius_center": (_cov_lat, _cov_lon),
+                            "radius_miles": _cov_miles,
                             "radius_region_folder": scope_dlg.radius_region_folder,
                             "preloaded_states": _preloaded,
                             "refresh_addons_after": do_addons,
