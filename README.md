@@ -8,6 +8,8 @@ On Linux, **always run the installer before using the apps**. The file **`instal
 
 Source repository: `https://github.com/atakmaps/atak-imagery`
 
+Developers and AI assistants: [CONSTITUTION.md](CONSTITUTION.md), [docs/DEVELOPER-GUIDE.md](docs/DEVELOPER-GUIDE.md), [AGENTS.md](AGENTS.md), and [CONTRIBUTING.md](CONTRIBUTING.md). Those files are in the git clone. The Linux install zip ships this README and the runtime only.
+
 ### How to run the installer
 
 1. Put the project on your machine and open a **terminal**:
