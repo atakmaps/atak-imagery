@@ -58,11 +58,16 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.3.53` (tag **`v1.3.53`** on GitHub).
+**Linux / source release:** `v1.3.54` (tag **`v1.3.54`** on GitHub).
 
-**Windows:** Same version as Linux (`v1.3.53`). Build on a Windows VM with PyInstaller — see **Windows build** below.
+**Windows:** Same version as Linux (`v1.3.54`). Build on a Windows VM with PyInstaller — see **Windows build** below.
 
-Version **1.3.53** highlights:
+Version **1.3.54** highlights:
+
+- **Update dialog visible on Linux:** map a 1×1 off-screen root so the Yes/No update prompt appears on Cinnamon/Mutter (withdrawn parent made it invisible and looked like a failed launch).
+- Welcome screens show **Version 1.3.54**.
+
+### Previous release (v1.3.53)
 
 - **Coverage Tcl crash fix:** busy dialog runs zoom steps on the main thread (no worker / no ttk), avoiding `Tcl_AsyncDelete` after radius dialog teardown.
 - **Update prompt:** empty Tk root stays withdrawn so “Update complete” no longer flashes a blank window.

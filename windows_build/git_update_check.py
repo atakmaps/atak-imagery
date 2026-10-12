@@ -41,6 +41,33 @@ def _center_window(win: object) -> None:
         pass
 
 
+def _map_offscreen_root(root: object) -> None:
+    """Map a 1×1 off-screen root so child dialogs appear without a blank Tk window.
+
+    Fully ``withdraw()``-n roots make ``Toplevel`` / messagebox children invisible on
+    several Linux WMs (Cinnamon, Mutter). A normal ``deiconify()`` flashes an empty
+    ``tk`` window. Off-screen + ``overrideredirect`` avoids both failure modes.
+    """
+    try:
+        root.overrideredirect(True)  # type: ignore[attr-defined]
+        root.geometry("1x1+-5000+-5000")  # type: ignore[attr-defined]
+        root.deiconify()  # type: ignore[attr-defined]
+        root.update_idletasks()  # type: ignore[attr-defined]
+        try:
+            root.attributes("-alpha", 0.0)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        try:
+            root.lower()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+    except Exception:
+        try:
+            root.withdraw()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+
 def _safe_destroy_tk(root: object) -> None:
     """Cancel pending after handlers before destroy (avoids Tcl_AsyncDelete on Linux)."""
     try:
@@ -131,10 +158,16 @@ def ask_update_available(
     from tk_window_scaling import apply_resizable_window, ensure_window_stacking, refit_toplevel_geometry
 
     result = {"ok": False}
+    # Parent must be mapped (even off-screen) or this dialog never appears on Linux WMs.
+    _map_offscreen_root(parent)
     dlg = tk.Toplevel(parent)  # type: ignore[arg-type]
     dlg.title(app_title)
     dlg.configure(cursor="arrow")
-    dlg.transient(parent)  # type: ignore[arg-type]
+    try:
+        if bool(parent.winfo_viewable()):  # type: ignore[attr-defined]
+            dlg.transient(parent)  # type: ignore[arg-type]
+    except Exception:
+        pass
 
     outer = tk.Frame(dlg, padx=16, pady=14)
     outer.pack(fill="both", expand=True)
@@ -475,11 +508,7 @@ def run_startup_git_update_check(*, app_title: str, script_path: Path) -> None:
             "\n\nUpdate now? Your repo will switch to branch main, fast-forward pull, "
             "and uncommitted changes will be stashed automatically if needed."
         )
-        try:
-            root.withdraw()
-            root.update_idletasks()
-        except Exception:
-            pass
+        _map_offscreen_root(root)
         if not messagebox.askyesno(app_title, body, parent=root):
             _safe_destroy_tk(root)
             return
@@ -807,13 +836,9 @@ def run_startup_release_update_check(*, app_title: str, script_path: Path) -> No
     root.withdraw()
 
     def _lift() -> None:
-        # Keep the empty root hidden. deiconify() flashes a blank "tk" window
-        # behind messageboxes / Toplevels on Linux WMs.
-        try:
-            root.withdraw()
-            root.update_idletasks()
-        except Exception:
-            pass
+        # Off-screen mapped root: children (update dialog, progress, messagebox)
+        # become visible without flashing a blank "tk" window.
+        _map_offscreen_root(root)
 
     # ---- download + progress phase ----------------------------------------
     def start_download() -> None:
