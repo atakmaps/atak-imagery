@@ -58,11 +58,16 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.3.55` (tag **`v1.3.55`** on GitHub).
+**Linux / source release:** `v1.3.56` (tag **`v1.3.56`** on GitHub).
 
-**Windows:** Same version as Linux (`v1.3.55`). Build on a Windows VM with PyInstaller — see **Windows build** below.
+**Windows:** Same version as Linux (`v1.3.56`). Build on a Windows VM with PyInstaller — see **Windows build** below.
 
-Version **1.3.55** highlights:
+Version **1.3.56** highlights:
+
+- **Update dialogs match the app:** "Update complete" and update error notices now use the same font and are centered on screen like the other windows (they were a different font at the top-left).
+- Welcome screens show **Version 1.3.56**.
+
+### Previous release (v1.3.55)
 
 - **TAK-UV-CORE:** the plugin is now named TAK-UV-CORE everywhere (installer screens, docs, GitHub source `atakmaps/TAK-UV-CORE`).
 - **TAK-MESHCORE removed** from the Device Installer. Choices are now ATAK + TAK-UV-CORE plugin, ATAK only, or TAK-UV-CORE plugin only.
