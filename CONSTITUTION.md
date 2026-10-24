@@ -25,7 +25,7 @@ Behavior changes go in `scripts/`. Windows copies are produced by `scripts/sync_
 
 The version string is the `VERSION` file at the repo root. Welcome screens, Linux zip names, and Windows installer version follow it.
 
-ATAK **5.6 or newer** is supported. `scripts/atak_version_policy.py` rejects 5.5.x. Plugin APKs come from GitHub releases of `atakmaps/TAK-UV-PRO` and `atakmaps/TAK-MESHCORE`, matched to the ATAK version on the phone. This repo does not contain those plugins' source.
+ATAK **5.6 or newer** is supported. `scripts/atak_version_policy.py` rejects 5.5.x. The Device Installer plugin APK comes from GitHub releases of `atakmaps/TAK-UV-CORE`, matched to the ATAK version on the phone. This repo does not contain that plugin's source. TAK-MESHCORE is not an installer choice.
 
 ## IV. Secrets and generated data stay out of git
 

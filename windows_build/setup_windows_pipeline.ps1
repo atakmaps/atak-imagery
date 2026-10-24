@@ -266,7 +266,7 @@ function Install-Shortcuts {
 
     New-ProgramShortcut -LinkPath (Join-Path $DesktopDir "ATAK Device Installer.lnk") `
         -TargetExe $installerExe -WorkingDir $InstallDir `
-        -Description "Install ATAK and TAK-UV-PRO on your phone over USB"
+        -Description "Install ATAK and TAK-UV-CORE on your phone over USB"
 
     New-ProgramShortcut -LinkPath (Join-Path $DesktopDir "ATAK Imagery Downloader.lnk") `
         -TargetExe $imageryExe -WorkingDir $InstallDir `

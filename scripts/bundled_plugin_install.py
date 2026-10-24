@@ -1,6 +1,6 @@
 """Discover and install bundled add-on ATAK plugin APKs (installer + imagery downloader).
 
-TAK-UV-PRO is never installed from this path — it comes from GitHub / manifest only.
+TAK-UV-CORE is never installed from this path — it comes from GitHub / manifest only.
 """
 
 from __future__ import annotations
@@ -15,11 +15,11 @@ InstallApkFn = Callable[..., None]
 
 def _is_uvpro_apk_filename(name: str) -> bool:
     compact = name.lower().replace("_", "").replace("-", "").replace(" ", "")
-    return "uvpro" in compact or "takuvpro" in compact
+    return any(k in compact for k in ("uvpro", "takuvpro", "uvcore", "takuvcore"))
 
 
 def iter_bundled_addon_apks(plugin_root: Path) -> List[Path]:
-    """APKs under *plugin_root*, excluding UV-PRO filenames; one path per basename."""
+    """APKs under *plugin_root*, excluding UV-CORE filenames; one path per basename."""
     if not plugin_root.is_dir():
         return []
     candidates = sorted(

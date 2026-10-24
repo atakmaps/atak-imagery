@@ -58,11 +58,17 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.3.54` (tag **`v1.3.54`** on GitHub).
+**Linux / source release:** `v1.3.55` (tag **`v1.3.55`** on GitHub).
 
-**Windows:** Same version as Linux (`v1.3.54`). Build on a Windows VM with PyInstaller — see **Windows build** below.
+**Windows:** Same version as Linux (`v1.3.55`). Build on a Windows VM with PyInstaller — see **Windows build** below.
 
-Version **1.3.54** highlights:
+Version **1.3.55** highlights:
+
+- **TAK-UV-CORE:** the plugin is now named TAK-UV-CORE everywhere (installer screens, docs, GitHub source `atakmaps/TAK-UV-CORE`).
+- **TAK-MESHCORE removed** from the Device Installer. Choices are now ATAK + TAK-UV-CORE plugin, ATAK only, or TAK-UV-CORE plugin only.
+- Welcome screens show **Version 1.3.55**.
+
+### Previous release (v1.3.54)
 
 - **Update dialog visible on Linux:** map a 1×1 off-screen root so the Yes/No update prompt appears on Cinnamon/Mutter (withdrawn parent made it invisible and looked like a failed launch).
 - Welcome screens show **Version 1.3.54**.
@@ -87,7 +93,7 @@ Version **1.3.54** highlights:
 
 ### Previous release (v1.3.50)
 
-- **UV-PRO install fix:** Device Installer now picks the signed **release** APK (not the debug build) when matching ATAK 5.6.x on GitHub Latest.
+- **UV-CORE install fix:** Device Installer now picks the signed **release** APK (not the debug build) when matching ATAK 5.6.x on GitHub Latest.
 
 ### Previous release (v1.3.49)
 
@@ -139,14 +145,14 @@ Version **1.3.54** highlights:
 
 ### Previous release (v1.3.38)
 
-- **Meshcore out-of-box install:** Device Installer now downloads TAK-MESHCORE from GitHub Releases by default (`atakmaps/TAK-MESHCORE`), matching UV-PRO — no local Plugins folder required.
+- **Meshcore out-of-box install:** Device Installer now downloads TAK-MESHCORE from GitHub Releases by default (`atakmaps/TAK-MESHCORE`), matching UV-CORE — no local Plugins folder required.
 - **deploy.env backfill:** missing keys from `deploy.env.example` are merged on startup so existing installs pick up new settings without manual edits.
 - **Linux install defaults:** `install_linux.sh` seeds `ATAK_MESHCORE_PLUGIN_GITHUB_REPO` on first run.
 
 ### Previous release (v1.3.37)
 
 - **New Meshcore install options:** Device Installer now includes `ATAK + TAK-MESHCORE plugin` and `TAK-MESHCORE plugin only` in the install-choice screen.
-- **Multi-plugin install routing:** plugin install step now resolves and installs either UV-PRO or Meshcore based on selection while preserving existing wizard step flow.
+- **Multi-plugin install routing:** plugin install step now resolves and installs either UV-CORE or Meshcore based on selection while preserving existing wizard step flow.
 - **Meshcore source support:** installer can resolve Meshcore APKs from `ATAK_MESHCORE_PLUGIN_APK`, `ATAK_MESHCORE_PLUGIN_REPO`, or default local Meshcore folder.
 
 ### Previous release (v1.3.36)
@@ -201,8 +207,8 @@ Version **1.3.54** highlights:
 
 ### Previous release (v1.3.27)
 
-- **Installer plugin sequencing fix:** in ATAK + UV-PRO mode, bundled add-on plugins now install while ATAK is closed so they do not all trigger load prompts.
-- **UV-PRO notification targeting:** installer now launches ATAK, waits 15 seconds, then installs UV-PRO last so only UV-PRO prompts to load in-app.
+- **Installer plugin sequencing fix:** in ATAK + UV-CORE mode, bundled add-on plugins now install while ATAK is closed so they do not all trigger load prompts.
+- **UV-CORE notification targeting:** installer now launches ATAK, waits 15 seconds, then installs UV-CORE last so only UV-CORE prompts to load in-app.
 
 ### Previous release (v1.3.26)
 
@@ -234,12 +240,12 @@ Version **1.3.54** highlights:
 ### Previous release (v1.3.18)
 
 - **Installer plugin-step UI cleanup:** removed text indicating bundled add-on plugin installation from the "Installing plugin" window.
-- **Current behavior reflected in wizard copy:** plugin installation messaging now reflects UV-PRO-only install behavior.
+- **Current behavior reflected in wizard copy:** plugin installation messaging now reflects UV-CORE-only install behavior.
 
 ### Previous release (v1.3.17)
 
 - **Installer downgrade recovery:** when plugin install returns `INSTALL_FAILED_VERSION_DOWNGRADE`, the installer now retries downgrade flags and, if still blocked, performs a full uninstall/reinstall recovery automatically.
-- **Strict uninstall verification for plugin-only flow:** plugin-only install now verifies the old UV-PRO package is truly removed before proceeding, reducing repeated version-code mismatch failures.
+- **Strict uninstall verification for plugin-only flow:** plugin-only install now verifies the old UV-CORE package is truly removed before proceeding, reducing repeated version-code mismatch failures.
 - **Improved package-state checks:** installer now checks package presence directly via `pm list packages` to make uninstall handling deterministic across devices.
 
 ### Previous release (v1.3.16)
@@ -250,7 +256,7 @@ Version **1.3.54** highlights:
 
 ### Previous release (v1.3.15)
 
-- **Device Installer (plugin-only) reliability:** plugin-only flow now force-uninstalls the old UV-PRO package before install to avoid version/signature mismatch, then proceeds through the plugin confirmation workflow and completion path.
+- **Device Installer (plugin-only) reliability:** plugin-only flow now force-uninstalls the old UV-CORE package before install to avoid version/signature mismatch, then proceeds through the plugin confirmation workflow and completion path.
 - **Maps + add-ons UX flow:** when both options are selected, add-ons preflight runs before imagery, including completion messaging and disconnect guidance before download scope.
 - **Radius zoom options expanded:** radius mode now offers zoom levels through **z18** (state mode remains capped at **z16**) with an explicit warning about z17/z18 data growth.
 

@@ -229,7 +229,7 @@ fi
 rm -f "$MANIFEST_JSON"
 
 section "GitHub plugin repos (network)"
-for repo in "${ATAK_PLUGIN_GITHUB_REPO:-atakmaps/TAK-UV-PRO}" "${ATAK_MESHCORE_PLUGIN_GITHUB_REPO:-atakmaps/TAK-MESHCORE}"; do
+for repo in "${ATAK_PLUGIN_GITHUB_REPO:-atakmaps/TAK-UV-CORE}"; do
     [ -n "$repo" ] || continue
     api="https://api.github.com/repos/${repo}/releases/latest"
     echo "--- $repo ---"
