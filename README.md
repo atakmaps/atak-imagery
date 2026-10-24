@@ -58,11 +58,19 @@ After a successful run, use those desktop entries or the two shell scripts above
 
 ## Current stable release (Linux / source)
 
-**Linux / source release:** `v1.3.56` (tag **`v1.3.56`** on GitHub).
+**Linux / source release:** `v1.3.57` (tag **`v1.3.57`** on GitHub).
 
-**Windows:** Same version as Linux (`v1.3.56`). Build on a Windows VM with PyInstaller — see **Windows build** below.
+**Windows:** Same version as Linux (`v1.3.57`). Build on a Windows VM with PyInstaller — see **Windows build** below.
 
-Version **1.3.56** highlights:
+Version **1.3.57** highlights:
+
+- **Imagery Downloader dialogs fixed after the add-ons step:** the Radius choice, MGRS and other fields could read back empty (radius went to the state screen, a correct MGRS was rejected). Closing a window now always completes, so later dialogs bind to the right window.
+- **Protected-import password prompt no longer freezes** the progress window; it is shown from the main thread.
+- **Add-ons run once:** with Maps + add-ons, the add-ons window and password prompt appear once (before the imagery download) instead of twice.
+- **TAK-UV-CORE is never offered as an add-on:** the downloader also recognises it by package id, not only by APK file name.
+- Welcome screens show **Version 1.3.57**.
+
+### Previous release (v1.3.56)
 
 - **Update dialogs match the app:** "Update complete" and update error notices now use the same font and are centered on screen like the other windows (they were a different font at the top-left).
 - Welcome screens show **Version 1.3.56**.
