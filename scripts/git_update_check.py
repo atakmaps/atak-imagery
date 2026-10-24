@@ -246,6 +246,77 @@ def ask_update_available(
     return bool(result["ok"])
 
 
+def show_notice(parent: object, app_title: str, message: str, *, error: bool = False) -> None:
+    """OK-only notice in the same normal font and centered placement as the update prompt.
+
+    Replaces ``messagebox.showinfo`` / ``showerror``, which Tk draws in a different font
+    and (on Linux) at the top-left of the screen.
+    """
+    import tkinter as tk
+
+    if parent is None:
+        from tkinter import messagebox
+
+        (messagebox.showerror if error else messagebox.showinfo)(app_title, message)
+        return
+
+    from tk_window_scaling import apply_resizable_window, ensure_window_stacking, refit_toplevel_geometry
+
+    _map_offscreen_root(parent)
+    dlg = tk.Toplevel(parent)  # type: ignore[arg-type]
+    dlg.title(app_title)
+    dlg.configure(cursor="arrow")
+    try:
+        if bool(parent.winfo_viewable()):  # type: ignore[attr-defined]
+            dlg.transient(parent)  # type: ignore[arg-type]
+    except Exception:
+        pass
+
+    outer = tk.Frame(dlg, padx=16, pady=14)
+    outer.pack(fill="both", expand=True)
+    msg_lbl = tk.Label(
+        outer,
+        text=message,
+        justify="left",
+        anchor="nw",
+        font=("TkDefaultFont", 10),
+        fg="#a00000" if error else "black",
+        wraplength=520,
+    )
+    msg_lbl.pack(anchor="w", fill="both", expand=True)
+
+    def _sync_wrap(_evt: object = None) -> None:
+        try:
+            w = int(dlg.winfo_width())
+        except tk.TclError:
+            return
+        if w > 80:
+            msg_lbl.configure(wraplength=max(200, w - 48))
+
+    dlg.bind("<Configure>", lambda e: _sync_wrap())
+
+    btns = tk.Frame(outer)
+    btns.pack(fill="x", pady=(14, 0))
+    ok_btn = tk.Button(btns, text="OK", width=10, command=dlg.destroy)
+    ok_btn.pack(side="right")
+    dlg.bind("<Return>", lambda e: dlg.destroy())
+    dlg.bind("<Escape>", lambda e: dlg.destroy())
+    dlg.protocol("WM_DELETE_WINDOW", dlg.destroy)
+
+    apply_resizable_window(dlg, 640, 150, (420, 120))
+    refit_toplevel_geometry(dlg, 640, 150)
+    ensure_window_stacking(dlg)
+    try:
+        dlg.grab_set()
+    except tk.TclError:
+        pass
+    try:
+        ok_btn.focus_set()
+    except tk.TclError:
+        pass
+    dlg.wait_window()
+
+
 def read_version_file(repo_root: Path) -> str:
     vf = repo_root / "VERSION"
     if vf.is_file():
@@ -392,11 +463,7 @@ def _perform_update_and_restart(repo_root: Path, app_title: str, parent: Optiona
         code, _, err = _run_git(repo_root, "stash", "push", "-u", "-m", "atak-pipeline auto-update", timeout=120)
         if code != 0:
             _prep()
-            messagebox.showerror(
-                app_title,
-                f"Could not stash local changes:\n{err or 'git stash failed'}",
-                parent=parent,
-            )
+            show_notice(parent, app_title, f"Could not stash local changes:\n{err or 'git stash failed'}", error=True)
             return
 
     code, _, err = _run_git(repo_root, "checkout", "main", timeout=60)
@@ -404,25 +471,17 @@ def _perform_update_and_restart(repo_root: Path, app_title: str, parent: Optiona
         code, _, err2 = _run_git(repo_root, "checkout", "-b", "main", "origin/main", timeout=60)
         if code != 0:
             _prep()
-            messagebox.showerror(
-                app_title,
-                f"Could not checkout main:\n{err or err2 or 'git checkout failed'}",
-                parent=parent,
-            )
+            show_notice(parent, app_title, f"Could not checkout main:\n{err or err2 or 'git checkout failed'}", error=True)
             return
 
     code, _, err = _run_git(repo_root, "pull", "origin", "main", "--ff-only", timeout=180)
     if code != 0:
         _prep()
-        messagebox.showerror(
-            app_title,
-            f"Could not fast-forward main.\nResolve manually in:\n{repo_root}\n\n{err or 'git pull failed'}",
-            parent=parent,
-        )
+        show_notice(parent, app_title, f"Could not fast-forward main.\nResolve manually in:\n{repo_root}\n\n{err or 'git pull failed'}", error=True)
         return
 
     _prep()
-    messagebox.showinfo(app_title, "Update complete. The application will restart.", parent=parent)
+    show_notice(parent, app_title, "Update complete. The application will restart.")
     os.execv(sys.executable, [sys.executable, *sys.argv])
 
 
@@ -860,8 +919,8 @@ def run_startup_release_update_check(*, app_title: str, script_path: Path) -> No
         prog_win.resizable(False, False)
         frm = tk.Frame(prog_win, padx=20, pady=16)
         frm.pack()
-        tk.Label(frm, text="Downloading update…", font=("Arial", 10, "bold")).pack(anchor="w")
-        file_lbl = tk.Label(frm, text="", font=("Arial", 9), fg="gray40", width=40, anchor="w")
+        tk.Label(frm, text="Downloading update…", font=("TkDefaultFont", 10)).pack(anchor="w")
+        file_lbl = tk.Label(frm, text="", font=("TkDefaultFont", 10), fg="gray40", width=40, anchor="w")
         file_lbl.pack(anchor="w", pady=(4, 6))
         bar = ttk.Progressbar(frm, mode="determinate", length=320, maximum=100)
         bar.pack(fill="x")
@@ -878,19 +937,11 @@ def run_startup_release_update_check(*, app_title: str, script_path: Path) -> No
                 prog_win.destroy()
                 if dl_state.error:
                     _lift()
-                    messagebox.showerror(
-                        app_title,
-                        f"Update failed:\n{dl_state.error}",
-                        parent=root,
-                    )
+                    show_notice(root, app_title, f"Update failed:\n{dl_state.error}", error=True)
                     _safe_destroy_tk(root)
                     return
                 _lift()
-                messagebox.showinfo(
-                    app_title,
-                    "Update complete. The application will now restart.",
-                    parent=root,
-                )
+                show_notice(root, app_title, "Update complete. The application will now restart.")
                 _safe_destroy_tk(root)
                 os.execv(sys.executable, [sys.executable, *sys.argv])
             else:
@@ -907,11 +958,7 @@ def run_startup_release_update_check(*, app_title: str, script_path: Path) -> No
             prog_win.destroy()
             if dl_state.error:
                 _lift()
-                messagebox.showerror(
-                    app_title,
-                    f"Update failed:\n{dl_state.error}",
-                    parent=root,
-                )
+                show_notice(root, app_title, f"Update failed:\n{dl_state.error}", error=True)
                 _safe_destroy_tk(root)
                 return
             on_success()
@@ -935,8 +982,8 @@ def run_startup_release_update_check(*, app_title: str, script_path: Path) -> No
         prog_win.resizable(False, False)
         frm = tk.Frame(prog_win, padx=20, pady=16)
         frm.pack()
-        tk.Label(frm, text="Downloading update…", font=("Arial", 10, "bold")).pack(anchor="w")
-        file_lbl = tk.Label(frm, text="", font=("Arial", 9), fg="gray40", width=48, anchor="w")
+        tk.Label(frm, text="Downloading update…", font=("TkDefaultFont", 10)).pack(anchor="w")
+        file_lbl = tk.Label(frm, text="", font=("TkDefaultFont", 10), fg="gray40", width=48, anchor="w")
         file_lbl.pack(anchor="w", pady=(4, 6))
         bar = ttk.Progressbar(frm, mode="determinate", length=360, maximum=100)
         bar.pack(fill="x")
@@ -946,11 +993,11 @@ def run_startup_release_update_check(*, app_title: str, script_path: Path) -> No
 
         def on_success() -> None:
             _lift()
-            messagebox.showinfo(
+            show_notice(
+                root,
                 app_title,
                 "Download complete. The ATAK Pipeline installer will now run.\n"
                 "This app will close so the update can replace the programs.",
-                parent=root,
             )
             _safe_destroy_tk(root)
             _launch_windows_installer(dest_path)
