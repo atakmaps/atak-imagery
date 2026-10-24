@@ -503,6 +503,17 @@ def _is_uvpro_apk_filename(name: str) -> bool:
     return any(k in compact for k in ("uvpro", "takuvpro", "uvcore", "takuvcore"))
 
 
+def _is_uv_core_package_name(package_name: Optional[str]) -> bool:
+    """True for the TAK-UV-CORE plugin package (never an imagery-downloader add-on).
+
+    The plugin was renamed from UV-PRO to UV-CORE; the Android package may keep the old
+    ``com.uvpro.plugin`` id or move to a ``uvcore`` id, so match both. This catches a
+    renamed APK file whose name no longer contains the usual keywords.
+    """
+    compact = (package_name or "").lower().replace("_", "").replace("-", "").replace(".", "")
+    return bool(compact) and any(k in compact for k in ("uvpro", "uvcore"))
+
+
 def _download_addon_apk_file(
     url: str,
     dest: Path,
@@ -856,6 +867,25 @@ def _log_protected_import_config(log_sink: Callable[[str], None]) -> None:
 
 
 def _prompt_protected_import_password(parent: tk.Misc) -> Optional[str]:
+    """Ask for the protected-import password.
+
+    Called from the download worker thread, so the dialog must be shown on the Tk main
+    thread (``pump_gui_logs`` services ``password_prompt``). Opening a modal dialog from
+    the worker deadlocks the window.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        evt = threading.Event()
+        parent.password_result = None  # type: ignore[attr-defined]
+        parent.password_event = evt  # type: ignore[attr-defined]
+        parent.password_prompt = True  # type: ignore[attr-defined]
+        while not evt.wait(timeout=0.1):
+            if getattr(parent, "closed", False) or getattr(parent, "user_cancelled", False):
+                return None
+        return getattr(parent, "password_result", None)
+    return _ask_protected_import_password_dialog(parent)
+
+
+def _ask_protected_import_password_dialog(parent: tk.Misc) -> Optional[str]:
     ensure_window_stacking(parent)
     try:
         pw = simpledialog.askstring(
@@ -958,6 +988,8 @@ def _build_addons_plan(
         package_name = str(candidate.get("package_name") or "").strip() or None
         if package_name is None and isinstance(apk_path, Path) and apk_path.is_file():
             package_name = _extract_apk_package_name(apk_path)
+        if _is_uv_core_package_name(package_name):
+            continue
         installed = bool(package_name and package_name in installed_pkgs)
         try:
             size_bytes = int(candidate.get("size_bytes") or 0)
@@ -1080,6 +1112,9 @@ def _ensure_plugin_row_apk(
         pass
 
     pkg = _extract_apk_package_name(downloaded)
+    if _is_uv_core_package_name(pkg):
+        log_sink(f"Skipping {name}: TAK-UV-CORE is installed by the Device Installer, not as an add-on.")
+        return None
     if pkg:
         row["package_name"] = pkg
         if cache_key:
@@ -2274,7 +2309,7 @@ class DownloadScopeDialog(tk.Tk):
             font=("Arial", 11, "bold"),
         ).pack(anchor="w", pady=(0, 8))
 
-        self.scope_var = tk.StringVar(value="state")
+        self.scope_var = tk.StringVar(master=self, value="state")
 
         def _focus_radius_name_if_selected() -> None:
             if self.scope_var.get() == "radius":
@@ -2314,7 +2349,7 @@ class DownloadScopeDialog(tk.Tk):
             wraplength=_scope_wrap,
             anchor="w",
         ).pack(anchor="w")
-        self.radius_name_var = tk.StringVar(value="")
+        self.radius_name_var = tk.StringVar(master=self, value="")
         self.radius_name_entry = tk.Entry(radius_name_frame, textvariable=self.radius_name_var)
         self.radius_name_entry.pack(anchor="w", fill="x", pady=(4, 0))
 
@@ -2399,7 +2434,7 @@ class DownloadScopeDialog(tk.Tk):
         raw_row = tk.Frame(scroll_inner)
         raw_row.pack(fill="x", pady=(0, 0))
         raw_row.grid_columnconfigure(0, weight=1)
-        self.raw_var = tk.StringVar(value="")
+        self.raw_var = tk.StringVar(master=self, value="")
         raw_entry = tk.Entry(raw_row, textvariable=self.raw_var)
         raw_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
 
@@ -2446,7 +2481,7 @@ class DownloadScopeDialog(tk.Tk):
         dted_row = tk.Frame(scroll_inner)
         dted_row.pack(fill="x", pady=(0, 0))
         dted_row.grid_columnconfigure(0, weight=1)
-        self.dted_var = tk.StringVar(value="")
+        self.dted_var = tk.StringVar(master=self, value="")
         tk.Entry(dted_row, textvariable=self.dted_var).grid(row=0, column=0, sticky="ew", padx=(0, 8))
 
         def browse_dted() -> None:
@@ -2467,6 +2502,10 @@ class DownloadScopeDialog(tk.Tk):
 
     def submit(self) -> None:
         self.download_scope = self.scope_var.get()
+        log(
+            f"Download scope selected: {self.download_scope!r} "
+            f"(radius name {self.radius_name_var.get().strip()!r})"
+        )
         if self.download_scope == "radius":
             raw_name = self.radius_name_var.get().strip()
             if not raw_name:
@@ -3276,6 +3315,9 @@ class ProgressWindow(tk.Tk):
         self.plugin_action_prompt: Optional[Tuple[str, List[Dict[str, Any]]]] = None
         self.plugin_action_event: Optional[threading.Event] = None
         self.plugin_action_result: Optional[Dict[str, Any]] = None
+        self.password_prompt: bool = False
+        self.password_event: Optional[threading.Event] = None
+        self.password_result: Optional[str] = None
         self.restart_atak_serial: Optional[str] = None
 
     def append_log(self, line: str) -> None:
@@ -4735,6 +4777,19 @@ def pump_gui_logs(window: ProgressWindow) -> None:
                 evt.set()
             window.plugin_action_event = None
 
+        if getattr(window, "password_prompt", False):
+            evt = getattr(window, "password_event", None)
+            window.password_prompt = False
+            cancel_all_scheduled_after(window)
+            try:
+                window.password_result = _ask_protected_import_password_dialog(window)
+            except Exception:
+                window.password_result = None
+            cancel_all_scheduled_after(window)
+            window.password_event = None
+            if evt is not None:
+                evt.set()
+
         if getattr(window, "completion_message", None):
             msg = window.completion_message
             window.completion_message = None
@@ -4828,7 +4883,7 @@ def main() -> None:
         elif do_addons:
             log(
                 "Maps + add-ons selected — skipping upfront device-connect intro. "
-                "Device check/prompt will run before add-ons push after download."
+                "Device check/prompt will run with the add-ons refresh before the imagery download."
             )
         else:
             log(
@@ -5003,7 +5058,9 @@ def main() -> None:
                             "radius_center": None,
                             "radius_miles": None,
                             "preloaded_states": _preloaded,
-                            "refresh_addons_after": do_addons,
+                            # Maps + add-ons already ran the add-ons refresh before the
+                            # imagery workflow (preflight); do not repeat it here.
+                            "refresh_addons_after": False,
                         },
                         daemon=True,
                     )
@@ -5125,7 +5182,9 @@ def main() -> None:
                             "radius_miles": _cov_miles,
                             "radius_region_folder": scope_dlg.radius_region_folder,
                             "preloaded_states": _preloaded,
-                            "refresh_addons_after": do_addons,
+                            # Maps + add-ons already ran the add-ons refresh before the
+                            # imagery workflow (preflight); do not repeat it here.
+                            "refresh_addons_after": False,
                         },
                         daemon=True,
                     )

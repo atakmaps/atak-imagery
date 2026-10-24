@@ -68,6 +68,39 @@ def _map_offscreen_root(root: object) -> None:
             pass
 
 
+def install_tk_destroy_guard() -> None:
+    """Make ``Misc.destroy`` tolerate Tcl commands that were already deleted.
+
+    ``cancel_all_scheduled_after(root)`` cancels ``after`` timers that child widgets
+    scheduled, which deletes their Tcl commands. The child's own ``destroy()`` then fails
+    with ``TclError: can't delete Tcl command`` *before* Tk resets ``tkinter._default_root``.
+    The closed window stays the default root, so every later dialog binds its
+    ``StringVar``s to a dead interpreter: fields show text but read back empty (radius
+    choice reads as "state", MGRS reads as blank). Skipping already-deleted commands
+    keeps destroy complete.
+    """
+    import tkinter as tk
+
+    if getattr(tk.Misc.destroy, "_atak_guarded", False):
+        return
+
+    def destroy(self) -> None:  # type: ignore[no-untyped-def]
+        cmds = self._tclCommands
+        if cmds is not None:
+            for name in list(cmds):
+                try:
+                    self.tk.deletecommand(name)
+                except tk.TclError:
+                    pass
+            self._tclCommands = None
+
+    destroy._atak_guarded = True  # type: ignore[attr-defined]
+    tk.Misc.destroy = destroy  # type: ignore[assignment]
+
+
+install_tk_destroy_guard()
+
+
 def _safe_destroy_tk(root: object) -> None:
     """Cancel pending after handlers before destroy (avoids Tcl_AsyncDelete on Linux)."""
     try:
