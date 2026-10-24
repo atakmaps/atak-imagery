@@ -500,7 +500,7 @@ def _format_asset_label_for_display(src: Path, device_dir: str) -> str:
 
 def _is_uvpro_apk_filename(name: str) -> bool:
     compact = name.lower().replace("_", "").replace("-", "").replace(" ", "")
-    return "uvpro" in compact or "takuvpro" in compact
+    return any(k in compact for k in ("uvpro", "takuvpro", "uvcore", "takuvcore"))
 
 
 def _download_addon_apk_file(

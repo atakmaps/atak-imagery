@@ -109,11 +109,6 @@ WIN_ADB_HINT = (
     "Download: https://developer.android.com/tools/releases/platform-tools\n\n"
 )
 
-MESHCORE_LINUX = 'DEFAULT_MESHCORE_PLUGIN_REPO = Path("/home/paul/Documents/ATAK/Plugins/MeshcoreAtak")'
-MESHCORE_WIN = (
-    "DEFAULT_MESHCORE_PLUGIN_REPO = Path.home() / \"Documents\" / \"ATAK\" / \"Plugins\" / \"MeshcoreAtak\""
-)
-
 _LINUX_ENSURE_GUI_PATH = '''def ensure_gui_path_for_adb() -> None:
     """Desktop .desktop launches often have a short PATH; match common dev locations."""
     home = Path.home()
@@ -252,7 +247,6 @@ def _patch_subprocess_calls(text: str) -> str:
 
 
 def _patch_adb_deploy_win(text: str) -> str:
-    text = text.replace(MESHCORE_LINUX, MESHCORE_WIN)
     text = text.replace(_LINUX_TK_IMPORT_BLOCK, _WIN_TK_IMPORT_BLOCK)
     text = text.replace(_LINUX_ENSURE_GUI_PATH, _WIN_ENSURE_GUI_PATH)
     text = _inject_win_subprocess(text)

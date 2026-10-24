@@ -28,26 +28,15 @@ Windows ships the same two programs as `ATAKDeviceInstaller.exe` and `ATAKImager
 1. Read `deploy.env` at the repo root (or the install copy).
 2. Resolve an ATAK CIV APK. `ATAK_DEPLOY_MANIFEST_URL` wins when set. The manifest JSON carries `atak_version` and `atak_apk_url`. Otherwise `ATAK_CIV_APK_URL` and `ATAK_CIV_VERSION` are used. Versions below 5.6 are rejected by `atak_version_policy.py`.
 3. Install ATAK over adb (`ATAK_PACKAGE_NAME`, default `com.atakmap.app.civ`). Signature mismatch can uninstall and retry. A lower versionCode retries with `--allow-downgrade`, then the legacy `-d` flag.
-4. Install the plugin the user picked, or skip it. The choice screen is five options: ATAK + TAK-UV-PRO, ATAK + TAK-MESHCORE, ATAK only, TAK-UV-PRO only, TAK-MESHCORE only. ATAK-only skips the plugin steps. Plugin-only skips the ATAK install and first-run steps. Every option ends on the same completion screen: exit, then run the Imagery Downloader yourself.
+4. Install TAK-UV-CORE, or skip it. The choice screen is three options: ATAK + TAK-UV-CORE, ATAK only, and TAK-UV-CORE only. ATAK-only skips the plugin steps. Plugin-only skips the ATAK install and first-run steps. Every option ends on the same completion screen: exit, then run the Imagery Downloader yourself. There is no TAK-MESHCORE choice.
 
-These are two APK products. `atakmaps/TAK-UV-PRO` is the UV-PRO plugin (that APK also contains MeshCore support). `atakmaps/TAK-MESHCORE` is the MeshCore-only plugin. The installer offers both. Do not collapse them into one choice because the UV-PRO plugin can speak MeshCore.
-
-UV-PRO resolve order in `resolve_plugin_apk`:
+UV-CORE resolve order in `resolve_plugin_apk`:
 
 1. `ATAK_PLUGIN_APK` — local file, overrides everything else
-2. `ATAK_PLUGIN_GITHUB_REPO` — Latest GitHub release, APK name matched to the phone's ATAK version (default repo `atakmaps/TAK-UV-PRO`)
+2. `ATAK_PLUGIN_GITHUB_REPO` — Latest GitHub release, APK name matched to the phone's ATAK version (default repo `atakmaps/TAK-UV-CORE`)
 3. `ATAK_PLUGIN_REPO` — newest `.apk` under a directory
 4. `ATAK_PLUGIN_APK_URL` — download
 5. `plugin_apk_url` on the manifest
-
-MeshCore resolve order in `resolve_meshcore_plugin_apk` is separate:
-
-1. `ATAK_MESHCORE_PLUGIN_APK` — local file
-2. `ATAK_MESHCORE_PLUGIN_GITHUB_REPO` — Latest release, same ATAK-version match (default `atakmaps/TAK-MESHCORE`)
-3. `ATAK_MESHCORE_PLUGIN_REPO` — newest `.apk` in a directory
-4. `ATAK_MESHCORE_PLUGIN_APK_URL` — download
-
-`ATAK_PLUGIN_APK` does not override the MeshCore choice. Use `ATAK_MESHCORE_PLUGIN_APK` for that.
 
 Optional `ATAK_DEPLOY_REPORT_URL` receives a JSON POST after ATAK install and after plugin install. `ATAK_DEPLOY_API_TOKEN` is a bearer token for that POST. Both stay in local `deploy.env`.
 

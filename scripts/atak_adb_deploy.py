@@ -51,13 +51,6 @@ Configuration (environment variables — in ``deploy.env`` at the project root):
   Alternatively, add optional plugin_apk_url to the manifest JSON (lowest priority
   among network/manifest sources after the above).
 
-  ATAK_MESHCORE_PLUGIN_APK — optional explicit TAK-MESHCORE plugin APK path.
-  ATAK_MESHCORE_PLUGIN_GITHUB_REPO — **recommended**: ``owner/repo`` (e.g. atakmaps/TAK-MESHCORE).
-    Downloads the chosen ``.apk`` from that repo's *Latest* GitHub Release.
-  ATAK_MESHCORE_PLUGIN_APK_URL — optional HTTP(S) URL to a Meshcore ``.apk``.
-  ATAK_MESHCORE_PLUGIN_REPO — optional directory containing TAK-MESHCORE APK(s);
-    newest .apk is selected.
-
   Additional bundled add-on plugins are not installed by this Device Installer.
   Those plugin installs are handled by the Imagery Downloader flow.
 
@@ -120,8 +113,6 @@ except Exception:  # pragma: no cover
 APP_TITLE = "ATAK Device Installer"
 DEFAULT_ATAK_PACKAGE = "com.atakmap.app.civ"
 DEFAULT_PLUGIN_PACKAGE = "com.uvpro.plugin"
-DEFAULT_MESHCORE_PLUGIN_PACKAGE = "com.atakmaps.meshcore.plugin"
-DEFAULT_MESHCORE_PLUGIN_GITHUB_REPO = "atakmaps/TAK-MESHCORE"
 
 # After ATAK APK is installed: show this while the user completes first-run on device.
 ATAK_POST_INSTALL_SETUP_INSTRUCTIONS = (
@@ -265,10 +256,6 @@ def log_startup_context() -> None:
             "ATAK_PLUGIN_GITHUB_REPO",
             "ATAK_PLUGIN_APK",
             "ATAK_PLUGIN_APK_URL",
-            "ATAK_MESHCORE_PLUGIN_APK",
-            "ATAK_MESHCORE_PLUGIN_GITHUB_REPO",
-            "ATAK_MESHCORE_PLUGIN_APK_URL",
-            "ATAK_MESHCORE_PLUGIN_REPO",
             "ATAK_PACKAGE_NAME",
             "ANDROID_SERIAL",
             "ATAK_DEPLOY_REPORT_URL",
@@ -1012,96 +999,6 @@ def resolve_plugin_apk(
     return tmp_path, full, True
 
 
-def resolve_meshcore_plugin_apk(
-    *,
-    atak_version: Optional[str] = None,
-) -> Tuple[Path, str, bool]:
-    """
-    Returns (path to apk, description for report, whether temp file should be deleted)
-    for TAK-Meshcore plugin.
-
-    Resolution order:
-      1. ATAK_MESHCORE_PLUGIN_APK — explicit file
-      2. ATAK_MESHCORE_PLUGIN_GITHUB_REPO — GitHub Releases latest .apk
-      3. ATAK_MESHCORE_PLUGIN_REPO — newest .apk under directory
-      4. ATAK_MESHCORE_PLUGIN_APK_URL — download URL
-    """
-    env_apk = env_optional("ATAK_MESHCORE_PLUGIN_APK")
-    if env_apk:
-        p = Path(env_apk).expanduser()
-        if not p.is_file():
-            raise FileNotFoundError(f"ATAK_MESHCORE_PLUGIN_APK is not a file: {p}")
-        return p, str(p), False
-
-    gh = env_optional("ATAK_MESHCORE_PLUGIN_GITHUB_REPO") or DEFAULT_MESHCORE_PLUGIN_GITHUB_REPO
-    if gh:
-        dl_url, rel_tag, asset_name = github_latest_release_plugin_apk(
-            gh, atak_version=atak_version
-        )
-        log(
-            f"Meshcore plugin APK from GitHub Releases (latest): {gh} @ {rel_tag} — asset {asset_name!r}"
-        )
-        fd, tmp = tempfile.mkstemp(suffix=".apk")
-        os.close(fd)
-        tmp_path = Path(tmp)
-        download_file(dl_url, tmp_path)
-        return tmp_path, f"github-releases:{gh}@{rel_tag}:{asset_name}", True
-
-    env_repo = env_optional("ATAK_MESHCORE_PLUGIN_REPO")
-    if env_repo:
-        root = Path(env_repo).expanduser()
-        apks = [x for x in root.rglob("*.apk") if x.is_file()]
-        if not apks:
-            raise FileNotFoundError(f"No .apk files under ATAK_MESHCORE_PLUGIN_REPO: {root}")
-        newest = max(apks, key=lambda x: x.stat().st_mtime)
-        return newest, str(newest), False
-
-    plugin_url = env_optional("ATAK_MESHCORE_PLUGIN_APK_URL")
-    if plugin_url:
-        fd, tmp = tempfile.mkstemp(suffix=".apk")
-        os.close(fd)
-        tmp_path = Path(tmp)
-        download_file(plugin_url, tmp_path)
-        return tmp_path, plugin_url, True
-
-    raise RuntimeError(
-        "No TAK-MESHCORE plugin APK source found.\n\n"
-        "Set ATAK_MESHCORE_PLUGIN_GITHUB_REPO (recommended, e.g. atakmaps/TAK-MESHCORE), "
-        "ATAK_MESHCORE_PLUGIN_APK (explicit file), ATAK_MESHCORE_PLUGIN_APK_URL, "
-        "or ATAK_MESHCORE_PLUGIN_REPO (directory containing Meshcore .apk)."
-    )
-
-
-def detect_apk_package_name(apk_path: Path) -> Optional[str]:
-    aapt = shutil.which("aapt")
-    if aapt:
-        try:
-            r = subprocess.run([aapt, "dump", "badging", str(apk_path)], capture_output=True, text=True, timeout=20)
-            if r.returncode == 0:
-                m = re.search(r"package:\s+name='([^']+)'", r.stdout or "")
-                if m:
-                    return m.group(1).strip() or None
-        except Exception:
-            pass
-
-    apkanalyzer = shutil.which("apkanalyzer")
-    if apkanalyzer:
-        try:
-            r = subprocess.run(
-                [apkanalyzer, "manifest", "application-id", str(apk_path)],
-                capture_output=True,
-                text=True,
-                timeout=20,
-            )
-            if r.returncode == 0:
-                pkg = (r.stdout or "").strip()
-                if pkg:
-                    return pkg
-        except Exception:
-            pass
-    return None
-
-
 def resolve_target_atak_version(
     *,
     cached_version: str = "",
@@ -1183,7 +1080,7 @@ class DeployWizard(tk.Tk):
         self._manifest_cache: Optional[Dict[str, Any]] = None
         self._atak_version_value = ""
         self._plugin_report_label = ""
-        # One of: both, both_meshcore, atak, plugin, plugin_meshcore.
+        # One of: both, atak, plugin.
         self._install_choice: str = "both"
 
         outer = tk.Frame(self, padx=16, pady=16)
@@ -1254,11 +1151,9 @@ class DeployWizard(tk.Tk):
         self._choice_var = tk.StringVar(value="both")
         _rb_wrap = scaled_int(620, _dw_scale)
         for val, label in (
-            ("both", "ATAK + TAK-UV-PRO plugin"),
-            ("both_meshcore", "ATAK + TAK-MESHCORE plugin"),
+            ("both", "ATAK + TAK-UV-CORE plugin"),
             ("atak", "ATAK only"),
-            ("plugin", "TAK-UV-PRO plugin only"),
-            ("plugin_meshcore", "TAK-MESHCORE plugin only"),
+            ("plugin", "TAK-UV-CORE plugin only"),
         ):
             rb = tk.Radiobutton(
                 self._selection_outer,
@@ -1289,24 +1184,14 @@ class DeployWizard(tk.Tk):
         return bool(self.manifest_url) or bool(self._inline_atak_manifest)
 
     def _needs_atak_install(self) -> bool:
-        return self._install_choice in ("atak", "both", "both_meshcore")
+        return self._install_choice in ("atak", "both")
 
     def _needs_plugin_install(self) -> bool:
-        return self._install_choice in ("both", "both_meshcore", "plugin", "plugin_meshcore")
-
-    def _plugin_variant(self) -> str:
-        if self._install_choice in ("both_meshcore", "plugin_meshcore"):
-            return "meshcore"
-        if self._install_choice in ("both", "plugin"):
-            return "uvpro"
-        return ""
+        return self._install_choice in ("both", "plugin")
 
     def _plugin_display_name(self) -> str:
-        variant = self._plugin_variant()
-        if variant == "meshcore":
-            return "TAK-MESHCORE"
-        if variant == "uvpro":
-            return "TAK-UV-PRO"
+        if self._needs_plugin_install():
+            return "TAK-UV-CORE"
         return "plugin"
 
     def _resolve_url_base(self) -> str:
@@ -1395,8 +1280,7 @@ class DeployWizard(tk.Tk):
             self.step_label.configure(text="")
             self.body.configure(
                 text=(
-                    "This program will install ATAK and/or a supported plugin "
-                    "(TAK-UV-PRO or TAK-MESHCORE).\n\n"
+                    "This program will install ATAK and/or the TAK-UV-CORE plugin.\n\n"
                     "The installer will guide you through the process.\n\n"
                     "Upon completion, run the ATAK Imagery Downloader from your start menu or desktop to download any required imagery."
                 )
@@ -1561,7 +1445,7 @@ class DeployWizard(tk.Tk):
         os.environ["ANDROID_SERIAL"] = serial
         _lg.info("Device selected serial=%s (count=%s)", serial, len(devices))
         # Skip ATAK install steps when plugin-only
-        if self._install_choice in ("plugin", "plugin_meshcore"):
+        if self._install_choice == "plugin":
             self._advance(5)
         else:
             self._advance(3)
@@ -1725,7 +1609,6 @@ class DeployWizard(tk.Tk):
             def ui_install(msg: str) -> None:
                 self._set_install_status(msg)
 
-            plugin_variant = self._plugin_variant()
             manifest = self._manifest_cache
             if manifest is None:
                 if self.manifest_url:
@@ -1733,37 +1616,30 @@ class DeployWizard(tk.Tk):
                     manifest = fetch_manifest(self.manifest_url)
                 elif self._inline_atak_manifest:
                     manifest = dict(self._inline_atak_manifest)
+            if manifest is None:
+                raise RuntimeError("No ATAK deploy configuration")
             target_atak = resolve_target_atak_version(
                 cached_version=self._atak_version_value,
                 manifest=manifest,
             )
-            if plugin_variant == "meshcore":
-                _lg.info("Step 5: resolving TAK-MESHCORE plugin APK source...")
-                apk_path, report_label, is_temp = resolve_meshcore_plugin_apk(
-                    atak_version=target_atak or None,
-                )
-                package_name = detect_apk_package_name(apk_path) or DEFAULT_MESHCORE_PLUGIN_PACKAGE
-            else:
-                if manifest is None:
-                    raise RuntimeError("No ATAK deploy configuration")
-                _lg.info("Step 5: resolving UV-PRO plugin APK source...")
-                apk_path, report_label, is_temp = resolve_plugin_apk(
-                    manifest,
-                    self._resolve_url_base(),
-                    atak_version=target_atak or None,
-                )
-                package_name = DEFAULT_PLUGIN_PACKAGE
+            _lg.info("Step 5: resolving UV-CORE plugin APK source...")
+            apk_path, report_label, is_temp = resolve_plugin_apk(
+                manifest,
+                self._resolve_url_base(),
+                atak_version=target_atak or None,
+            )
+            package_name = DEFAULT_PLUGIN_PACKAGE
             self._plugin_apk_temp = apk_path if is_temp else None
             self._plugin_report_label = report_label
 
-            if self._install_choice in ("plugin", "plugin_meshcore"):
+            if self._install_choice == "plugin":
                 uninstall_package(ser, package_name, ui_install, require_absent=True)
 
             try:
                 launch_atak(ser)
                 time.sleep(15.0)
             except Exception:
-                log("launch_atak before UV-PRO install failed")
+                log("launch_atak before UV-CORE install failed")
 
             install_apk(
                 self.selected_serial,
@@ -1798,10 +1674,10 @@ class DeployWizard(tk.Tk):
             self._focus_for_dialog()
             messagebox.showerror(APP_TITLE, f"Could not install plugin:\n{err}", parent=self)
             # Go back to ATAK setup step if we did both, or connect step if plugin-only
-            self._step = 4 if self._install_choice in ("both", "both_meshcore") else 2
+            self._step = 4 if self._install_choice == "both" else 2
             self._render_step()
             return
-        if self._install_choice in ("plugin", "plugin_meshcore"):
+        if self._install_choice == "plugin":
             try:
                 launch_atak(self.selected_serial or "")
             except Exception:

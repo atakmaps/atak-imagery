@@ -22,7 +22,7 @@ APP_NAME_DEVICE="ATAK Device Installer"
 # Default sources for ATAK Device Installer (USB). Forks can override before running:
 #   ATAK_BUNDLE_MANIFEST_URL=... ATAK_BUNDLE_PLUGIN_REPO=... bash install_linux.sh
 ATAK_BUNDLE_MANIFEST_URL="${ATAK_BUNDLE_MANIFEST_URL:-http://31.220.30.74/atak/manifest.json}"
-ATAK_BUNDLE_PLUGIN_REPO="${ATAK_BUNDLE_PLUGIN_REPO:-atakmaps/TAK-UV-PRO}"
+ATAK_BUNDLE_PLUGIN_REPO="${ATAK_BUNDLE_PLUGIN_REPO:-atakmaps/TAK-UV-CORE}"
 
 deb_installed() {
     local pkg="$1"
@@ -281,9 +281,6 @@ append_deploy_env_defaults() {
     fi
     if ! grep -qE "^[[:space:]]*ATAK_PLUGIN_GITHUB_REPO=" "$f" 2>/dev/null; then
         echo "ATAK_PLUGIN_GITHUB_REPO=$ATAK_BUNDLE_PLUGIN_REPO" >> "$f"
-    fi
-    if ! grep -qE "^[[:space:]]*ATAK_MESHCORE_PLUGIN_GITHUB_REPO=" "$f" 2>/dev/null; then
-        echo "ATAK_MESHCORE_PLUGIN_GITHUB_REPO=atakmaps/TAK-MESHCORE" >> "$f"
     fi
     if ! grep -qE "^[[:space:]]*ATAK_ADDON_PLUGIN_GITHUB_REPO=" "$f" 2>/dev/null; then
         echo "ATAK_ADDON_PLUGIN_GITHUB_REPO=atakmaps/atak-imagery" >> "$f"

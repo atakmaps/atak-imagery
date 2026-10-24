@@ -43,7 +43,6 @@ Sync **refuses to run** if Linux runtime files contain Windows-only markers (`wi
 
 | # | Change | Why | Sync function |
 |---|--------|-----|----------------|
-| A1 | `DEFAULT_MESHCORE_PLUGIN_REPO` → `%USERPROFILE%\Documents\ATAK\Plugins\MeshcoreAtak` | Linux path invalid on Windows | `_patch_adb_deploy_win` |
 | A2 | Split imports: tkinter / `git_update_check` / `tk_window_scaling` in separate `try` blocks | PyInstaller import failures should not disable entire GUI | `_patch_adb_deploy_win` |
 | A3 | Replace `ensure_gui_path_for_adb()` body with Windows adb search paths (`AppData`, `tools\platform-tools` beside EXE/repo) | Desktop/EXE launches have short PATH | `_patch_adb_deploy_win` |
 | A4 | `PROJECT_ROOT` = directory beside frozen EXE (not `MEIPASS`) | `deploy.env` lives next to installed EXE | `_patch_adb_deploy_win` |

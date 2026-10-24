@@ -17,7 +17,7 @@ In the description include:
 - whether the change is Linux-only or also needs a Windows sync
 - a note if you touched `VERSION`, `deploy.env.example`, or release packaging
 
-Do not put plugin source from `TAK-UV-PRO` or `TAK-MESHCORE` into this repository. The installer downloads those APKs from GitHub.
+Do not put plugin source from `TAK-UV-CORE` into this repository. The installer downloads that APK from GitHub.
 
 ## Build
 
@@ -43,7 +43,7 @@ Do not edit `windows_build/*_win.py` to fix a bug that also exists on Linux. Fix
 ## What needs extra care
 
 - Leave `atak_downloader_from_installer.py` as the thin skip-intro entry. The Device Installer does not launch it; the last screen tells the user to start the Imagery Downloader. The standalone app stays `atak_downloader_finalbuild.py`.
-- Keep TAK-UV-PRO and TAK-MESHCORE as separate installer choices and separate APK resolve orders. Do not merge them because the UV-PRO APK also supports MeshCore.
+- Device Installer choices are ATAK + TAK-UV-CORE, ATAK only, and TAK-UV-CORE only. Do not add a TAK-MESHCORE option.
 - ATAK older than 5.6 stays rejected (`scripts/atak_version_policy.py`).
 - `scripts/build_release.py` is the Linux user zip. It ships `README.md` and the runtime, not these developer docs, not `deploy.env`, and not Windows packaging.
 - A release ( `VERSION` bump, zip, git tag, `vX.Y.Z-plugin-assets` assets, Windows EXE) is something the maintainer asks for.
