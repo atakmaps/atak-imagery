@@ -1,6 +1,6 @@
 # ATAK Imagery developer guide
 
-Updated: 2026-10-10
+Updated: 2026-10-25
 
 This is how the pipeline is built. Binding rules are in [`CONSTITUTION.md`](../CONSTITUTION.md). Pull requests are in [`CONTRIBUTING.md`](../CONTRIBUTING.md). AI assistants start at [`AGENTS.md`](../AGENTS.md).
 

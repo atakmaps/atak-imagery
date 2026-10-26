@@ -1,10 +1,10 @@
 # ATAK Imagery Constitution
 
-Updated: 2026-10-10
+Updated: 2026-10-25
 
 This file is binding. `AGENTS.md`, `docs/DEVELOPER-GUIDE.md`, `CONTRIBUTING.md`, the README, and local Cursor rules describe how to comply with it. When they disagree with this file, this file wins and the other document is wrong.
 
-The maintainer reviews and merges pull requests. `main` is branch-protected. The maintainer may bypass that protection for their own work. Everyone else lands changes through a pull request the maintainer accepts.
+The maintainer reviews and merges pull requests. `main` is branch-protected. Agents open a pull request. They do not push to `main`.
 
 GitHub: `atakmaps/atak-imagery`.
 
