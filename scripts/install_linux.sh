@@ -1,6 +1,27 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Usage: ./install_linux.sh [--quiet|-q]
+#   --quiet  unattended: no pop-up windows, no questions, no hints, and the setup folder is
+#            never deleted. Progress lines in the terminal are unchanged.
+# Options are checked first, before anything is installed or changed.
+QUIET=0
+for _arg in "$@"; do
+    case "$_arg" in
+        --quiet|-q) QUIET=1 ;;
+        -h|--help)
+            echo "Usage: ./install_linux.sh [--quiet|-q]"
+            echo "  --quiet, -q   Do not show pop-up windows (terminal output only)."
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $_arg" >&2
+            echo "Usage: ./install_linux.sh [--quiet|-q]" >&2
+            exit 2
+            ;;
+    esac
+done
+
 # Bundle you extracted or cloned (e.g. ~/Downloads/atak-imagery). Used only as a source copy.
 # After a successful install, this folder is removed automatically when it is
 # ~/Downloads/atak-imagery (name must be atak-imagery). Set ATAK_INSTALL_KEEP_SOURCE=1 to keep it.
@@ -565,6 +586,10 @@ cleanup_legacy_shortcuts() {
 
 # Remove the extracted bundle after install (app lives in INSTALL_ROOT). Safe: cd out first.
 maybe_remove_source_extract() {
+    # --quiet never deletes anything (so it can never remove a git clone) and prints no hint.
+    if [ "$QUIET" -eq 1 ]; then
+        return 0
+    fi
     if [ "$SOURCE_ROOT" = "$INSTALL_ROOT" ]; then
         return 0
     fi
@@ -594,7 +619,7 @@ maybe_remove_source_extract() {
         return 0
     fi
 
-    if [ "$do_remove" -eq 0 ] && command -v zenity >/dev/null 2>&1; then
+    if [ "$do_remove" -eq 0 ] && [ "$QUIET" -eq 0 ] && command -v zenity >/dev/null 2>&1; then
         if zenity --question \
             --title="ATAK Imagery installer" \
             --text="Remove the folder you ran the installer from?\n\n$src_p\n\nThe application is installed in:\n$inst_p" \
@@ -647,7 +672,7 @@ if [ "${REMOVED_SOURCE_EXTRACT:-0}" -eq 1 ]; then
     ZENITY_EXTRA="\n\nThe extracted setup folder was removed (the app stays in the install location above)."
 fi
 
-if command -v zenity >/dev/null 2>&1; then
+if [ "$QUIET" -eq 0 ] && command -v zenity >/dev/null 2>&1; then
     zenity --info \
         --title="ATAK Imagery installer" \
         --text="Installation complete.\n\nApplications are installed in:\n$ROOT\n\nThis folder is separate from where you extracted the zip.${ZENITY_EXTRA}\n\nThe first time, open ATAK Device Installer (USB install of ATAK and your plugin, then the map tools).\n\nLater, for more imagery: ATAK Imagery Downloader." \

@@ -11,6 +11,11 @@ if [ ! -f "$SCRIPT" ]; then
     exit 1
 fi
 
+# With options (e.g. --quiet), run directly and pass them on. The installer rejects unknown options.
+if [ "$#" -gt 0 ]; then
+    exec "$SCRIPT" "$@"
+fi
+
 # If not already running in a real terminal, relaunch in one.
 if [ -z "${TERM:-}" ] || [ "${TERM:-dumb}" = "dumb" ]; then
     if command -v x-terminal-emulator >/dev/null 2>&1; then
